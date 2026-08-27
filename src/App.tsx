@@ -4621,6 +4621,26 @@ useEffect(() => {
           />
         </div>
       </>
+    ) : settingsSection === 'planUsage' ? (
+      <>
+        <SettingsPlaceholder
+          title={tDesktop('settings.planUsage')}
+          note="Your Student Basic plan, usage, and billing."
+        />
+        <div className="settings-v2__group">
+          <SettingsRow
+            name={tDesktop('settings.planUsage')}
+            help="View your plan, usage, and manage billing."
+            control={
+              showAccountPanel ? (
+                <button type="button" className="v2-btn" onClick={() => setBillingPlanOpen(true)}>
+                  Open
+                </button>
+              ) : undefined
+            }
+          />
+        </div>
+      </>
     ) : (
       <SettingsPlaceholder
         title={tDesktop(SETTINGS_PLACEHOLDER_TITLE[settingsSection])}
@@ -5234,6 +5254,10 @@ useEffect(() => {
           profile={profileRow ?? null}
           onSaved={(row) => onProfileRowChange(row)}
           onSignOut={() => {
+            setAccountSettingsOpen(false)
+            onSignOut?.()
+          }}
+          onAccountDeleted={() => {
             setAccountSettingsOpen(false)
             onSignOut?.()
           }}
