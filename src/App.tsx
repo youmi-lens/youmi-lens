@@ -105,6 +105,7 @@ import {
 } from './lib/userProfile'
 import { AccountSettingsModal } from './components/AccountSettingsModal'
 import { UpdaterEntry } from './components/UpdaterEntry'
+import { AiPreferencesSection } from './components/AiPreferencesSection'
 import { AccessUsageModal } from './components/AccessUsageModal'
 import { BillingPlanModal } from './components/BillingPlanModal'
 import { AuthScreens } from './components/AuthScreens'
@@ -4637,6 +4638,54 @@ useEffect(() => {
                   Open
                 </button>
               ) : undefined
+            }
+          />
+        </div>
+      </>
+    ) : settingsSection === 'advancedAi' ? (
+      <>
+        <SettingsPlaceholder
+          title={tDesktop(SETTINGS_PLACEHOLDER_TITLE.advancedAi)}
+          note="Bring your own API key for AI processing, or use the hosted default."
+        />
+        <div className="settings-v2__group">
+          <AiPreferencesSection allowByok />
+        </div>
+      </>
+    ) : settingsSection === 'autoUpdate' ? (
+      <>
+        <SettingsPlaceholder
+          title={tDesktop(SETTINGS_PLACEHOLDER_TITLE.autoUpdate)}
+          note="Youmi Lens checks for updates automatically and never interrupts an active recording."
+        />
+        <div className="settings-v2__group">
+          <UpdaterEntry
+            recordingSafety={{
+              recorderStatus: recorder.status as 'idle' | 'recording' | 'paused',
+              saveInFlight: saveOrFinishBusy,
+              recoveringSession: Boolean(recoveryBusyId),
+            }}
+          />
+        </div>
+      </>
+    ) : settingsSection === 'support' ? (
+      <>
+        <SettingsPlaceholder
+          title={tDesktop(SETTINGS_PLACEHOLDER_TITLE.support)}
+          note="Youmi Lens is available as a free educational tool. Please report issues with recording, live captions, translation, or summaries."
+        />
+        <div className="settings-v2__group">
+          <SettingsRow
+            name="Email support"
+            help="youmilens@gmail.com"
+            control={
+              <button
+                type="button"
+                className="v2-btn"
+                onClick={() => void openExternalContact(SUPPORT_CONTACT_URL)}
+              >
+                Email support
+              </button>
             }
           />
         </div>

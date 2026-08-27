@@ -14,7 +14,6 @@ import {
   type UserProfileRow,
 } from '../lib/userProfile'
 import { deleteAccount } from '../lib/account'
-import { AiPreferencesSection } from './AiPreferencesSection'
 import { INTERNAL_BETA_NOTE, PRODUCT_VERSION_LABEL } from '../lib/productMeta'
 import './AccountSettingsModal.css'
 
@@ -163,8 +162,6 @@ export function AccountSettingsModal({
         </div>
 
         <div className="account-settings-modal__body">
-          <AiPreferencesSection allowByok />
-
           <label className="account-settings-modal__field">
             <span className="account-settings-modal__field-label">Email</span>
             <input
