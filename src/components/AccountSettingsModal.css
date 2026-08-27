@@ -1,0 +1,194 @@
+/* Account settings modal — Desktop V2 surface, reusing desktop-v2-tokens.css. */
+
+.desktop-v2 .account-settings-modal__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+.desktop-v2 .account-settings-modal__dialog {
+  width: 100%;
+  max-width: 420px;
+  border: 1px solid var(--v2-rule);
+  background: var(--v2-paper);
+  border-radius: var(--v2-radius-lg);
+  box-shadow: 0 18px 48px rgba(6, 27, 52, 0.18);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.desktop-v2 .account-settings-modal__header {
+  padding: 24px 24px 12px;
+  border-bottom: 1px solid var(--v2-rule);
+}
+
+.desktop-v2 .account-settings-modal__title {
+  margin: 0 0 4px;
+  font-size: var(--v2-text-base);
+  font-weight: 700;
+  color: var(--v2-navy);
+}
+
+.desktop-v2 .account-settings-modal__lead {
+  margin: 0;
+  font-size: var(--v2-text-sm);
+  color: var(--v2-muted);
+}
+
+.desktop-v2 .account-settings-modal__body {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 20px 24px;
+}
+
+.desktop-v2 .account-settings-modal__field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.desktop-v2 .account-settings-modal__field-label {
+  font-size: var(--v2-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--v2-faint);
+}
+
+.desktop-v2 .account-settings-modal__input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  padding: 9px 12px;
+  border-radius: var(--v2-radius-md);
+  border: 1px solid var(--v2-rule);
+  font-size: var(--v2-text-base);
+  font: inherit;
+  color: var(--v2-ink-2);
+  background: var(--v2-paper);
+}
+
+.desktop-v2 .account-settings-modal__input:read-only {
+  background: var(--v2-paper-2);
+  color: var(--v2-muted);
+}
+
+.desktop-v2 .account-settings-modal__message {
+  margin: 12px 0 0;
+  font-size: var(--v2-text-sm);
+}
+
+.desktop-v2 .account-settings-modal__message--ok {
+  color: var(--v2-success-ink);
+}
+
+.desktop-v2 .account-settings-modal__message--error {
+  color: var(--v2-danger-ink);
+}
+
+.desktop-v2 .account-settings-modal__meta {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+.desktop-v2 .account-settings-modal__meta-title {
+  margin: 0 0 6px;
+  font-size: var(--v2-text-sm);
+  font-weight: 700;
+  color: var(--v2-ink-2);
+}
+
+.desktop-v2 .account-settings-modal__meta-note {
+  margin: 0;
+  font-size: var(--v2-text-sm);
+  color: var(--v2-muted);
+  line-height: 1.5;
+}
+
+.desktop-v2 .account-settings-modal__danger-section {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+.desktop-v2 .account-settings-modal__danger-title {
+  margin: 0 0 4px;
+  font-size: var(--v2-text-sm);
+  font-weight: 700;
+  color: var(--v2-ink-2);
+}
+
+.desktop-v2 .account-settings-modal__danger-note {
+  margin: 0 0 10px;
+  font-size: var(--v2-text-sm);
+  color: var(--v2-muted);
+  line-height: 1.5;
+}
+
+.desktop-v2 .account-settings-modal__footer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 24px 24px;
+  border-top: 1px solid var(--v2-rule);
+  background: var(--v2-paper);
+}
+
+.desktop-v2 .account-settings-modal__btn {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  border-radius: var(--v2-radius-pill);
+  font-size: var(--v2-text-base);
+  font-weight: 650;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-family: inherit;
+}
+
+.desktop-v2 .account-settings-modal__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.desktop-v2 .account-settings-modal__btn--primary {
+  background: var(--v2-navy);
+  color: var(--v2-navy-ink);
+  border-color: var(--v2-navy);
+}
+
+.desktop-v2 .account-settings-modal__btn--primary:hover:not(:disabled) {
+  background: var(--v2-navy-deep);
+}
+
+.desktop-v2 .account-settings-modal__btn--secondary {
+  background: var(--v2-paper);
+  color: var(--v2-ink-2);
+  border-color: var(--v2-rule);
+}
+
+.desktop-v2 .account-settings-modal__btn--secondary:hover:not(:disabled) {
+  background: var(--v2-paper-2);
+}
+
+.desktop-v2 .account-settings-modal__btn--danger {
+  background: var(--v2-record-soft);
+  color: var(--v2-danger-ink);
+  border-color: rgba(214, 59, 69, 0.28);
+}
+
+.desktop-v2 .account-settings-modal__btn--danger:hover:not(:disabled) {
+  background: #ffe4e6;
+}

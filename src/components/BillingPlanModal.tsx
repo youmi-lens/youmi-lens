@@ -6,7 +6,6 @@
  * No client-side entitlement activation; no return/focus/deep-link inference.
  */
 import { useEffect, useId, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import { designTokens } from '../design-system/tokens'
 import { useAuth } from '../useAuth'
 import { useBilling, type BillingHookError, type UseBillingResult } from '../hooks/useBilling'
 import {
@@ -145,7 +144,12 @@ function RefreshPlanButton({
 }) {
   if (!onRefreshPlan) return null
   return (
-    <button type="button" className="ds-btn ds-btn--secondary" onClick={onRefreshPlan} disabled={disabled}>
+    <button
+      type="button"
+      className="billing-plan-modal__btn billing-plan-modal__btn--secondary"
+      onClick={onRefreshPlan}
+      disabled={disabled}
+    >
       Refresh plan status
     </button>
   )
@@ -251,7 +255,7 @@ export function PlanCheckoutPanel({
       </ul>
       <button
         type="button"
-        className="ds-btn ds-btn--primary billing-plan-modal__upgrade"
+        className="billing-plan-modal__btn billing-plan-modal__btn--primary billing-plan-modal__upgrade"
         aria-label={checkoutBusy ? 'Opening Checkout' : upgradeLabel}
         aria-busy={checkoutBusy || undefined}
         disabled={controlsDisabled}
@@ -290,7 +294,7 @@ export function ManagePortalPanel({
     <div className="billing-plan-modal__manage">
       <button
         type="button"
-        className="ds-btn ds-btn--secondary billing-plan-modal__manage-btn"
+        className="billing-plan-modal__btn billing-plan-modal__btn--secondary billing-plan-modal__manage-btn"
         aria-label={portalBusy ? 'Opening subscription management' : label}
         aria-busy={portalBusy || undefined}
         disabled={controlsDisabled}
@@ -382,7 +386,11 @@ export function BillingPlanContent({
         <h3 className="billing-plan-modal__headline">Billing information is temporarily unavailable</h3>
         <p className="billing-plan-modal__copy">{state.reason}</p>
         {onRetry ? (
-          <button type="button" className="ds-btn ds-btn--secondary" onClick={onRetry}>
+          <button
+            type="button"
+            className="billing-plan-modal__btn billing-plan-modal__btn--secondary"
+            onClick={onRetry}
+          >
             Retry
           </button>
         ) : null}
@@ -605,7 +613,6 @@ function BillingPlanModalFrame({
   billing: UseBillingResult
   returnFeedback: BillingReturnRefreshFeedback
 }) {
-  const t = designTokens
   const titleId = useId()
   const [selectedPlan, setSelectedPlan] = useState<BillingPlanCode>(DEFAULT_PLAN)
   const [checkoutBusy, setCheckoutBusy] = useState(false)
@@ -699,20 +706,7 @@ function BillingPlanModalFrame({
 
   return (
     <div
-      className="ds-root billing-plan-modal__overlay"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 2000,
-        background: 'rgba(15, 23, 42, 0.45)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: `${t.spacing[6]}px`,
-        boxSizing: 'border-box',
-        overflow: 'hidden',
-        overscrollBehavior: 'contain',
-      }}
+      className="desktop-v2 billing-plan-modal__overlay"
       role="presentation"
       data-testid="billing-plan-overlay"
       onMouseDown={(e: ReactMouseEvent<HTMLDivElement>) => handleBillingModalOverlayMouseDown(e, onClose)}
@@ -722,20 +716,8 @@ function BillingPlanModalFrame({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-busy={busy || undefined}
-        className="ds-card billing-plan-modal__dialog"
+        className="billing-plan-modal__dialog"
         data-testid="billing-plan-dialog"
-        style={{
-          width: '100%',
-          maxWidth: 480,
-          border: `1px solid ${t.colors.border}`,
-          background: t.colors.surface,
-          borderRadius: t.radii.xl,
-          boxShadow: '0 18px 48px rgba(15, 23, 42, 0.18)',
-          maxHeight: '90vh',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="billing-plan-modal__titlebar">

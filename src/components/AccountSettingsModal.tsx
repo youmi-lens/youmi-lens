@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { designTokens } from '../design-system/tokens'
 import {
   DISPLAY_NAME_MAX_LENGTH,
   DISPLAY_NAME_TAKEN_MESSAGE,
@@ -14,8 +13,10 @@ import {
   upsertProfileUsername,
   type UserProfileRow,
 } from '../lib/userProfile'
+import { deleteAccount } from '../lib/account'
 import { AiPreferencesSection } from './AiPreferencesSection'
 import { INTERNAL_BETA_NOTE, PRODUCT_VERSION_LABEL } from '../lib/productMeta'
+import './AccountSettingsModal.css'
 
 type Props = {
   open: boolean
@@ -26,6 +27,8 @@ type Props = {
   profile: UserProfileRow | null
   onSaved: (row: UserProfileRow | null) => void
   onSignOut: () => void
+  /** Called after the account is permanently deleted server-side; caller must sign out / clear local state. */
+  onAccountDeleted: () => void
 }
 
 export function AccountSettingsModal({
@@ -37,20 +40,22 @@ export function AccountSettingsModal({
   profile,
   onSaved,
   onSignOut,
+  onAccountDeleted,
 }: Props) {
-  const t = designTokens
-  const px = (n: number) => `${n}px`
   const [displayName, setDisplayName] = useState('')
   const [phone, setPhone] = useState('')
   const [busy, setBusy] = useState(false)
   const [signOutBusy, setSignOutBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [okMsg, setOkMsg] = useState<string | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteErr, setDeleteErr] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
     setErr(null)
     setOkMsg(null)
+    setDeleteErr(null)
     setDisplayName(profile?.username?.trim() ?? '')
     setPhone(profile?.phone?.trim() ?? '')
   }, [open, profile])
@@ -111,24 +116,32 @@ export function AccountSettingsModal({
     }
   }
 
+  const handleDeleteAccount = async () => {
+    if (deleteBusy) return
+    const firstConfirm = window.confirm(
+      'Delete your Youmi Lens account? This permanently removes your recordings, courses, and account data. This cannot be undone.',
+    )
+    if (!firstConfirm) return
+    const secondConfirm = window.confirm('Are you absolutely sure? This is your last chance to cancel.')
+    if (!secondConfirm) return
+
+    setDeleteErr(null)
+    setDeleteBusy(true)
+    try {
+      await deleteAccount()
+      onAccountDeleted()
+    } catch (e) {
+      setDeleteErr(e instanceof Error ? e.message : 'Could not delete account. Please try again or contact support.')
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
   if (!open) return null
 
   return (
     <div
-      className="ds-root"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        zIndex: 2000,
-        background: 'rgba(15, 23, 42, 0.45)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: px(t.spacing[6]),
-        boxSizing: 'border-box',
-        overflow: 'hidden',
-        overscrollBehavior: 'contain',
-      }}
+      className="desktop-v2 account-settings-modal__overlay"
       role="presentation"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose()
@@ -137,212 +150,87 @@ export function AccountSettingsModal({
       <div
         role="dialog"
         aria-labelledby="account-settings-title"
-        className="ds-card"
-        style={{
-          width: '100%',
-          maxWidth: 420,
-          border: `1px solid ${t.colors.border}`,
-          background: t.colors.surface,
-          borderRadius: t.radii.xl,
-          boxShadow: '0 18px 48px rgba(15, 23, 42, 0.18)',
-          maxHeight: '90vh',
-          display: 'flex',
-          flexDirection: 'column',
-          overflow: 'hidden',
-        }}
+        className="account-settings-modal__dialog"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div
-          style={{
-            padding: `${px(t.spacing[8])} ${px(t.spacing[8])} ${px(t.spacing[4])}`,
-            borderBottom: `1px solid ${t.colors.border}`,
-          }}
-        >
-          <h2
-            id="account-settings-title"
-            style={{
-              margin: `0 0 ${px(t.spacing[2])}`,
-              fontSize: t.fontSize.md,
-              fontWeight: 600,
-              color: t.colors.text,
-            }}
-          >
+        <div className="account-settings-modal__header">
+          <h2 id="account-settings-title" className="account-settings-modal__title">
             Account
           </h2>
-          <p style={{ margin: 0, fontSize: t.fontSize.sm, color: t.colors.textMuted }}>
+          <p className="account-settings-modal__lead">
             Update how Youmi Lens greets you and your optional phone number.
           </p>
         </div>
 
-        <div
-          style={{
-            overflowY: 'auto',
-            overscrollBehavior: 'contain',
-            WebkitOverflowScrolling: 'touch',
-            padding: `${px(t.spacing[6])} ${px(t.spacing[8])}`,
-          }}
-        >
+        <div className="account-settings-modal__body">
           <AiPreferencesSection allowByok />
 
-          <label className="field" style={{ display: 'block', marginBottom: px(t.spacing[4]) }}>
-            <span
-              style={{
-                fontSize: t.fontSize.xs,
-                textTransform: 'uppercase',
-                letterSpacing: '0.06em',
-                color: t.colors.textMuted,
-              }}
-            >
-              Email
-            </span>
+          <label className="account-settings-modal__field">
+            <span className="account-settings-modal__field-label">Email</span>
             <input
-              className="login-screen__email-input"
+              className="login-screen__email-input account-settings-modal__input"
               type="text"
               readOnly
               value={accountEmail || 'Not available for this sign-in method'}
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                marginTop: px(t.spacing[2]),
-                padding: `${px(t.spacing[3])} ${px(t.spacing[4])}`,
-                borderRadius: t.radii.lg,
-                border: `1px solid ${t.colors.border}`,
-                fontSize: t.fontSize.base,
-                background: t.colors.bgPage,
-                color: t.colors.textMuted,
-              }}
             />
           </label>
 
-          <label className="field" style={{ display: 'block', marginBottom: px(t.spacing[4]) }}>
-            <span
-              style={{
-                fontSize: t.fontSize.xs,
-                textTransform: 'uppercase',
-                letterSpacing: '0.06em',
-                color: t.colors.textMuted,
-              }}
-            >
-              Display name
-            </span>
+          <label className="account-settings-modal__field">
+            <span className="account-settings-modal__field-label">Display name</span>
             <input
-              className="login-screen__email-input"
+              className="login-screen__email-input account-settings-modal__input"
               type="text"
               maxLength={DISPLAY_NAME_MAX_LENGTH}
               autoComplete="nickname"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                marginTop: px(t.spacing[2]),
-                padding: `${px(t.spacing[3])} ${px(t.spacing[4])}`,
-                borderRadius: t.radii.lg,
-                border: `1px solid ${t.colors.border}`,
-                fontSize: t.fontSize.base,
-              }}
             />
           </label>
 
-          <label className="field" style={{ display: 'block', marginBottom: px(t.spacing[2]) }}>
-            <span
-              style={{
-                fontSize: t.fontSize.xs,
-                textTransform: 'uppercase',
-                letterSpacing: '0.06em',
-                color: t.colors.textMuted,
-              }}
-            >
-              Phone (optional)
-            </span>
+          <label className="account-settings-modal__field">
+            <span className="account-settings-modal__field-label">Phone (optional)</span>
             <input
-              className="login-screen__email-input"
+              className="login-screen__email-input account-settings-modal__input"
               type="tel"
               autoComplete="tel"
               placeholder=""
               value={phone}
               onChange={(e) => setPhone(e.target.value)}
-              style={{
-                width: '100%',
-                boxSizing: 'border-box',
-                marginTop: px(t.spacing[2]),
-                padding: `${px(t.spacing[3])} ${px(t.spacing[4])}`,
-                borderRadius: t.radii.lg,
-                border: `1px solid ${t.colors.border}`,
-                fontSize: t.fontSize.base,
-              }}
             />
           </label>
 
-          {okMsg ? (
-            <p
-              style={{
-                marginTop: px(t.spacing[4]),
-                marginBottom: 0,
-                color: t.colors.success,
-                fontSize: t.fontSize.sm,
-              }}
-            >
-              {okMsg}
-            </p>
-          ) : null}
-          {err ? (
-            <p
-              style={{
-                marginTop: px(t.spacing[3]),
-                marginBottom: 0,
-                color: t.colors.danger,
-                fontSize: t.fontSize.sm,
-              }}
-            >
-              {err}
-            </p>
-          ) : null}
+          {okMsg ? <p className="account-settings-modal__message account-settings-modal__message--ok">{okMsg}</p> : null}
+          {err ? <p className="account-settings-modal__message account-settings-modal__message--error">{err}</p> : null}
 
-          <div
-            style={{
-              marginTop: px(t.spacing[6]),
-              paddingTop: px(t.spacing[5]),
-              borderTop: `1px solid ${t.colors.border}`,
-            }}
-          >
-            <h3
-              style={{
-                margin: `0 0 ${px(t.spacing[2])}`,
-                fontSize: t.fontSize.sm,
-                fontWeight: 600,
-                color: t.colors.text,
-              }}
-            >
-              {PRODUCT_VERSION_LABEL}
-            </h3>
-            <p
-              style={{
-                margin: 0,
-                fontSize: t.fontSize.sm,
-                color: t.colors.textMuted,
-                lineHeight: t.lineHeight.relaxed,
-              }}
-            >
-              {INTERNAL_BETA_NOTE}
+          <div className="account-settings-modal__meta">
+            <h3 className="account-settings-modal__meta-title">{PRODUCT_VERSION_LABEL}</h3>
+            <p className="account-settings-modal__meta-note">{INTERNAL_BETA_NOTE}</p>
+          </div>
+
+          <div className="account-settings-modal__danger-section">
+            <h3 className="account-settings-modal__danger-title">Delete account</h3>
+            <p className="account-settings-modal__danger-note">
+              Permanently removes your account, recordings, and course data. This cannot be undone.
             </p>
+            {deleteErr ? (
+              <p className="account-settings-modal__message account-settings-modal__message--error">{deleteErr}</p>
+            ) : null}
+            <button
+              type="button"
+              className="account-settings-modal__btn account-settings-modal__btn--danger"
+              disabled={deleteBusy}
+              aria-busy={deleteBusy}
+              onClick={() => void handleDeleteAccount()}
+            >
+              {deleteBusy ? 'Deleting…' : 'Delete account'}
+            </button>
           </div>
         </div>
 
-        <div
-          style={{
-            display: 'flex',
-            flexDirection: 'column',
-            gap: px(t.spacing[3]),
-            padding: `${px(t.spacing[4])} ${px(t.spacing[8])} ${px(t.spacing[8])}`,
-            borderTop: `1px solid ${t.colors.border}`,
-            background: t.colors.surface,
-          }}
-        >
+        <div className="account-settings-modal__footer">
           <button
             type="button"
-            className="ds-btn ds-btn--primary"
-            style={{ width: '100%' }}
+            className="account-settings-modal__btn account-settings-modal__btn--primary"
             disabled={busy || !displayName.trim()}
             aria-busy={busy}
             onClick={() => void handleSave()}
@@ -351,8 +239,7 @@ export function AccountSettingsModal({
           </button>
           <button
             type="button"
-            className="ds-btn ds-btn--secondary"
-            style={{ width: '100%' }}
+            className="account-settings-modal__btn account-settings-modal__btn--secondary"
             disabled={busy || signOutBusy}
             aria-busy={signOutBusy}
             onClick={() => {
@@ -363,7 +250,7 @@ export function AccountSettingsModal({
           >
             {signOutBusy ? 'Signing out…' : 'Sign out'}
           </button>
-          <button type="button" className="ds-btn ds-btn--secondary" style={{ width: '100%' }} onClick={onClose}>
+          <button type="button" className="account-settings-modal__btn account-settings-modal__btn--secondary" onClick={onClose}>
             Close
           </button>
         </div>
