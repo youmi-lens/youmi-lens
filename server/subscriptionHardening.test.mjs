@@ -54,9 +54,13 @@ function makeDb(initial = null) {
   return {
     table,
     from: () => ({
-      select: () => ({
-        eq: () => ({ maybeSingle: async () => ({ data: table.row, error: null }) }),
-      }),
+      select: () => {
+        // app_store_subscription_states is now looked up by BOTH
+        // original_transaction_id AND user_id (composite key) — chain
+        // supports either one .eq() (legacy call shape) or two.
+        const withMaybeSingle = { maybeSingle: async () => ({ data: table.row, error: null }) }
+        return { eq: () => ({ ...withMaybeSingle, eq: () => withMaybeSingle }) }
+      },
       upsert: async (row) => {
         table.row = { ...row }
         return { error: null }

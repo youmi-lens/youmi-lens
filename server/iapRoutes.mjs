@@ -45,10 +45,11 @@ import {
 import {
   SubscriptionAlreadyLinkedError,
   SubscriptionAccountTokenError,
-  claimSubscriptionBinding,
   findSubscriptionBinding,
+  findSubscriptionState,
   getEffectiveSubscription,
   isAutoRenewableProduct,
+  listSubscriptionStateUserIds,
   safeSubscriptionEntitlement,
   shouldBlockSubscriptionGrant,
   upsertSubscriptionState,
@@ -112,7 +113,10 @@ async function requireUser(req, res) {
     res.status(401).json({ ok: false, error: BETA_ERROR_CODES.AUTH_REQUIRED, message: 'Invalid or expired session.' })
     return null
   }
-  return { userId: user.id, email: user.email || '' }
+  // Authoritative, server-verified — never a client-supplied boolean. Gates
+  // whether a caller may touch app_store_subscription_bindings at all (see
+  // claimSubscriptionBinding's doc comment in iapSubscriptions.mjs).
+  return { userId: user.id, email: user.email || '', isAnonymous: Boolean(user.is_anonymous) }
 }
 
 // ── DB writes (ownership-safe + idempotent) ──────────────────────────────────
@@ -286,7 +290,19 @@ async function verifyAndPersist(db, user, payload) {
   })
   if (isAutoRenewableProduct(product)) {
     const existingBinding = await findSubscriptionBinding(db, verified.originalTransactionId)
-    const blockReason = shouldBlockSubscriptionGrant({ product, verified, existingBinding })
+    // A Guest never holds a binding (see claimSubscriptionBinding's doc
+    // comment) — for an anonymous caller the kill-switch escape hatch must
+    // instead look at THEIR OWN prior state row, or a returning Guest who
+    // purchased while sales were open would get wrongly blocked on a later
+    // restore/renewal once is_purchasable flips to false.
+    const existingState = user.isAnonymous
+      ? await findSubscriptionState(db, verified.originalTransactionId, user.userId)
+      : null
+    const blockReason = shouldBlockSubscriptionGrant({
+      product,
+      verified,
+      existingBinding: existingBinding || existingState,
+    })
     if (blockReason) {
       await recordBillingEvent(db, user.userId, {
         event_type: 'kill_switch_block',
@@ -304,11 +320,12 @@ async function verifyAndPersist(db, user, payload) {
     }
     safeSubscriptionStage('binding_lookup', user, {
       productId: verified.productId,
+      callerIsAnonymous: user.isAnonymous,
       bindingExists: Boolean(existingBinding),
       bindingIsSameUser: existingBinding ? existingBinding.user_id === user.userId : null,
       bindingOwnerState: existingBinding?.owner_state ?? null,
     })
-    const subscription = await verifyAndPersistSubscription(db, user.userId, verified)
+    const subscription = await verifyAndPersistSubscription(db, user.userId, verified, { isAnonymous: user.isAnonymous })
     safeSubscriptionStage('subscription_state_write_ok', user, {
       productId: verified.productId,
       status: subscription.status,
@@ -630,28 +647,36 @@ export async function handleAppleNotifications(req, res) {
     let ownerUserId = tx ? await findTransactionOwner(db, tx) : null
 
     if (tx?.autoRenewable) {
-      let binding = await findSubscriptionBinding(db, tx.originalTransactionId)
-      if (!binding && tx.appAccountToken) {
-        // appAccountToken is the Supabase user UUID set by the iPad client.
-        binding = await claimSubscriptionBinding(db, tx.appAccountToken, tx)
-      }
+      const binding = await findSubscriptionBinding(db, tx.originalTransactionId)
       ownerUserId = binding?.owner_state === 'active' ? binding.user_id : null
-      if (ownerUserId && SUBSCRIPTION_STATUS_NOTIFICATIONS.has(decoded.notificationType)) {
-        const state = await upsertSubscriptionState(db, ownerUserId, tx, {
-          renewal: decoded.renewal,
-          notificationType: decoded.notificationType,
-          subtype: decoded.subtype,
-          source: 'notification_v2',
-        })
-        await recordBillingEvent(db, ownerUserId, {
-          event_type: decoded.notificationType === NotificationTypeV2.DID_RENEW
-            ? 'subscription_renewed'
-            : 'subscription_status_changed',
-          product_id: tx.productId,
-          transaction_id: tx.transactionId,
-          environment: decoded.environment,
-          detail: { notificationType: decoded.notificationType, subtype: decoded.subtype ?? null, status: state.status },
-        })
+      if (SUBSCRIPTION_STATUS_NOTIFICATIONS.has(decoded.notificationType)) {
+        // Sweep EVERY identity currently holding entitlement from this
+        // lineage — Guest X, Guest Y, and/or a permanent owner can all have
+        // their own row now (composite-keyed states table). A renewal must
+        // refresh all of them; a refund/revoke must end access for all of
+        // them. This intentionally no longer auto-creates a binding from a
+        // bare notification's appAccountToken — canonical ownership is only
+        // ever established through a live, authenticated permanent-account
+        // verify/restore call (claimSubscriptionBinding), never a webhook.
+        const affectedUserIds = await listSubscriptionStateUserIds(db, tx.originalTransactionId)
+        for (const uid of affectedUserIds) {
+          const state = await upsertSubscriptionState(db, uid, tx, {
+            renewal: decoded.renewal,
+            notificationType: decoded.notificationType,
+            subtype: decoded.subtype,
+            source: 'notification_v2',
+          })
+          await recordBillingEvent(db, uid, {
+            event_type: decoded.notificationType === NotificationTypeV2.DID_RENEW
+              ? 'subscription_renewed'
+              : 'subscription_status_changed',
+            product_id: tx.productId,
+            transaction_id: tx.transactionId,
+            environment: decoded.environment,
+            detail: { notificationType: decoded.notificationType, subtype: decoded.subtype ?? null, status: state.status },
+          })
+        }
+        if (!ownerUserId) ownerUserId = affectedUserIds[0] ?? null
       }
     }
 
