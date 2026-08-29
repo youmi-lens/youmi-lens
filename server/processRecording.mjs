@@ -9,14 +9,46 @@ import {
 import {
   getEffectiveQuota,
   checkProcessingAllowed,
-  recordBetaUsage,
-  BETA_ERROR_CODES,
+  hasRecordedProcessingUsage,
+  recordProcessingUsageOnce,
 } from './betaGate.mjs'
 import { qwenLanguageFor, resolveContentLanguagePair, shouldTranslate, legacySummaryMirror } from './contentLanguages.mjs'
+import {
+  PROCESSING_LEASE_TTL_MS,
+  PROCESSING_RESUME_STAGES,
+  acquireProcessingLease,
+  determineProcessingResumeStage,
+  newProcessingLeaseToken,
+  processingAcceptedStatus,
+  releaseProcessingLease,
+  renewProcessingLease,
+} from './processingRecovery.mjs'
 
 const BUCKET = 'lecture-audio'
 
 const processingIds = new Set()
+const PROCESSING_LEASE_RENEW_MS = Math.max(
+  10_000,
+  Math.min(60_000, Math.floor(PROCESSING_LEASE_TTL_MS / 3)),
+)
+
+const PROCESSING_RECORDING_COLUMNS = [
+  'id',
+  'user_id',
+  'duration_sec',
+  'storage_path',
+  'course',
+  'title',
+  'source_language',
+  'translation_language',
+  'transcript',
+  'summary_en',
+  'summary_zh',
+  'source_summary',
+  'translated_summary',
+  'ai_status',
+  'ai_error',
+].join(',')
 
 function v1PipelineLog(event, fields) {
   console.warn(`[V1Pipeline] ${event}`, JSON.stringify({ ...fields, t: new Date().toISOString() }))
@@ -196,7 +228,7 @@ export async function handleProcessRecording(req, res) {
     }),
   )
 
-  if (!supabaseUrl || !anonKey || !caps.transcribe) {
+  if (!supabaseUrl || !anonKey) {
     res.status(503).json({ error: CLIENT_SAFE_UNAVAILABLE })
     return
   }
@@ -215,7 +247,7 @@ export async function handleProcessRecording(req, res) {
   }
 
   if (processingIds.has(recordingId)) {
-    res.status(202).json({ ok: true, deduped: true })
+    res.status(202).json({ ok: true, status: 'already_processing', recordingId, deduped: true })
     return
   }
 
@@ -230,7 +262,7 @@ export async function handleProcessRecording(req, res) {
 
   const { data: row, error: rowErr } = await userSb
     .from('recordings')
-    .select('id,duration_sec,ai_status')
+    .select(PROCESSING_RECORDING_COLUMNS)
     .eq('id', recordingId)
     .eq('user_id', userId)
     .maybeSingle()
@@ -241,31 +273,121 @@ export async function handleProcessRecording(req, res) {
     return
   }
 
-  // ── Beta gate ─────────────────────────────────────────────────────────────
-  // Determine if this is a first-time process or a regeneration.
-  // Both consume quota; action_type distinguishes them in beta_usage.
-  const isRegeneration = row.ai_status === 'done' || row.ai_status === 'transcript_ready'
-  const betaActionType = isRegeneration ? 'regenerate_summary' : 'process_recording'
-  const durationSec = Number(row.duration_sec) || 0
-  const email = userData.user?.email || ''
-
-  const quota = await getEffectiveQuota(userId, email)
-  const gate = await checkProcessingAllowed(quota, userId, durationSec)
-  if (!gate.allowed) {
-    console.warn(
-      '[process-recording] beta_gate_blocked',
-      JSON.stringify({
-        userId: userId.slice(0, 8),
-        recordingId,
-        durationSec,
-        actionType: betaActionType,
-        code: gate.body.error,
-      }),
-    )
-    res.status(gate.status).json(gate.body)
+  let resumeStage = determineProcessingResumeStage(row)
+  if (resumeStage === PROCESSING_RESUME_STAGES.COMPLETE) {
+    if (row.ai_status !== 'done' || row.ai_error) {
+      const { error: healErr } = await dbSb
+        .from('recordings')
+        .update({ ai_status: 'done', ai_error: null, ai_updated_at: new Date().toISOString() })
+        .eq('id', recordingId)
+        .eq('user_id', userId)
+      if (healErr) logPostgrestError('heal complete recording status', healErr, { recordingId })
+    }
+    res.status(200).json({ ok: true, status: 'already_complete', recordingId })
     return
   }
-  // ─────────────────────────────────────────────────────────────────────────
+  if (resumeStage === PROCESSING_RESUME_STAGES.UNRECOVERABLE) {
+    res.status(409).json({
+      ok: false,
+      status: 'unrecoverable',
+      error: 'No uploaded audio or persisted transcript is available for recovery.',
+      recordingId,
+    })
+    return
+  }
+  if (
+    (resumeStage === PROCESSING_RESUME_STAGES.TRANSCRIPTION_THEN_SUMMARY && !caps.transcribe)
+    || !caps.summarize
+  ) {
+    res.status(503).json({ ok: false, status: 'unavailable', error: CLIENT_SAFE_UNAVAILABLE, recordingId })
+    return
+  }
+
+  const durationSec = Number(row.duration_sec) || 0
+  const email = userData.user?.email || ''
+  let usageAlreadyRecorded
+  try {
+    usageAlreadyRecorded = await hasRecordedProcessingUsage(userId, recordingId)
+  } catch (error) {
+    console.error('[process-recording] usage audit failed', error)
+    res.status(503).json({ ok: false, status: 'unavailable', error: 'Processing usage could not be verified.' })
+    return
+  }
+
+  // A retry for a recording that already has its original billable event must
+  // not be blocked or charged again. A genuinely new job still uses the normal
+  // quota gate before any AI work is accepted.
+  if (!usageAlreadyRecorded) {
+    const quota = await getEffectiveQuota(userId, email)
+    const gate = await checkProcessingAllowed(quota, userId, durationSec)
+    if (!gate.allowed) {
+      console.warn(
+        '[process-recording] beta_gate_blocked',
+        JSON.stringify({
+          userId: userId.slice(0, 8),
+          recordingId,
+          durationSec,
+          actionType: 'process_recording',
+          code: gate.body.error,
+        }),
+      )
+      res.status(gate.status).json(gate.body)
+      return
+    }
+  }
+
+  if (!usingServiceRoleForRecordings) {
+    res.status(503).json({ ok: false, status: 'unavailable', error: 'Durable processing coordination is unavailable.' })
+    return
+  }
+
+  const leaseToken = newProcessingLeaseToken()
+  let lease
+  try {
+    lease = await acquireProcessingLease(dbSb, { recordingId, userId, leaseToken })
+  } catch (error) {
+    console.error('[process-recording] durable lease claim failed', error)
+    res.status(503).json({ ok: false, status: 'unavailable', error: 'Processing coordination failed.' })
+    return
+  }
+  if (!lease.acquired) {
+    res.status(202).json({ ok: true, status: 'already_processing', recordingId, deduped: true })
+    return
+  }
+
+  const releaseClaim = async () => {
+    try {
+      await releaseProcessingLease(dbSb, { recordingId, leaseToken })
+    } catch (error) {
+      console.error('[process-recording] durable lease release failed', error)
+    }
+  }
+
+  // Re-read after winning the claim. Another worker may have completed between
+  // the first snapshot and our atomic lease acquisition.
+  const { data: claimedRow, error: claimedRowErr } = await dbSb
+    .from('recordings')
+    .select(PROCESSING_RECORDING_COLUMNS)
+    .eq('id', recordingId)
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (claimedRowErr || !claimedRow) {
+    if (claimedRowErr) logPostgrestError('claimed recording refresh', claimedRowErr, { recordingId })
+    await releaseClaim()
+    res.status(404).json({ error: 'Recording not found.' })
+    return
+  }
+  resumeStage = determineProcessingResumeStage(claimedRow)
+  if (resumeStage === PROCESSING_RESUME_STAGES.COMPLETE) {
+    await releaseClaim()
+    res.status(200).json({ ok: true, status: 'already_complete', recordingId })
+    return
+  }
+  if (resumeStage === PROCESSING_RESUME_STAGES.UNRECOVERABLE) {
+    await releaseClaim()
+    res.status(409).json({ ok: false, status: 'unrecoverable', error: 'Recovery source is unavailable.', recordingId })
+    return
+  }
 
   processingIds.add(recordingId)
 
@@ -306,6 +428,7 @@ export async function handleProcessRecording(req, res) {
       payloadKeys: enqueuePayloadKeys,
     })
     processingIds.delete(recordingId)
+    await releaseClaim()
     res.status(500).json({
       error: 'Could not update recording.',
       step: 'enqueue_ai_status_queued',
@@ -320,7 +443,15 @@ export async function handleProcessRecording(req, res) {
     return
   }
 
-  res.status(202).json({ ok: true, recordingId, usingServiceRoleForRecordings })
+  const acceptedStatus = processingAcceptedStatus(resumeStage)
+  res.status(202).json({
+    ok: true,
+    status: acceptedStatus,
+    resumeStage,
+    recordingId,
+    usageAlreadyRecorded,
+    usingServiceRoleForRecordings,
+  })
 
   setImmediate(() => {
     runJob({
@@ -330,10 +461,14 @@ export async function handleProcessRecording(req, res) {
       email,
       recordingId,
       durationSec,
-      betaActionType,
+      resumeStage,
+      recording: claimedRow,
+      usageAlreadyRecorded,
+      leaseToken,
       usingServiceRoleForRecordings,
     }).finally(() => {
       processingIds.delete(recordingId)
+      void releaseClaim()
     })
   })
 }
@@ -345,8 +480,27 @@ function jobLog(phase, payload) {
   )
 }
 
-async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, betaActionType, usingServiceRoleForRecordings }) {
+async function runJob({
+  userSb,
+  dbSb,
+  userId,
+  email,
+  recordingId,
+  durationSec,
+  resumeStage,
+  recording,
+  usageAlreadyRecorded,
+  leaseToken,
+  usingServiceRoleForRecordings,
+}) {
   const jobT0 = Date.now()
+  const heartbeat = setInterval(() => {
+    void renewProcessingLease(dbSb, { recordingId, leaseToken }).then(({ renewed }) => {
+      if (!renewed) jobLog('lease_lost', { recordingId })
+    }).catch((error) => {
+      jobLog('lease_renew_failed', { recordingId, message: error instanceof Error ? error.message : String(error) })
+    })
+  }, PROCESSING_LEASE_RENEW_MS)
 
   const markFailed = async (msg) => {
     jobLog('mark_failed', { recordingId, userId: userId.slice(0, 8), message: msg })
@@ -371,12 +525,13 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
   try {
     /** Prefer service-role reads when available: avoids RLS/JWT edge cases that return 0 rows for user client. */
     const metaClient = usingServiceRoleForRecordings ? dbSb : userSb
-    const { data: row, error: metaErr } = await metaClient
+    const { data: refreshedRow, error: metaErr } = await metaClient
       .from('recordings')
-      .select('storage_path,course,title,source_language,translation_language')
+      .select('storage_path,course,title')
       .eq('id', recordingId)
       .eq('user_id', userId)
       .maybeSingle()
+    const row = refreshedRow ? { ...recording, ...refreshedRow } : recording
 
     if (metaErr || !row) {
       if (metaErr) logPostgrestError('runJob select meta', metaErr)
@@ -397,15 +552,27 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
       usedClient: usingServiceRoleForRecordings ? 'service_role' : 'user_jwt',
     })
 
-    if (!row.storage_path || !row.storage_path.startsWith(`${userId}/`)) {
-      await markFailed('Invalid storage path for this recording.')
-      return
-    }
     const { sourceLanguage, translationLanguage } = resolveContentLanguagePair({
       sourceLanguage: row.source_language,
       translationLanguage: row.translation_language,
     })
 
+    if (
+      resumeStage === PROCESSING_RESUME_STAGES.TRANSCRIPTION_THEN_SUMMARY
+      && (!row.storage_path || !row.storage_path.startsWith(`${userId}/`))
+    ) {
+      await markFailed('Invalid storage path for this recording.')
+      return
+    }
+
+    if (!usageAlreadyRecorded) {
+      await recordProcessingUsageOnce(userId, email || '', recordingId, durationSec || 0)
+    }
+
+    let transcriptCanonical = typeof row.transcript === 'string' ? row.transcript.trim() : ''
+    let transcriptReadyMs = 0
+
+    if (resumeStage === PROCESSING_RESUME_STAGES.TRANSCRIPTION_THEN_SUMMARY) {
     const { error: stErr } = await dbSb
       .from('recordings')
       .update({
@@ -421,10 +588,6 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
     }
 
     jobLog('status_transcribing', { recordingId })
-
-    // Record beta usage now that we are committed to consuming AI resources.
-    // Fires for both first-time processing and regeneration.
-    void recordBetaUsage(userId, email || '', recordingId, betaActionType || 'process_recording', durationSec || 0)
 
     const signedTtlSec = Number(process.env.YUMI_STORAGE_SIGNED_URL_SEC || 7200)
     const { data: signed, error: signErr } = await userSb.storage
@@ -476,11 +639,12 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
     if (!gate.ok) {
       jobLog('canonical_quality_gate', { recordingId, reason: gate.reason ?? 'unknown' })
     }
-    const { canonical: transcriptCanonical, diagnostics: canonDiag } =
-      canonicalizeLectureTranscript(transcriptRaw)
+    const canonicalized = canonicalizeLectureTranscript(transcriptRaw)
+    transcriptCanonical = canonicalized.canonical
+    const canonDiag = canonicalized.diagnostics
     jobLog('canonical_ok', { recordingId, ...canonDiag })
 
-    const transcriptReadyMs = Date.now() - jobT0
+    transcriptReadyMs = Date.now() - jobT0
     v1PipelineLog('timing', {
       recordingId,
       transcript_ready_ms: transcriptReadyMs,
@@ -573,12 +737,22 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
       transcriptLen: transcriptCanonical.length,
       transcriptRawLen: transcriptRaw.length,
     })
+    } else {
+      jobLog('resume_summary_only', {
+        recordingId,
+        transcriptLen: transcriptCanonical.length,
+      })
+    }
 
     // Best-effort: translate the English transcript to Chinese for bilingual
     // study support. A failure here must never fail the job — the English
     // transcript is already persisted and the summaries stand on their own.
     const canTranslate = youmiHosted.hostedCapabilities().translate
-    if (canTranslate && shouldTranslate(sourceLanguage, translationLanguage)) {
+    if (
+      resumeStage === PROCESSING_RESUME_STAGES.TRANSCRIPTION_THEN_SUMMARY
+      && canTranslate
+      && shouldTranslate(sourceLanguage, translationLanguage)
+    ) {
       try {
         jobLog('transcript_translate_begin', {
           recordingId,
@@ -607,6 +781,21 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
     if (!canSummarize) {
       jobLog('job_done_no_summarize', { recordingId })
       v1PipelineLog('job_partial', { recordingId, reason: 'summarize_unconfigured' })
+      return
+    }
+
+    const { error: summarizingStatusErr } = await dbSb
+      .from('recordings')
+      .update({
+        ai_status: 'summarizing',
+        ai_error: null,
+        ai_updated_at: new Date().toISOString(),
+      })
+      .eq('id', recordingId)
+      .eq('user_id', userId)
+    if (summarizingStatusErr) {
+      logPostgrestError('runJob update summarizing', summarizingStatusErr, { recordingId })
+      await markFailed('Could not update recording status.')
       return
     }
 
@@ -640,7 +829,9 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
       console.warn('[process-recording] summarize', e)
       jobLog('summarize_error', { recordingId, message: e instanceof Error ? e.message : String(e) })
       const summarizeFailCore = {
-        ai_status: 'transcript_ready',
+        // Failure is terminal/visible to clients, while the persisted transcript
+        // remains authoritative evidence that the next retry is summary-only.
+        ai_status: 'failed',
         ai_error:
           'Summaries did not finish. Your transcript is available — you can try again shortly.',
         ai_updated_at: new Date().toISOString(),
@@ -675,7 +866,7 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
             summary_ready: false,
             translation_ready: false,
             ai_pipeline_timing: {
-              job_start_to_transcript_ready_ms: transcriptReadyMs,
+              ...(transcriptReadyMs > 0 ? { job_start_to_transcript_ready_ms: transcriptReadyMs } : {}),
               summarize_failed_ms: Date.now() - jobT0,
             },
           },
@@ -768,7 +959,7 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
           summary_ready: summaryOk,
           translation_ready: summaryOk,
           ai_pipeline_timing: {
-            job_start_to_transcript_ready_ms: transcriptReadyMs,
+            ...(transcriptReadyMs > 0 ? { job_start_to_transcript_ready_ms: transcriptReadyMs } : {}),
             job_start_to_summary_ready_ms: summaryReadyMs,
             summarize_wall_ms: Date.now() - summarizeWallT0,
           },
@@ -782,5 +973,7 @@ async function runJob({ userSb, dbSb, userId, email, recordingId, durationSec, b
     console.warn('[process-recording] job', e)
     jobLog('job_throw', { recordingId, message: e instanceof Error ? e.message : String(e) })
     await markFailed('Something went wrong while processing this lecture.')
+  } finally {
+    clearInterval(heartbeat)
   }
 }

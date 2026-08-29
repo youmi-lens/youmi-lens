@@ -79,8 +79,9 @@ describe('beta_usage recording identity contract', () => {
     const liveCostSource = read('./watchLiveUsage.mjs')
 
     expect(processSource).toContain(
-      "recordBetaUsage(userId, email || '', recordingId, betaActionType || 'process_recording'",
+      "recordProcessingUsageOnce(userId, email || '', recordingId, durationSec || 0)",
     )
+    expect(processSource).not.toContain("betaActionType || 'process_recording'")
     expect(uploadSource).toContain(
       "recordBetaUsage(userId, email, recordingId, 'upload_audio', durationSec)",
     )
