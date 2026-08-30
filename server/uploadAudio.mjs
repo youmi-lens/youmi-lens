@@ -98,6 +98,7 @@ export async function handleUploadAudio(req, res) {
     mime: rawMime,
     duration_sec: rawDuration,
     course: rawCourse,
+    course_id: rawCourseId,
     title: rawTitle,
     live_transcript: rawLiveTranscript,
     live_transcript_raw: rawLiveTranscriptRaw,
@@ -115,6 +116,9 @@ export async function handleUploadAudio(req, res) {
   const mime = (rawMime || 'audio/webm').trim()
   const durationSec = rawDuration ? Number(rawDuration) : 0
   const course = cleanText(rawCourse, 'Course')
+  // Canonical course link. The client resolves this by id, never by re-deriving
+  // it from the `course` label here — a course rename must not orphan lectures.
+  const courseId = nullableText(rawCourseId)
   const title = cleanText(rawTitle, 'Lecture')
   const liveTranscript = nullableText(rawLiveTranscript)
   const liveTranscriptRaw = nullableText(rawLiveTranscriptRaw)
@@ -226,6 +230,7 @@ export async function handleUploadAudio(req, res) {
     id: recordingId,
     user_id: userId,
     course,
+    course_id: courseId,
     title,
     duration_sec: Math.round(durationSec) || 0,
     mime,

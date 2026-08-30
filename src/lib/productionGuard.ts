@@ -50,3 +50,38 @@ export function assertDesktopSupabaseTargetSafe(
   if (!isProductionSupabaseUrl(supabaseUrl)) return
   throw new DesktopProductionGuardError(mode)
 }
+
+/**
+ * The API/upload server has the exact same silent-inheritance failure mode as
+ * Supabase above, and it caused a real one: a qa-mode build with no
+ * VITE_API_BASE_URL override inherited `.env`'s production Railway URL,
+ * authenticated with a STAGING-signed JWT, and failed every Save Lecture
+ * upload at the server's auth check — before course linkage or transcription
+ * ever ran. `vite.config.ts`'s build-time guard now also checks this; this is
+ * the runtime companion, mirroring `assertDesktopSupabaseTargetSafe` exactly.
+ */
+export const PRODUCTION_API_BASE_URL = 'https://youmi-lens-production.up.railway.app'
+
+export function isProductionApiBaseUrl(url: string | undefined | null): boolean {
+  if (!url) return false
+  return url.includes(PRODUCTION_API_BASE_URL)
+}
+
+export class DesktopApiTargetGuardError extends Error {
+  constructor(mode: string) {
+    super(
+      `[production-guard] refusing to run: Vite mode "${mode}" resolved VITE_API_BASE_URL to the ` +
+        `PRODUCTION API server (${PRODUCTION_API_BASE_URL}). A development server or a QA/staging ` +
+        'build must never target production. Check .env.qa.local sets VITE_API_BASE_URL to a server ' +
+        'that shares the same (staging) Supabase project as VITE_SUPABASE_URL.',
+    )
+    this.name = 'DesktopApiTargetGuardError'
+  }
+}
+
+/** Runtime companion to `assertDesktopSupabaseTargetSafe` — same shape, same exemption. */
+export function assertDesktopApiTargetSafe(mode: string, apiBaseUrl: string | undefined | null): void {
+  if (mode === 'production') return
+  if (!isProductionApiBaseUrl(apiBaseUrl)) return
+  throw new DesktopApiTargetGuardError(mode)
+}

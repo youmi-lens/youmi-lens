@@ -52,7 +52,16 @@ describe('long-recording save flow (src/App.tsx)', () => {
   it('does not tell the user to "Stop & Save again" (an invalid retry) on upload failure', () => {
     // the corrected message points at the real in-app Retry, not an invalid path
     expect(appSrc).not.toContain('try Stop & Save again when you’re back online')
-    expect(appSrc).toContain('tap Retry when you’re back online')
+    expect(appSrc).toContain('Tap Retry Save below when you’re back online')
+  })
+
+  it('classifies a pending-upload fallback as an actionable failure, never a silent success', () => {
+    // Regression guard: this outcome used to be `list_refresh_warn`, which
+    // `resolveRecordingV2Stage` maps to the SAME terminal stage as a genuine
+    // success — the user saw a "Ready" screen with no indication the lecture
+    // was not actually in the cloud/Course yet, and no working retry.
+    expect(appSrc).not.toMatch(/kind: 'list_refresh_warn',\s*\n\s*recordingId,\s*\n\s*message:\s*\n\s*'Your recording is safe/)
+    expect(appSrc).toContain("outcome: 'pending_upload'")
   })
 
   it('keeps the existing recording_too_long → local fallback intact', () => {

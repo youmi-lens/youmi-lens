@@ -24,6 +24,8 @@ export interface PendingUploadMeta {
   /** Authenticated owner — a pending upload is only ever shown to this user. */
   userId: string
   course: string
+  /** Canonical course id at save time, if one was selected. Never re-derived from `course` on retry. */
+  courseId?: string | null
   title: string
   durationSec: number
   mime: string

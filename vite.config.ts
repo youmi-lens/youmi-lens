@@ -8,6 +8,14 @@ const apiTarget = 'http://127.0.0.1:3847'
 const QA_STAGING_SUPABASE_REF = 'keozbnzainrcuiwhmjae'
 /** Production Supabase project ref (`.env` / `.env.production`). QA must never resolve here. */
 const PRODUCTION_SUPABASE_REF = 'lbwsrnjbiayepshrdult'
+/**
+ * Production API server. QA must never resolve here either — this exact gap
+ * (checked only VITE_SUPABASE_URL, not this) is why a qa-mode build silently
+ * sent a STAGING-signed JWT to the PRODUCTION server, which verifies tokens
+ * against PRODUCTION Supabase's own secret: every Save Lecture upload failed
+ * auth before course-linkage or transcription code ever ran, for every course.
+ */
+const PRODUCTION_API_BASE_URL = 'https://youmi-lens-production.up.railway.app'
 
 /**
  * Build-time hard guard for the `qa` staging mode.
@@ -41,6 +49,16 @@ function qaStagingTargetGuard(): Plugin {
             `VITE_SUPABASE_URL=${url || '(empty)'}. Expected the staging project ` +
             `(${QA_STAGING_SUPABASE_REF}) and NOT production (${PRODUCTION_SUPABASE_REF}). ` +
             `Check .env.qa.local is present and targets staging.`,
+        )
+      }
+      const apiBase = String(env.VITE_API_BASE_URL ?? '').trim()
+      if (apiBase.includes(PRODUCTION_API_BASE_URL) || !apiBase) {
+        throw new Error(
+          `[qa-staging-guard] Refusing to build the QA frontend: Vite mode "qa" resolved ` +
+            `VITE_API_BASE_URL=${apiBase || '(empty, falls back to production)'}. A qa build ` +
+            `must point at a server that shares the STAGING Supabase project above — never the ` +
+            `production API (${PRODUCTION_API_BASE_URL}), and never left unset (unset silently ` +
+            `inherits .env's production value). Check .env.qa.local sets VITE_API_BASE_URL.`,
         )
       }
     },

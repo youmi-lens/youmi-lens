@@ -22,6 +22,13 @@ export type SaveUiOutcome =
   | 'storage_ok_db_failed'
   | 'db_ok_verify_failed'
   | 'local_failed'
+  /**
+   * The cloud upload failed after retries, but the audio+metadata were
+   * preserved as a durable local pending upload — not lost, not yet in any
+   * Course. Must render as an actionable failure (Retry Save), never as a
+   * success: the lecture is not durably in the cloud/Course yet.
+   */
+  | 'pending_upload'
   | 'other'
 
 export type AiUiOutcome = 'ok' | 'transcribe_failed' | 'summarize_failed' | 'persist_failed' | 'other'

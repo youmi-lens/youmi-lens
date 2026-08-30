@@ -1397,6 +1397,7 @@ function recentCaptureHeadline(c: RecentCaptureOutcome): string {
     if (c.outcome === 'storage_ok_db_failed') return 'Uploaded; database write failed'
     if (c.outcome === 'db_ok_verify_failed') return 'Saved; verification read failed'
     if (c.outcome === 'local_failed') return 'Local save failed'
+    if (c.outcome === 'pending_upload') return 'Not saved to the cloud yet'
     return 'Save incomplete'
   }
   return ''
@@ -2952,6 +2953,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
             saveResult = await withTimeout(
               uploadLectureAudioViaServer(supabase, id, rec.audioBlob, rec.mime, rec.durationSec, {
                 course: rec.course,
+                courseId: rec.courseId ?? null,
                 title: rec.title,
                 liveTranscript: rec.liveTranscript ?? '',
                 liveTranscriptRaw: rec.liveTranscriptRaw ?? '',
@@ -2972,6 +2974,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
             userId,
             id,
             course: rec.course,
+            courseId: rec.courseId ?? null,
             title: rec.title,
             durationSec: rec.durationSec,
             mime: rec.mime,
@@ -3666,6 +3669,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
               id: recordingId,
               userId,
               course: courseVal,
+              courseId: recordingCourseId,
               title: titleVal,
               durationSec,
               mime,
@@ -3687,11 +3691,14 @@ const [editLectureModal, setEditLectureModal] = useState<{
           try {
             await refreshList()
           } catch { /* ignore */ }
+          // Not a success: the recording is only local so far, and must not be
+          // presented as if it were already in the cloud/Course.
           endCapture({
-            kind: 'list_refresh_warn',
+            kind: 'failure',
             recordingId,
+            outcome: 'pending_upload',
             message:
-              'Recovered recording is safe on this device under Pending uploads. Tap Retry when you’re back online.',
+              'Recovered recording is safe on this device, but the cloud upload didn’t finish. Retry when you’re back online — nothing needs to be re-recorded.',
             at: Date.now(),
           })
         }
@@ -3713,6 +3720,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
       recoveryBusyId,
       recorder.status,
       course,
+      recordingCourseId,
       title,
       localOnly,
       supabase,
@@ -4045,13 +4053,15 @@ const [editLectureModal, setEditLectureModal] = useState<{
           try {
             // Phase 2D-2: preserve as a DURABLE, per-user PENDING UPLOAD (keyed by
             // the stable recording UUID + authenticated userId). It survives app
-            // restart, is shown only to its owner in Courses → "Pending uploads",
-            // and has a real Retry action — no re-recording, no data loss.
+            // restart and has a real Retry action right on this screen — no
+            // re-recording, no data loss. Not yet in the cloud or any Course, so
+            // this must render as an actionable failure below, never a success.
             await withTimeout(
               savePendingUpload({
                 id: recordingId,
                 userId: userId!,
                 course: courseVal,
+                courseId: recordingCourseId,
                 title: titleVal,
                 durationSec,
                 mime,
@@ -4079,10 +4089,11 @@ const [editLectureModal, setEditLectureModal] = useState<{
               /* best-effort refresh */
             }
             endCapture({
-              kind: 'list_refresh_warn',
+              kind: 'failure',
               recordingId,
+              outcome: 'pending_upload',
               message:
-                'Your recording is safe — the audio is saved on this device and nothing was lost. The upload didn’t finish, so it’s waiting in Courses under “Pending uploads”. Open Courses and tap Retry when you’re back online — no need to re-record.',
+                'Your recording is safe — the audio is saved on this device and nothing was lost. The upload to the cloud didn’t finish. Tap Retry Save below when you’re back online — no need to re-record.',
               at: Date.now(),
             })
           } catch {
@@ -5494,9 +5505,18 @@ useEffect(() => {
         setWorkspaceView('record')
       }}
       onRetry={() => {
-        // The existing production retry: clear the outcome and let the user
-        // save again from the durable session. Nothing about the upload or
-        // recovery logic changes here.
+        // A save that only made it to the local pending-upload fallback has a
+        // real retry: re-attempt the SAME durable recordingId (idempotent —
+        // insertLectureRecordingRow upserts by id, so this can never create a
+        // duplicate lecture). Every other failure kind keeps the existing
+        // behavior: clear the outcome and let the user save again from the
+        // durable recording session.
+        if (recentCapture?.kind === 'failure' && recentCapture.outcome === 'pending_upload') {
+          const recordingId = recentCapture.recordingId
+          setRecentCapture(null)
+          if (recordingId) void handleRetryPendingUpload(recordingId)
+          return
+        }
         setRecentCapture(null)
       }}
     />
