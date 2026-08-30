@@ -136,25 +136,47 @@ import {
 } from './lib/saveIdempotency'
 import { nextRecentCaptureForNewSave } from './lib/recentCapturePolicy'
 import {
+  CloudSoftDeleteUnavailableError,
   SaveRecordingRemoteError,
   deleteLectures,
   downloadRecordingBlob,
+  getRecordingAudioUrl,
   getRecordingDetail,
   getRecordingMeta,
   insertLectureRecordingRow,
-  listRecordings,
+  listLectures,
+  restoreRecordingRemote,
+  softDeleteRecordingRemote,
   updateRecordingAi,
   updateRecordingMetadata,
+  updateRecordingNotesMarks,
   uploadLectureAudioViaServer,
 } from './lib/recordingsRepo'
 import { transcribeHostedLiveCaptionChunk } from './lib/liveCaptionHostedTranscribe'
 import { LiveEngine, type LiveEngineOpts } from './lib/liveEngine/engine'
+import { isMeaningfulLectureTitle, reconcileLectureTitles } from './lib/lectureTitleIntegrity'
+import { appendMark, parseMarks, reconcileLectureAnnotations } from './lib/lectureAnnotations'
+import { isLectureActive } from './lib/lectureDeletionResolution'
+import {
+  AUDIO_SOURCE_LABEL_KEY,
+  DEFAULT_AUDIO_SOURCE,
+  readAudioSource,
+  systemAudioSupported,
+  writeAudioSource,
+  type AudioSource,
+} from './lib/audioSource'
+import {
+  markLatency,
+  markSpeechOnset,
+  reportLatencySummary,
+  resetLatencyDiagnostics,
+} from './lib/captionDiagnostics'
 import {
   LiveCaptionSessionModel,
   liveCaptionEventFromEngine,
   type LiveCaptionView,
 } from './lib/liveCaptionSessionModel'
-import { probeDefaultAudioSampleRate } from './lib/mediaEnvDebug'
+import { LIVE_PCM_SAMPLE_RATE } from './lib/livePcmCapture'
 import { getEnArrivalWalls, traceCaptionStop } from './lib/liveCaptionTrace'
 import { canonicalizeLectureTranscript } from './lib/transcriptCanonical'
 import { youmiLiveLog } from './lib/youmiLiveDebug'
@@ -183,7 +205,38 @@ const SETTINGS_PLACEHOLDER_TITLE = {
   advancedAi: 'settings.advancedAi',
   support: 'settings.support',
 } as const
+import { CourseDetailPage } from './components/CourseDetailPage'
+import { CoursesPage, type LectureStatus } from './components/CoursesPage'
+import {
+  ConfirmPurgeDialog,
+  CreateCourseDialog,
+  DeleteCourseDialog,
+  DeleteLectureDialog,
+  MoveLectureDialog,
+  RenameCourseDialog,
+  RenameLectureDialog,
+} from './components/CourseDialogs'
 import { DesktopV2Shell } from './components/DesktopV2Shell'
+import { LectureDetailPage } from './components/LectureDetailPage'
+import { RecentlyDeletedPage } from './components/RecentlyDeletedPage'
+import { RecordingV2 } from './components/RecordingV2'
+import {
+  courseIdentity,
+  findCourseForRecording,
+  lectureIdentity,
+  lecturesInCourse,
+} from './lib/courses/courseModel'
+import {
+  courseToRestoreWithLecture,
+  deletedLecturesFromCloudRows,
+  deletedLecturesFromLocalRows,
+  deletedLecturesFromRegistry,
+  recentlyDeletedCount,
+} from './lib/courses/deletedItems'
+import { useCourses } from './lib/courses/useCourses'
+import { useCloudLibraryRefresh } from './hooks/useCloudLibraryRefresh'
+import { useCloudLibraryRealtime } from './hooks/useCloudLibraryRealtime'
+import { isTerminalRecordingStage, ownsRecordingScreen, resolveRecordingV2Stage } from './lib/recordingV2Stage'
 import { RecordHome } from './components/RecordHome'
 import { SettingsLanguagePage } from './components/SettingsLanguagePage'
 import { SettingsLayout, SettingsPlaceholder, SettingsRow } from './components/SettingsLayout'
@@ -194,6 +247,8 @@ import { designTokens } from './design-system/tokens'
 import './design-system/tokens.css'
 import './App.css'
 import './styles/desktop-v2.css'
+import './styles/courses-v2.css'
+import './styles/course-overlays.css'
 
 // ── Overlay bridge ─────────────────────────────────────────────────────────────
 // Emits caption and status events to the floating Lecture Overlay window via the
@@ -266,7 +321,16 @@ type SidebarPlanUsage = {
   source: 'api' | 'fallback'
 }
 
-type WorkspaceView = 'record' | 'courses' | 'settings'
+/**
+ * `lecture` is a real view, not a flavour of `courses`.
+ *
+ * Opening a lecture from Courses V2 used to set `selectedId` and leave
+ * `workspaceView` on `courses`, so the V2 course grid kept rendering and the
+ * detail was never shown. Lecture Detail V2 is a later phase, so this view
+ * routes to the EXISTING production detail (transcript, summary, player) rather
+ * than to a second, parallel one.
+ */
+type WorkspaceView = 'record' | 'courses' | 'lecture' | 'settings'
 type CourseView =
   | { type: 'all' }
   | { type: 'recentlyDeleted' }
@@ -318,16 +382,27 @@ const FALLBACK_PLAN_USAGE: SidebarPlanUsage = {
 
 // ── Lecture Overlay entry button ──────────────────────────────────────────────
 
+/**
+ * Open the production floating caption overlay.
+ *
+ * Extracted from `LectureOverlayButton` unchanged so Recording V2 and the
+ * legacy button invoke the SAME two Tauri commands. The overlay window itself —
+ * the compact deep-navy one — is not touched by this phase.
+ */
+function openLectureOverlay(): void {
+  void import('@tauri-apps/api/core')
+    .then(({ invoke }) => {
+      void invoke('show_overlay')
+      void invoke('minimize_main_window')
+    })
+    .catch(() => {})
+}
+
 function LectureOverlayButton() {
   const [hovered, setHovered] = useState(false)
   const [active, setActive] = useState(false)
 
-  const handleClick = () => {
-    void import('@tauri-apps/api/core').then(({ invoke }) => {
-      void invoke('show_overlay')
-      void invoke('minimize_main_window')
-    }).catch(() => {})
-  }
+  const handleClick = openLectureOverlay
 
   return (
     <button
@@ -1500,6 +1575,20 @@ function RecordingWorkspace({
 
   const onLiveAudioChunkRef = useRef<((blob: Blob, mime: string) => void) | null>(null)
   const onLivePcmChunkRef = useRef<((buffer: ArrayBuffer, sampleRate: number) => void) | null>(null)
+  /** Set by the LiveEngine effect; re-warms upstream at the real capture rate. */
+  const onCaptureSampleRateRef = useRef<((sampleRate: number) => void) | null>(null)
+  /* ── Audio source ─────────────────────────────────────────────────────────
+     `microphone` (default) or `system`. The ref is what the recorder reads at
+     Start, so the value is frozen for the session even if Settings changes. */
+  const [audioSource, setAudioSourceState] = useState<AudioSource>(() =>
+    typeof localStorage === 'undefined' ? DEFAULT_AUDIO_SOURCE : readAudioSource(localStorage),
+  )
+  const audioSourceRef = useRef(audioSource)
+  const setAudioSource = useCallback((next: AudioSource) => {
+    audioSourceRef.current = next
+    setAudioSourceState(next)
+    if (typeof localStorage !== 'undefined') writeAudioSource(localStorage, next)
+  }, [])
   /** Cloud live captions: one Storage prefix per recording session (before recording row exists). */
   const liveCaptionSessionIdRef = useRef<string | null>(null)
   const liveChunkIndexRef = useRef(0)
@@ -1541,6 +1630,9 @@ function RecordingWorkspace({
   const recorder = useRecorder({
     onLiveAudioChunkRef,
     onPcmChunkRef: onLivePcmChunkRef,
+    onCaptureSampleRate: (sampleRate) => onCaptureSampleRateRef.current?.(sampleRate),
+    // Read once at Start: the session's source is frozen for its lifetime.
+    getAudioSource: () => audioSourceRef.current,
     // Skip the MediaRecorder blob-slice cycle when PCM streaming drives the live engine (v2 path).
     experimentalSkipLiveSlice: useLiveEngineV2ForHosted || (experimentSkipYoumiLiveSlice && usesHosted),
     getOwnerKey: getRecordingOwnerKey,
@@ -1656,7 +1748,7 @@ function RecordingWorkspace({
   const onFinalPhraseRef = useRef<((phrase: string) => void) | null>(null)
   const onDraftPhraseRef = useRef<((phrase: string) => void) | null>(null)
   const liveEngineRef = useRef<LiveEngine | null>(null)
-  const warmSampleRateRef = useRef(probeDefaultAudioSampleRate())
+  const warmSampleRateRef = useRef(LIVE_PCM_SAMPLE_RATE)
   /** LiveEngine v2: single session model (EN/ZH each = committed[] + current|null). */
   const liveCaptionSessionRef = useRef(new LiveCaptionSessionModel())
   /** Joined committed EN text mirror (save / diagnostics). */
@@ -2371,7 +2463,10 @@ function RecordingWorkspace({
     lastFinalTimestampRef.current = 0
     syncLiveCaptionViewFromModel(liveCaptionSessionRef.current.getView())
 
-    warmSampleRateRef.current = probeDefaultAudioSampleRate()
+    // Warm at the rate capture is pinned to, not at whatever the output device
+    // happens to report. See `livePcmCapture` — the two disagreeing is what put
+    // a 3–4s upstream re-handshake on the user's first sentence.
+    warmSampleRateRef.current = LIVE_PCM_SAMPLE_RATE
 
     engine.onEvent((ev) => {
       if (ev.type === 'status') {
@@ -2419,8 +2514,15 @@ function RecordingWorkspace({
       }
       if (ev.type === 'en_interim') {
         liveRouteDiagLog('[LiveEngine][App] en_interim', JSON.stringify({ segmentId: ev.segmentId, rev: ev.rev }))
+        // T7: the interim reached the client. T8 is the state write below.
+        markLatency('T7_client_receive', ev.segmentId)
         const cap = liveCaptionEventFromEngine(ev)
         if (cap) syncLiveCaptionViewFromModel(liveCaptionSessionRef.current.apply(cap))
+        markLatency('T8_state_update', ev.segmentId)
+        // T9: React commits synchronously inside this handler, so the paint that
+        // follows shows this text. Measuring here is the honest "visible" mark
+        // short of a rAF, which does not fire while the window is unpainted.
+        markLatency('T9_visible_render', ev.segmentId)
         return
       }
       if (ev.type === 'en_final') {
@@ -2477,8 +2579,33 @@ function RecordingWorkspace({
     }
     onLiveAudioChunkRef.current = null
 
+    /*
+     * Re-warm at the rate the microphone actually gave us.
+     *
+     * Capture is pinned to LIVE_PCM_SAMPLE_RATE, which the warm above used too,
+     * so this should now be a no-op on every machine. It stays as the safety
+     * net for the one case that can still diverge: a platform that refuses the
+     * requested rate, where `createLivePcmAudioContext` falls back to the
+     * device default. The adapter reacts to a rate change on the first PCM
+     * frame by destroying the upstream session and reconnecting, and that
+     * reconnect would otherwise land on the user's first word.
+     *
+     * Firing here moves it into the gap between pressing Start and speaking, and
+     * PCM keeps buffering in the adapter's queue meanwhile, so nothing is lost.
+     */
+    onCaptureSampleRateRef.current = (sampleRate) => {
+      if (sampleRate === warmSampleRateRef.current) return
+      console.warn(
+        '[live-latency] capture_rate_differs_from_warm',
+        JSON.stringify({ warmSampleRate: warmSampleRateRef.current, captureSampleRate: sampleRate }),
+      )
+      warmSampleRateRef.current = sampleRate
+      void engine.warmUpstream(sampleRate).catch(() => undefined)
+    }
+
     return () => {
       warmCancelled = true
+      onCaptureSampleRateRef.current = null
       onLivePcmChunkRef.current = null
       onLiveAudioChunkRef.current = null
       engine.stop()
@@ -2495,10 +2622,28 @@ function RecordingWorkspace({
   ])
 
   const [recordings, setRecordings] = useState<Recording[]>([])
+  /** Mirrors `recordings` so a refresh can reconcile titles against what is on
+   *  screen without making itself depend on — and re-run for — every change. */
+  const recordingsRef = useRef<Recording[]>([])
+  recordingsRef.current = recordings
+  /** Lectures carrying `deleted_at` from the cloud; the Recently Deleted source. */
+  const [cloudDeletedLectures, setCloudDeletedLectures] = useState<Recording[]>([])
+  /** True once a fetched row proved this database has the deletion columns. */
+  const [cloudDeletionAvailable, setCloudDeletionAvailable] = useState(false)
   /** Durable pending/failed cloud uploads for the current user (Phase 2D-2). */
   const [pendingUploads, setPendingUploads] = useState<PendingUploadMeta[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<RecordingDetail | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [audioLoadError, setAudioLoadError] = useState<string | null>(null)
+  /**
+   * True when the transcript/summary row fetch itself failed (network, backend
+   * error) — distinct from a lecture that genuinely has no summary/transcript
+   * yet. `detail` is null in both cases, so this is the only signal that tells
+   * them apart.
+   */
+  const [detailLoadFailed, setDetailLoadFailed] = useState(false)
+  const [detailRetryNonce, setDetailRetryNonce] = useState(0)
 
   const [libraryActiveScope, setLibraryActiveScope] = useState<LibraryActiveScope>({ kind: 'all' })
   const [courseView, setCourseView] = useState<CourseView>({ type: 'all' })
@@ -2585,6 +2730,8 @@ function RecordingWorkspace({
   ])
 
   const [course, setCourse] = useState('CS 101')
+  /** Canonical Course UUID for the lecture currently being prepared. */
+  const [recordingCourseId, setRecordingCourseId] = useState<string | null>(null)
   const [title, setTitle] = useState('')
 
   const saveInFlightRef = useRef(false)
@@ -2601,6 +2748,32 @@ function RecordingWorkspace({
     null,
   )
   const [permanentPurgeModal, setPermanentPurgeModal] = useState<string[] | null>(null)
+  /* ── Courses V2 (Phase 1B) ────────────────────────────────────────────────
+     Course is a real cloud entity now. `useCourses` owns the repository; this
+     component never touches Supabase for courses directly. */
+  const [openCourseId, setOpenCourseId] = useState<string | null>(null)
+  const [courseDialog, setCourseDialog] = useState<
+    { kind: 'create' } | { kind: 'rename'; courseId: string } | { kind: 'delete'; courseId: string } | null
+  >(null)
+  /** Recently Deleted V2. Distinct from the legacy sidebar's `recentlyDeletedOpen`. */
+  const [coursesV2DeletedOpen, setCoursesV2DeletedOpen] = useState(false)
+  /** Pending permanent delete. Nothing is removed until this is confirmed. */
+  const [purgeDialog, setPurgeDialog] = useState<
+    { kind: 'course'; courseId: string } | { kind: 'lecture'; lectureId: string } | null
+  >(null)
+  /** Confirmation for discarding a live recording. */
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false)
+  /**
+   * Lecture actions, one dialog per verb.
+   *
+   * Rename, Move and Delete used to share one "edit title and course together"
+   * modal, so choosing Rename could rewrite the course and choosing Move could
+   * rewrite the title. Each kind below writes exactly the field its label names.
+   */
+  const [lectureDialog, setLectureDialog] = useState<
+    { kind: 'rename' | 'move' | 'delete'; recordingId: string } | null
+  >(null)
+  const [lectureDialogError, setLectureDialogError] = useState<string | null>(null)
   const [folderDeleteModal, setFolderDeleteModal] = useState<{ folderId: string; folderName: string } | null>(null)
   const [recentlyDeletedOpen, setRecentlyDeletedOpen] = useState(false)
   const [localTrashRows, setLocalTrashRows] = useState<Recording[]>([])
@@ -2708,9 +2881,28 @@ const [editLectureModal, setEditLectureModal] = useState<{
 
 
   const refreshList = useCallback(async (): Promise<Recording[]> => {
-    const list = localOnly
-      ? await listRecordingsLocal()
-      : await listRecordings(supabase!, userId!)
+    let list: Recording[]
+    if (localOnly) {
+      list = await listRecordingsLocal()
+      setCloudDeletedLectures([])
+      setCloudDeletionAvailable(false)
+    } else {
+      // One fetch, both halves. `active` already excludes anything deleted on
+      // ANY device, so an iPad deletion leaves this library without Desktop
+      // having recorded anything locally.
+      const lists = await listLectures(supabase!, userId!)
+      list = lists.active
+      setCloudDeletedLectures(lists.deleted)
+      setCloudDeletionAvailable(lists.cloudDeletionAvailable)
+    }
+    // A rename made on this Mac that has not round-tripped yet must not be
+    // undone by a row read before it landed. Titles only — every other column
+    // is server-authoritative and comes back untouched.
+    list = reconcileLectureTitles(recordingsRef.current, list)
+    // Same shape, for Notes and Marks, each judged by its own clock — an
+    // unsaved Notes edit or a mark just added on this Mac must not be undone by
+    // a row read before either write landed.
+    list = reconcileLectureAnnotations(recordingsRef.current, list)
     setRecordings(list)
     // Durable pending/failed cloud uploads for THIS user, de-duped against cloud
     // (so a successfully-retried recording never shows twice). Best-effort: never
@@ -2826,12 +3018,199 @@ const [editLectureModal, setEditLectureModal] = useState<{
     [libraryLectureLocation],
   )
 
+  /**
+   * The active library.
+   *
+   * `recordings` already excludes anything the cloud reports as deleted, so
+   * this only has to settle the remaining question: does the legacy
+   * device-local registry still get a vote? It does not, once the cloud can
+   * answer — see `lectureDeletionResolution`.
+   */
   const recordingsInLibrary = useMemo(() => {
     if (localOnly) return recordings
     if (!userId) return recordings
     const trashed = new Set(Object.keys(cloudTrash))
-    return recordings.filter((r) => !trashed.has(r.id))
-  }, [recordings, cloudTrash, localOnly, userId])
+    return recordings.filter((r) =>
+      isLectureActive({
+        cloudDeletedAt: r.deletedAt,
+        inLegacyTrash: trashed.has(r.id),
+        cloudDeletionAvailable,
+      }),
+    )
+  }, [recordings, cloudTrash, cloudDeletionAvailable, localOnly, userId])
+
+  const coursesState = useCourses({
+    supabase: supabase ?? null,
+    userId: userId ?? null,
+    localOnly,
+    recordings: recordingsInLibrary,
+  })
+  const cloudLibraryRouteKey =
+    !localOnly && userId && workspaceView === 'courses'
+      ? `${userId}:${openCourseId ?? 'grid'}`
+      : null
+  const cloudLibraryRefresh = useCloudLibraryRefresh({
+    enabled: !localOnly && Boolean(supabase && userId),
+    sessionKey: userId ?? null,
+    routeKey: cloudLibraryRouteKey,
+    refreshCourses: coursesState.refresh,
+    refreshRecordings: refreshList,
+  })
+  useCloudLibraryRealtime({
+    enabled: !localOnly && Boolean(supabase && userId),
+    supabase: supabase ?? null,
+    userId: userId ?? null,
+    refreshNow: cloudLibraryRefresh.refreshForRealtime,
+  })
+  const openCourse = useMemo(
+    () => coursesState.courses.find((c) => c.id === openCourseId) ?? null,
+    [coursesState.courses, openCourseId],
+  )
+  const dialogCourse = useMemo(
+    () =>
+      courseDialog && courseDialog.kind !== 'create'
+        ? (coursesState.courses.find((c) => c.id === courseDialog.courseId) ?? null)
+        : null,
+    [courseDialog, coursesState.courses],
+  )
+  /** Status shown on a lecture row, derived from the real AI job state. */
+  const lectureStatusOf = useCallback(
+    (recording: Recording): LectureStatus =>
+      // Audio persistence is the readiness boundary. AI is enrichment and must
+      // never make a saved lecture look unavailable.
+      recording.storagePath || recording.durationSec > 0
+        ? 'Ready'
+        : recording.aiStatus === 'failed'
+          ? 'Failed'
+          : 'Processing',
+    [],
+  )
+
+  /**
+   * Open the EXISTING production Lecture Detail for one recording.
+   *
+   * Every piece of state the current detail reads is set here, in one place:
+   *
+   *   · `selectedId` — the effect at the top of this component loads
+   *     `RecordingDetail` (transcript, summary status, storage path) from it,
+   *     and `audioUrl` is derived from that row, so the player follows.
+   *   · `detail` is cleared FIRST. The loader only assigns on resolve, so
+   *     without this the previous lecture's transcript and audio stay on screen
+   *     until the new row arrives — a visible stale-lecture flash.
+   *   · `workspaceView` must leave `courses`, or the V2 course grid keeps
+   *     rendering and the detail is never reached. That was Failure D.
+   *
+   * A lecture that is no longer in the library (deleted into Recently Deleted)
+   * is refused rather than opened onto a row that no longer exists.
+   */
+  const openLectureDetail = useCallback(
+    (recordingId: string) => {
+      if (!recordingsInLibrary.some((r) => r.id === recordingId)) return
+      setDetail(null)
+      setSelectedId(recordingId)
+      setLibraryPickedIds([])
+      setLibraryPickMode(false)
+      setWorkspaceView('lecture')
+    },
+    [recordingsInLibrary],
+  )
+
+  /* ── Recently Deleted V2 ──────────────────────────────────────────────────
+     Deleted COURSES and deleted LECTURES are both real cloud rows now, each
+     carrying `deleted_at` + `deletion_updated_at`, so this screen shows the
+     account's deletions rather than this Mac's. Local-only mode reads the
+     IndexedDB trash store; the localStorage registry survives only for a
+     database with no deletion columns. */
+  const deletedLectures = useMemo(() => {
+    const fallback = tDesktop('recording.untitled')
+    if (localOnly) return deletedLecturesFromLocalRows(localTrashRows, fallback)
+    if (cloudDeletionAvailable) return deletedLecturesFromCloudRows(cloudDeletedLectures, fallback)
+    return deletedLecturesFromRegistry(cloudTrash, fallback)
+  }, [localOnly, localTrashRows, cloudDeletionAvailable, cloudDeletedLectures, cloudTrash, tDesktop])
+  const recentlyDeletedTotal = recentlyDeletedCount(coursesState.deletedCourses, deletedLectures)
+
+  /**
+   * The lecture the detail view is showing.
+   *
+   * Taken from the LIST row, not from `detail`: the row is already in memory,
+   * so the header renders immediately with the right title, course and
+   * duration while the transcript and summaries load. Falling back to `detail`
+   * covers the moment a row has left the list but its detail is still open.
+   */
+  const openLecture = useMemo(
+    () =>
+      selectedId
+        ? (recordingsInLibrary.find((r) => r.id === selectedId) ??
+          (detail?.id === selectedId ? detail : null))
+        : null,
+    [selectedId, recordingsInLibrary, detail],
+  )
+  const openLectureCourse = useMemo(
+    () => (openLecture ? findCourseForRecording(openLecture, coursesState.courses) : null),
+    [openLecture, coursesState.courses],
+  )
+
+  const dialogLecture = useMemo(
+    () =>
+      lectureDialog
+        ? (recordingsInLibrary.find((r) => r.id === lectureDialog.recordingId) ?? null)
+        : null,
+    [lectureDialog, recordingsInLibrary],
+  )
+  const dialogLectureCourse = useMemo(
+    () => (dialogLecture ? findCourseForRecording(dialogLecture, coursesState.courses) : null),
+    [dialogLecture, coursesState.courses],
+  )
+
+  const purgeCourse = useMemo(
+    () =>
+      purgeDialog?.kind === 'course'
+        ? (coursesState.deletedCourses.find((c) => c.id === purgeDialog.courseId) ?? null)
+        : null,
+    [purgeDialog, coursesState.deletedCourses],
+  )
+  const purgeLecture = useMemo(
+    () =>
+      purgeDialog?.kind === 'lecture'
+        ? (deletedLectures.find((row) => row.id === purgeDialog.lectureId) ?? null)
+        : null,
+    [purgeDialog, deletedLectures],
+  )
+
+  /* ── The recording flow's own stage ───────────────────────────────────────
+     Derived from state that already exists — the flow reducer, the save/AI
+     outcome records, the saved row and the durable-session list. Nothing here
+     starts, stops, retries or uploads; it only decides which screen is shown. */
+  const savedRecording = useMemo(() => {
+    const id = recentCapture?.recordingId ?? null
+    if (!id) return null
+    const row = recordings.find((r) => r.id === id) ?? (detail?.id === id ? detail : null)
+    if (!row) return null
+    return {
+      transcriptReady: Boolean(row.transcriptReady || row.aiStatus === 'transcript_ready' || row.aiStatus === 'done'),
+      summaryReady: row.aiStatus === 'done',
+    }
+  }, [recentCapture, recordings, detail])
+
+  const recordingStage = resolveRecordingV2Stage({
+    recorderStatus: recorder.status as 'idle' | 'recording' | 'paused',
+    flowPhase: flow.phase,
+    recentCapture,
+    recentAi,
+    saved: savedRecording,
+    // Recovery is the EXISTING durable-session prompt. This only reports that
+    // it is pending; the existing handlers still own Save / Keep / Delete.
+    recoveryPending: recoveredSessions.length > 0 && recorder.status === 'idle' && flow.phase === 'idle',
+  })
+
+  /** The identity of the course currently selected on Record Home. */
+  const activeCourseIdentity = useMemo(
+    () =>
+      courseIdentity(
+        findCourseForRecording({ course, courseId: recordingCourseId }, coursesState.courses),
+      ),
+    [course, recordingCourseId, coursesState.courses],
+  )
 
   const unfiledRecordings = useMemo(
     () =>
@@ -2917,19 +3296,65 @@ const [editLectureModal, setEditLectureModal] = useState<{
   useEffect(() => {
     if (!selectedId) {
       setDetail(null)
+      setAudioUrl(null)
+      setAudioLoadError(null)
+      setDetailLoadFailed(false)
       return
     }
     let cancelled = false
-    const p = localOnly
-      ? getRecordingDetailLocal(selectedId)
-      : getRecordingDetail(supabase!, userId!, selectedId)
-    void p.then((row) => {
-      if (!cancelled) setDetail(row)
-    })
+    setAudioUrl(null)
+    setAudioLoadError(null)
+    setDetailLoadFailed(false)
+    void (async () => {
+      try {
+        if (localOnly) {
+          const row = await getRecordingDetailLocal(selectedId)
+          if (!cancelled) {
+            setDetail(row)
+            setAudioUrl(row?.audioUrl ?? null)
+          }
+          return
+        }
+
+        // Render the lecture row first. Storage signing is independent and may
+        // be slow or fail; it must never keep the whole lecture in Loading.
+        const row = await getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false })
+        if (cancelled || !row) return
+        setDetail(row)
+        try {
+          const signed = await withTimeout(
+            getRecordingAudioUrl(supabase!, row.storagePath),
+            SAVE_META_TIMEOUT_MS,
+            'Load audio playback',
+          )
+          if (!cancelled) setAudioUrl(signed)
+        } catch (error) {
+          if (!cancelled) setAudioLoadError(error instanceof Error ? error.message : 'Audio could not load')
+        }
+      } catch {
+        // The row fetch itself failed — not the same as a row with no
+        // summary/transcript yet. `detailLoadFailed` is how the detail page
+        // tells those two apart instead of showing "not generated yet" for a
+        // network or backend failure.
+        if (!cancelled) {
+          setDetail(null)
+          setDetailLoadFailed(true)
+        }
+      }
+    })()
     return () => {
       cancelled = true
     }
-  }, [selectedId, supabase, userId, localOnly])
+  }, [selectedId, supabase, userId, localOnly, detailRetryNonce])
+
+  const retryAudioLoad = useCallback(() => {
+    if (localOnly || !detail || !supabase) return
+    setAudioUrl(null)
+    setAudioLoadError(null)
+    void withTimeout(getRecordingAudioUrl(supabase, detail.storagePath), SAVE_META_TIMEOUT_MS, 'Load audio playback')
+      .then(setAudioUrl)
+      .catch((error) => setAudioLoadError(error instanceof Error ? error.message : 'Audio could not load'))
+  }, [localOnly, detail, supabase])
 
   useEffect(() => {
     if (!selectedId) return
@@ -3000,6 +3425,9 @@ const [editLectureModal, setEditLectureModal] = useState<{
       void refreshHostedHealth()
     }
     dispatchFlow({ type: 'LIVE_START' })
+    // T0 for the latency chain: everything downstream is measured from here.
+    resetLatencyDiagnostics()
+    markSpeechOnset()
     liveCaptionSessionIdRef.current = crypto.randomUUID()
     youmiLiveLog('emit', 'Start pressed: new live session', {
       sessionSuffix: liveCaptionSessionIdRef.current.slice(-12),
@@ -3298,6 +3726,8 @@ const [editLectureModal, setEditLectureModal] = useState<{
     }
 
     saveInFlightRef.current = true
+    // One table per run, printed without a debugger attached.
+    reportLatencySummary()
     setRecentCapture((prev) => nextRecentCaptureForNewSave(prev))
     dispatchFlow({ type: 'CAPTURE_BEGIN', recordingId })
 
@@ -3479,6 +3909,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
               saveResult = await withTimeout(
                 uploadLectureAudioViaServer(supabase!, recordingId, blob, mime, durationSec, {
                   course: courseVal,
+                  courseId: recordingCourseId,
                   title: titleVal,
                   liveTranscript: liveTranscriptCanonical,
                   liveTranscriptRaw,
@@ -3631,6 +4062,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 userId: userId!,
                 id: recordingId,
                 course: courseVal,
+                courseId: recordingCourseId,
                 title: titleVal,
                 durationSec,
                 mime,
@@ -4086,19 +4518,30 @@ const [editLectureModal, setEditLectureModal] = useState<{
         if (localOnly) {
           await moveRecordingsToTrashLocal(unique)
         } else if (userId) {
-          setCloudTrash((prev) => {
-            const next = { ...prev }
+          // Authoritative path: stamp `deleted_at` + `deletion_updated_at` on
+          // the row, so every device sees this deletion. Falls back to the
+          // device-local registry only when the database has no such columns.
+          try {
             for (const id of unique) {
-              const r = recordings.find((x) => x.id === id)
-              next[id] = {
-                trashedAt: Date.now(),
-                title: r?.title?.trim() || 'Untitled lecture',
-                course: r?.course?.trim() || '',
-              }
+              await softDeleteRecordingRemote(supabase!, userId, id)
             }
-            saveCloudTrashRegistry(userId, next)
-            return next
-          })
+          } catch (err) {
+            if (!(err instanceof CloudSoftDeleteUnavailableError)) throw err
+            setCloudDeletionAvailable(false)
+            setCloudTrash((prev) => {
+              const next = { ...prev }
+              for (const id of unique) {
+                const r = recordings.find((x) => x.id === id)
+                next[id] = {
+                  trashedAt: Date.now(),
+                  title: r?.title?.trim() || 'Untitled lecture',
+                  course: r?.course?.trim() || '',
+                }
+              }
+              saveCloudTrashRegistry(userId, next)
+              return next
+            })
+          }
         }
         setLibraryLectureLocation((prev) => {
           const next = { ...prev }
@@ -4119,7 +4562,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
         setDeleteActionBusy(false)
       }
     },
-    [localOnly, userId, recordings, refreshList, selectedId],
+    [localOnly, supabase, userId, recordings, refreshList, selectedId],
   )
 
   const restoreLecturesFromTrash = useCallback(
@@ -4131,7 +4574,21 @@ const [editLectureModal, setEditLectureModal] = useState<{
         if (localOnly) {
           for (const id of unique) await restoreRecordingFromTrashLocal(id)
         } else if (userId) {
+          // Clear `deleted_at` and stamp a FRESH `deletion_updated_at`, so this
+          // restore outranks a tombstone another device may still be holding.
+          try {
+            for (const id of unique) {
+              await restoreRecordingRemote(supabase!, userId, id)
+            }
+          } catch (err) {
+            if (!(err instanceof CloudSoftDeleteUnavailableError)) throw err
+            setCloudDeletionAvailable(false)
+          }
+          // Drop any legacy entry regardless of which path ran. The resolver
+          // already refuses to let stale trash hide a cloud-active lecture;
+          // pruning here means the dead entry cannot mislead later either.
           setCloudTrash((prev) => {
+            if (!unique.some((id) => id in prev)) return prev
             const next = { ...prev }
             for (const id of unique) delete next[id]
             saveCloudTrashRegistry(userId, next)
@@ -4144,7 +4601,28 @@ const [editLectureModal, setEditLectureModal] = useState<{
         setDeleteActionBusy(false)
       }
     },
-    [localOnly, userId, refreshList],
+    [localOnly, supabase, userId, refreshList],
+  )
+
+  /**
+   * Restore one lecture from Recently Deleted, bringing its course back with it.
+   *
+   * Restoring a lecture into a course that is ITSELF soft-deleted would put the
+   * lecture somewhere the user cannot navigate to — it would leave the bin and
+   * then be invisible in Courses. So the owning course is restored first, and
+   * only then the lecture, which keeps the lecture from existing in a
+   * courseless limbo even for one render.
+   */
+  const restoreLectureWithCourse = useCallback(
+    async (lectureId: string) => {
+      const lecture = deletedLectures.find((row) => row.id === lectureId)
+      if (lecture) {
+        const owner = courseToRestoreWithLecture(lecture, coursesState.deletedCourses)
+        if (owner) await coursesState.restore(owner.id)
+      }
+      await restoreLecturesFromTrash([lectureId])
+    },
+    [deletedLectures, coursesState, restoreLecturesFromTrash],
   )
 
   const handleDeleteSelectedLectures = useCallback(() => {
@@ -4246,9 +4724,11 @@ const openEditLectureModal = useCallback(() => {
     const courseTrim = editLectureModal.courseDraft.trim()
     const titleTrim = editLectureModal.titleDraft.trim()
     const existingCourse = (existing.course ?? '').trim()
-    const existingTitle = (existing.title ?? '').trim()
     const courseNext = courseTrim || existingCourse || 'Untitled course'
-    const titleNext = titleTrim || existingTitle || `Lecture ${formatDate(existing.createdAt)}`
+    // `undefined` means "do not write title at all". Clearing the field is a
+    // request to stop naming the lecture, not a request to store a generated
+    // name over the one that is already there.
+    const titleNext = isMeaningfulLectureTitle(titleTrim) ? titleTrim : undefined
 
     setLectureMetadataBusy(true)
     try {
@@ -4262,12 +4742,15 @@ const openEditLectureModal = useCallback(() => {
         }
         await updateRecordingMetadata(supabase, userId, id, { course: courseNext, title: titleNext })
       }
-      setRecordings((prev) =>
-        prev.map((r) => (r.id === id ? { ...r, course: courseNext, title: titleNext } : r)),
-      )
-      setDetail((prev) =>
-        prev && prev.id === id ? { ...prev, course: courseNext, title: titleNext } : prev,
-      )
+      // Mirror exactly what was written: when `titleNext` is undefined the row
+      // kept its stored name, so local state must keep it too.
+      const applyEdit = <T extends { course: string; title: string }>(row: T): T => ({
+        ...row,
+        course: courseNext,
+        ...(titleNext === undefined ? {} : { title: titleNext }),
+      })
+      setRecordings((prev) => prev.map((r) => (r.id === id ? applyEdit(r) : r)))
+      setDetail((prev) => (prev && prev.id === id ? applyEdit(prev) : prev))
       setEditLectureModal(null)
     } catch (e) {
       setEditLectureModal((prev) =>
@@ -4277,6 +4760,120 @@ const openEditLectureModal = useCallback(() => {
       setLectureMetadataBusy(false)
     }
   }, [editLectureModal, recordings, detail, localOnly, supabase, userId])
+
+  /**
+   * Rename a lecture. Title only.
+   *
+   * `updateRecordingMetadata` takes both fields, so the CURRENT course is read
+   * back and written unchanged rather than omitted — the mutation is the
+   * existing production one, and this adapter simply refuses to move anything.
+   */
+  const renameLecture = useCallback(
+    async (recordingId: string, title: string) => {
+      const existing =
+        recordings.find((r) => r.id === recordingId) ??
+        (detail?.id === recordingId ? detail : null)
+      if (!existing) return false
+      const next = title.trim()
+      // A rename to a placeholder is refused outright: `Untitled lecture` is a
+      // render-time fallback and must never become the stored name.
+      if (!isMeaningfulLectureTitle(next)) return false
+
+      setLectureMetadataBusy(true)
+      setLectureDialogError(null)
+      try {
+        // TITLE ONLY. The course is deliberately absent from this payload — a
+        // rename that also carries a course is how a rename becomes a move.
+        if (localOnly) {
+          await updateRecordingLocal(recordingId, { title: next })
+        } else {
+          if (!supabase || !userId) throw new Error('Not signed in.')
+          await updateRecordingMetadata(supabase, userId, recordingId, { title: next })
+        }
+        setRecordings((prev) =>
+          prev.map((r) => (r.id === recordingId ? { ...r, title: next } : r)),
+        )
+        setDetail((prev) => (prev && prev.id === recordingId ? { ...prev, title: next } : prev))
+        return true
+      } catch (e) {
+        setLectureDialogError(e instanceof Error ? e.message : String(e))
+        return false
+      } finally {
+        setLectureMetadataBusy(false)
+      }
+    },
+    [recordings, detail, localOnly, supabase, userId],
+  )
+
+  /**
+   * Persist Notes for the open lecture. Cloud only — local-only mode has no
+   * store for this field, so `LectureDetailPage` never offers the editor there
+   * (`annotationsEditable`) and this is not called.
+   *
+   * Rejects on failure so the editor can say so and keep the unsaved text; it
+   * never optimistically marks the row saved before the write is confirmed.
+   */
+  const saveLectureNotes = useCallback(
+    async (recordingId: string, notes: string): Promise<void> => {
+      if (!supabase || !userId) throw new Error('Not signed in.')
+      const now = Date.now()
+      await updateRecordingNotesMarks(supabase, userId, recordingId, { notes })
+      setRecordings((prev) =>
+        prev.map((r) => (r.id === recordingId ? { ...r, notes, notesUpdatedAt: now } : r)),
+      )
+    },
+    [supabase, userId],
+  )
+
+  /**
+   * Append one mark to the open lecture's `marked_timestamps`.
+   *
+   * V1 contract: `number[]` of elapsed milliseconds, no id, no per-mark
+   * metadata, whole-array replacement. `appendMark` does not sort or
+   * de-duplicate — reordering here would rewrite marks another device wrote.
+   */
+  const addLectureMark = useCallback(
+    async (recordingId: string, atMs: number): Promise<void> => {
+      if (!supabase || !userId) throw new Error('Not signed in.')
+      const existing = recordings.find((r) => r.id === recordingId)
+      const current = parseMarks(existing?.markedTimestamps)
+      const next = appendMark(current, atMs)
+      const now = Date.now()
+      await updateRecordingNotesMarks(supabase, userId, recordingId, { markedTimestamps: next })
+      setRecordings((prev) =>
+        prev.map((r) =>
+          r.id === recordingId ? { ...r, markedTimestamps: next, marksUpdatedAt: now } : r,
+        ),
+      )
+    },
+    [recordings, supabase, userId],
+  )
+
+  /**
+   * Move a lecture to another course. Course only.
+   *
+   * Goes through the Course repository so the dual write is preserved:
+   * `course_id` and the legacy `course` label in one statement. The title is
+   * never part of this payload.
+   */
+  const moveLectureToCourse = useCallback(
+    async (recordingId: string, courseId: string | null) => {
+      setLectureDialogError(null)
+      const result = await coursesState.assignLecture(recordingId, courseId)
+      if (!result) {
+        setLectureDialogError(coursesState.mutationError)
+        return false
+      }
+      setRecordings((prev) =>
+        prev.map((r) => (r.id === recordingId ? { ...r, course: result.courseName } : r)),
+      )
+      setDetail((prev) =>
+        prev && prev.id === recordingId ? { ...prev, course: result.courseName } : prev,
+      )
+      return true
+    },
+    [coursesState],
+  )
 
   const deleteFolderIfEmpty = (folderId?: string) => {
     setLibraryFolderNotice(null)
@@ -4381,8 +4978,6 @@ useEffect(() => {
     },
     [moveLectureToFolder, moveLectureToUnfiled, resetDndState],
   )
-
-  const audioUrl = detail?.audioUrl ?? null
 
   useEffect(() => {
     return () => {
@@ -4577,17 +5172,56 @@ useEffect(() => {
   const legacySettingsEnabled: boolean = false
 
   /**
-   * Desktop V2 owns two views in Phase 1A: the idle Record home and Settings.
-   * Anything else — including an ACTIVE recording — stays on the legacy shell.
-   * This is a single source of truth so the shell choice and the page choice can
-   * never disagree.
+   * The single source of truth for which shell and which page render.
+   *
+   * An ACTIVE recording is now a V2 view (`recording`). It used to be `null`,
+   * which dropped the user out of the V2 shell and back into the legacy
+   * `.yl-shell` cockpit the moment they pressed Start — the regression this
+   * gate exists to fix.
+   *
+   * `null` selects the legacy shell. Nothing in the normal user path reaches it
+   * any more: Lecture Detail is a V2 view (`lecture`), so Stop & Save,
+   * Course Detail rows, Recent lists and Record Home all land on the same
+   * production screen. The legacy detail markup still exists but is
+   * unreachable.
+   *
+   * The recording screen is selected from `recordingStage`, not from the
+   * recorder alone: `handleStopAndSave` awaits `recorder.stop()` first, so the
+   * recorder reports idle while the pipeline is still saving and uploading, and
+   * keying on it dropped the user onto Record Home mid-save.
    */
-  const desktopV2View: 'record' | 'settings' | null =
-    workspaceView === 'settings'
-      ? 'settings'
-      : workspaceView === 'record' && recorder.status === 'idle'
-        ? 'record'
-        : null
+  const desktopV2View:
+    | 'record'
+    | 'recording'
+    | 'settings'
+    | 'courses'
+    | 'courseDetail'
+    | 'recentlyDeleted'
+    | 'lecture' =
+    ownsRecordingScreen(recordingStage)
+      ? 'recording'
+      : workspaceView === 'settings'
+        ? 'settings'
+        : workspaceView === 'lecture'
+          ? // A lecture view whose lecture has gone — deleted from under it, or
+            // dropped from the library — falls back to Courses, NOT to the
+            // legacy shell. This was the last remaining route into legacy UI:
+            // `null` selected `YoumiLensShell`, and the effect that clears
+            // `selectedId` when a recording leaves the library does not reset
+            // `workspaceView`.
+            openLecture
+            ? 'lecture'
+            : 'courses'
+          : workspaceView === 'courses'
+            ? coursesV2DeletedOpen
+              ? 'recentlyDeleted'
+              // `openCourse`, not `openCourseId`: a course deleted while its
+              // detail is open leaves the id set but the row gone, and that
+              // combination also used to reach the legacy shell.
+              : openCourse
+                ? 'courseDetail'
+                : 'courses'
+            : 'record'
 
   const settingsDetail =
     settingsSection === 'language' ? (
@@ -4595,6 +5229,52 @@ useEffect(() => {
         preferences={languagePreferences}
         onPreferenceChange={setLanguagePreference}
       />
+    ) : settingsSection === 'capture' ? (
+      <>
+        <h2>{tDesktop('settings.capture')}</h2>
+        <p className="settings-v2__lead">{tDesktop('capture.audioSourceHelp')}</p>
+        <div className="settings-v2__group">
+          <SettingsRow
+            name={tDesktop('capture.sourceMicrophone')}
+            help={tDesktop('capture.sourceMicrophoneHelp')}
+            control={
+              <button
+                type="button"
+                className="v2-btn"
+                aria-pressed={audioSource === 'microphone'}
+                disabled={recorder.status !== 'idle'}
+                onClick={() => setAudioSource('microphone')}
+              >
+                {audioSource === 'microphone' ? '✓' : ''}
+              </button>
+            }
+          />
+          {/* Hidden, not disabled, when the WebView has no getDisplayMedia:
+              an option that cannot work should not be offered at all. */}
+          {systemAudioSupported() ? (
+            <SettingsRow
+              name={tDesktop('capture.sourceSystem')}
+              help={`${tDesktop('capture.sourceSystemHelp')} ${tDesktop('capture.systemPickerNote')}`}
+              control={
+                <button
+                  type="button"
+                  className="v2-btn"
+                  aria-pressed={audioSource === 'system'}
+                  disabled={recorder.status !== 'idle'}
+                  onClick={() => setAudioSource('system')}
+                >
+                  {audioSource === 'system' ? '✓' : ''}
+                </button>
+              }
+            />
+          ) : (
+            <SettingsRow
+              name={tDesktop('capture.sourceSystem')}
+              help={tDesktop('capture.systemUnsupported')}
+            />
+          )}
+        </div>
+      </>
     ) : settingsSection === 'appearance' ? (
       <>
         <h2>{tDesktop('settings.appearance')}</h2>
@@ -4699,48 +5379,275 @@ useEffect(() => {
       />
     )
 
+  // The recording screen is shared by two branches: the ACTIVE flow
+  // (`desktopV2View === 'recording'`) and a TERMINAL stage shown on Record
+  // (`desktopV2View === 'record'` while a saved result or recovery decision is
+  // still waiting on the user). Hoisted so the identical element renders in both
+  // without duplicating its props. Terminal stages no longer PIN navigation:
+  // `ownsRecordingScreen` excludes them, so the sidebar can leave Record and the
+  // recovery card stays recoverable rather than trapping the user.
+  const recordingScreen = (
+    <RecordingV2
+      t={tDesktop}
+      stage={recordingStage}
+      courseName={course.trim() || tDesktop('record.unfiled')}
+      courseIdentity={activeCourseIdentity}
+      lectureTitle={title.trim() || tDesktop('recording.untitled')}
+      elapsed={formatClock(recorder.elapsedSec)}
+      languageLine={`${tDesktop(AUDIO_SOURCE_LABEL_KEY[audioSource])} · ${spokenLanguageLabel(liveLang)} → ${
+        translateTarget === 'zh' ? 'Chinese' : 'English'
+      } · ${
+        languagePreferences.languageMode === 'bilingual'
+          ? tDesktop('record.bilingual')
+          : tDesktop('record.captionsOnly')
+      }`}
+      sourceCommitted={primaryCaption}
+      sourceDraft={primaryCaptionDraft}
+      translationCommitted={secondaryCaption}
+      translationDraft={secondaryCaptionDraft}
+      translationEnabled={translateTarget !== 'off'}
+      translationPending={useLiveEngineV2 && Boolean(primaryCaptionDraft.trim())}
+      notice={
+        liveCaptionChunkNotice
+          ? {
+              tier: liveCaptionChunkNotice.kind === 'fatal' ? 'fatal' : 'info',
+              text: liveCaptionChunkNotice.message,
+            }
+          : liveCaptionSessionSurface
+            ? {
+                tier: liveCaptionSessionSurface.tier === 'fatal' ? 'fatal' : 'info',
+                text: liveCaptionSessionSurface.text,
+              }
+            : null
+      }
+      failureMessage={recentCapture?.kind === 'failure' ? recentCapture.message : null}
+      busy={saveOrFinishBusy}
+      canOpenOverlay={isTauriContext()}
+      onOpenOverlay={openLectureOverlay}
+      onDiscard={() => setDiscardConfirmOpen(true)}
+      onPause={pauseRecording}
+      onResume={resumeRecording}
+      onStopAndSave={() => void handleStopAndSave()}
+      onViewLecture={() => {
+        // The EXACT saved recording, through the one shared opener. Clearing
+        // the outcome first releases this screen, so the lecture is not
+        // rendered behind a stage panel that still claims to be saving.
+        const id = recentCapture?.recordingId
+        setRecentCapture(null)
+        setRecentAi(null)
+        if (id) openLectureDetail(id)
+      }}
+      onRecordAnother={() => {
+        setRecentCapture(null)
+        setRecentAi(null)
+        setTitle('')
+        // Recovery Dismiss: hide the prompt for this session only. The durable
+        // session and its audio chunks stay in IndexedDB, so the recording
+        // remains recoverable on the next launch — nothing is deleted.
+        setRecoveredSessions([])
+        setWorkspaceView('record')
+      }}
+      onRetry={() => {
+        // The existing production retry: clear the outcome and let the user
+        // save again from the durable session. Nothing about the upload or
+        // recovery logic changes here.
+        setRecentCapture(null)
+      }}
+    />
+  )
+
   const desktopV2Page =
     desktopV2View === 'record' ? (
-      <RecordHome
-        course={course}
-        title={title}
-        preferences={languagePreferences}
-        disabled={saveOrFinishBusy}
-        recentLectures={recordingsInLibrary
-          .slice()
-          .sort((a, b) => b.createdAt - a.createdAt)
-          .slice(0, 3)
-          .map((recording) => ({
-            id: recording.id,
-            title: recording.title?.trim() || 'Untitled lecture',
-            course: recording.course?.trim() || 'Unfiled',
-            duration: formatClock(recording.durationSec),
-            status:
-              recording.aiStatus === 'failed'
-                ? ('Failed' as const)
-                : recording.aiStatus && !['done', 'transcript_ready'].includes(recording.aiStatus)
-                  ? ('Processing' as const)
-                  : ('Ready' as const),
-          }))}
-        onTitleChange={setTitle}
-        onStartRecording={startRecording}
-        onOpenSettings={() => {
-          setSettingsSection('language')
-          setWorkspaceView('settings')
+      isTerminalRecordingStage(recordingStage) ? (
+        recordingScreen
+      ) : (
+        <RecordHome
+          course={course}
+          courseIdentity={activeCourseIdentity}
+          audioSourceLabel={tDesktop(AUDIO_SOURCE_LABEL_KEY[audioSource])}
+          title={title}
+          preferences={languagePreferences}
+          disabled={saveOrFinishBusy}
+          recentLectures={recordingsInLibrary
+            .slice()
+            .sort((a, b) => b.createdAt - a.createdAt)
+            .slice(0, 3)
+            .map((recording) => ({
+              id: recording.id,
+              title: recording.title?.trim() || 'Untitled lecture',
+              course: recording.course?.trim() || 'Unfiled',
+              duration: formatClock(recording.durationSec),
+              status:
+                recording.storagePath || recording.durationSec > 0
+                  ? ('Ready' as const)
+                  : recording.aiStatus === 'failed'
+                    ? ('Failed' as const)
+                    : ('Processing' as const),
+            }))}
+          onTitleChange={setTitle}
+          onStartRecording={startRecording}
+          onOpenSettings={() => {
+            setSettingsSection('language')
+            setWorkspaceView('settings')
+          }}
+          onChangeCourse={() => setWorkspaceView('courses')}
+          onNewCourse={() => setWorkspaceView('courses')}
+          onViewAll={() => setWorkspaceView('courses')}
+          onOpenLecture={openLectureDetail}
+        />
+      )
+    ) : desktopV2View === 'recording' ? (
+      recordingScreen
+    ) : desktopV2View === 'recentlyDeleted' ? (
+      <RecentlyDeletedPage
+        t={tDesktop}
+        deletedCourses={coursesState.deletedCourses}
+        deletedLectures={deletedLectures}
+        activeCourses={coursesState.courses}
+        capabilities={coursesState.capabilities}
+        busy={coursesState.busy || deleteActionBusy}
+        loading={coursesState.loading}
+        error={coursesState.error}
+        onRetry={() => void coursesState.refresh()}
+        restoreError={restoreError}
+        formatDate={formatDate}
+        onBack={() => {
+          setRestoreError(null)
+          setCoursesV2DeletedOpen(false)
         }}
-        onChangeCourse={() => setWorkspaceView('courses')}
-        onNewCourse={() => setWorkspaceView('courses')}
-        onViewAll={() => setWorkspaceView('courses')}
-        onOpenLecture={(id) => {
-          setSelectedId(id)
+        onRestoreCourse={(courseId) => {
+          setRestoreError(null)
+          void coursesState.restore(courseId).then((ok) => {
+            if (!ok) setRestoreError(tDesktop('deleted.restoreFailed'))
+          })
+        }}
+        onPurgeCourse={(courseId) => setPurgeDialog({ kind: 'course', courseId })}
+        onRestoreLecture={(lectureId) => {
+          setRestoreError(null)
+          void restoreLectureWithCourse(lectureId).catch(() => {
+            setRestoreError(tDesktop('deleted.restoreFailed'))
+          })
+        }}
+        onPurgeLecture={(lectureId) => setPurgeDialog({ kind: 'lecture', lectureId })}
+      />
+    ) : desktopV2View === 'lecture' && openLecture ? (
+      <LectureDetailPage
+        t={tDesktop}
+        recording={openLecture}
+        detail={detail?.id === openLecture.id ? detail : null}
+        detailLoadFailed={detailLoadFailed}
+        onRetryDetail={() => setDetailRetryNonce((n) => n + 1)}
+        course={openLectureCourse}
+        audioUrl={detail?.id === openLecture.id ? audioUrl : null}
+        audioError={detail?.id === openLecture.id ? audioLoadError : null}
+        onRetryAudio={retryAudioLoad}
+        languageLine={`${spokenLanguageLabel(liveLang)} → ${
+          translateTarget === 'zh' ? 'Chinese' : 'English'
+        }`}
+        formatDate={formatDate}
+        formatDuration={formatClock}
+        backLabel={openLectureCourse ? openLectureCourse.name : tDesktop('courses.title')}
+        onBack={() => {
+          // Back to the owning course when there is one, otherwise the grid.
+          setOpenCourseId(openLectureCourse ? openLectureCourse.id : null)
           setWorkspaceView('courses')
         }}
+        onRename={() => {
+          setLectureDialogError(null)
+          setLectureDialog({ kind: 'rename', recordingId: openLecture.id })
+        }}
+        onMove={() => {
+          setLectureDialogError(null)
+          setLectureDialog({ kind: 'move', recordingId: openLecture.id })
+        }}
+        onDelete={() => {
+          setLectureDialogError(null)
+          setLectureDialog({ kind: 'delete', recordingId: openLecture.id })
+        }}
+        actionsDisabled={lectureMetadataBusy || deleteActionBusy}
+        onSaveNotes={(notes) => saveLectureNotes(openLecture.id, notes)}
+        onAddMark={(atMs) => addLectureMark(openLecture.id, atMs)}
+        annotationsEditable={!localOnly && Boolean(supabase) && Boolean(userId)}
       />
     ) : desktopV2View === 'settings' ? (
       <SettingsLayout section={settingsSection} onSectionChange={setSettingsSection}>
         {settingsDetail}
       </SettingsLayout>
-    ) : null
+    ) : desktopV2View === 'courseDetail' && openCourse ? (
+      <CourseDetailPage
+        t={tDesktop}
+        course={openCourse}
+        courses={coursesState.courses}
+        recordings={recordingsInLibrary}
+        capabilities={coursesState.capabilities}
+        loading={coursesState.loading}
+        error={coursesState.error}
+        onRetry={() => void coursesState.refresh()}
+        lectureStatus={lectureStatusOf}
+        formatDuration={formatClock}
+        formatDate={formatDate}
+        onBack={() => setOpenCourseId(null)}
+        onStartLecture={() => {
+          // Start a lecture under THIS course: preserve the canonical UUID, then
+          // begin recording immediately (the SAME `startRecording` path the
+          // Record Home "Start" button uses — no second recorder). Recording V2
+          // opens as soon as the mic is live, and Finish/upload writes this
+          // course's UUID as `course_id`.
+          setCourse(openCourse.name)
+          setRecordingCourseId(openCourse.id)
+          setOpenCourseId(null)
+          setWorkspaceView('record')
+          startRecording()
+        }}
+        // The EXISTING Lecture Detail. `openCourseId` is deliberately kept, so
+        // leaving the lecture returns to this course rather than to the grid.
+        onOpenLecture={openLectureDetail}
+        onRenameCourse={() => setCourseDialog({ kind: 'rename', courseId: openCourse.id })}
+        onDeleteCourse={() => setCourseDialog({ kind: 'delete', courseId: openCourse.id })}
+      />
+    ) : desktopV2View === 'courses' ? (
+      <CoursesPage
+        t={tDesktop}
+        courses={coursesState.courses}
+        recordings={recordingsInLibrary}
+        capabilities={coursesState.capabilities}
+        loading={coursesState.loading}
+        error={coursesState.error}
+        onRetry={() => void coursesState.refresh()}
+        lectureStatus={lectureStatusOf}
+        formatDuration={formatClock}
+        onOpenCourse={(id) => setOpenCourseId(id)}
+        onOpenLecture={openLectureDetail}
+        onNewCourse={() => setCourseDialog({ kind: 'create' })}
+        onRenameCourse={(id) => setCourseDialog({ kind: 'rename', courseId: id })}
+        onDeleteCourse={(id) => setCourseDialog({ kind: 'delete', courseId: id })}
+        recentlyDeletedCount={recentlyDeletedTotal}
+        onOpenRecentlyDeleted={() => setCoursesV2DeletedOpen(true)}
+      />
+    ) : (
+      /* Total fallback. `desktopV2View` is non-nullable and every case above is
+         covered, so this is unreachable — but it is Courses rather than `null`
+         because `null` is what selects the legacy shell, and no unforeseen
+         state may put the user back there. */
+      <CoursesPage
+        t={tDesktop}
+        courses={coursesState.courses}
+        recordings={recordingsInLibrary}
+        capabilities={coursesState.capabilities}
+        loading={coursesState.loading}
+        error={coursesState.error}
+        onRetry={() => void coursesState.refresh()}
+        lectureStatus={lectureStatusOf}
+        formatDuration={formatClock}
+        onOpenCourse={(id) => setOpenCourseId(id)}
+        onOpenLecture={openLectureDetail}
+        onNewCourse={() => setCourseDialog({ kind: 'create' })}
+        onRenameCourse={(id) => setCourseDialog({ kind: 'rename', courseId: id })}
+        onDeleteCourse={(id) => setCourseDialog({ kind: 'delete', courseId: id })}
+        recentlyDeletedCount={recentlyDeletedTotal}
+        onOpenRecentlyDeleted={() => setCoursesV2DeletedOpen(true)}
+      />
+    )
 
   const workspacePage =
     workspaceView === 'courses' ? (
@@ -5365,6 +6272,11 @@ useEffect(() => {
               Lectures go to <strong>Recently deleted</strong> first. You can restore them from there, or permanently
               delete them later.
             </p>
+            {/* Truthful scope: lecture deletion is a per-device registry today,
+                so this must not read as a cross-device delete. */}
+            <p style={{ margin: '0 0 0.65rem', fontSize: '0.8rem', lineHeight: 1.45, color: '#844309' }}>
+              {tDesktop('deleted.lectureScopeNotice')}
+            </p>
             {trashConfirmModal.scope.kind === 'global' ? (
               <p
                 style={{
@@ -5628,12 +6540,225 @@ useEffect(() => {
       ) : null}
       {/* EITHER the V2 shell OR the legacy shell — never both, and the hidden
           one is not rendered at all rather than suppressed with CSS. */}
+      {/* Course dialogs. Portaled to <body> from inside, so they escape the
+          card and row overflow clips. */}
+      {courseDialog?.kind === 'create' ? (
+        <CreateCourseDialog
+          t={tDesktop}
+          busy={coursesState.busy}
+          error={coursesState.mutationError}
+          nameConflicts={(name) => coursesState.nameConflicts(name)}
+          onCancel={() => {
+            coursesState.clearMutationError()
+            setCourseDialog(null)
+          }}
+          onCreate={(name, preset) => {
+            void coursesState.create({ name, preset }).then((created) => {
+              if (!created) return
+              setCourseDialog(null)
+              // Creating a course selects it, matching the iPad store.
+              setCourse(created.name)
+              setRecordingCourseId(created.id)
+            })
+          }}
+        />
+      ) : null}
+      {courseDialog?.kind === 'rename' && dialogCourse ? (
+        <RenameCourseDialog
+          t={tDesktop}
+          course={dialogCourse}
+          busy={coursesState.busy}
+          error={coursesState.mutationError}
+          nameConflicts={coursesState.nameConflicts}
+          onCancel={() => {
+            coursesState.clearMutationError()
+            setCourseDialog(null)
+          }}
+          onRename={(name) => {
+            const previous = dialogCourse.name
+            void coursesState.rename(dialogCourse.id, name).then((ok) => {
+              if (!ok) return
+              setCourseDialog(null)
+              // The repository dual-writes the legacy label; mirror it into the
+              // in-memory recordings so the UI does not need a full refetch.
+              setRecordings((rows) =>
+                rows.map((row) =>
+                  (row.courseId && row.courseId === dialogCourse.id) ||
+                  (row.course ?? '').trim().toLowerCase() === previous.trim().toLowerCase()
+                    ? { ...row, course: name }
+                    : row,
+                ),
+              )
+              setCourse((current) => (current.trim() === previous.trim() ? name : current))
+            })
+          }}
+        />
+      ) : null}
+      {courseDialog?.kind === 'delete' && dialogCourse ? (
+        <DeleteCourseDialog
+          t={tDesktop}
+          course={dialogCourse}
+          lectureCount={
+            lecturesInCourse(dialogCourse.id, recordingsInLibrary, coursesState.courses).length
+          }
+          busy={coursesState.busy}
+          error={coursesState.mutationError}
+          onCancel={() => {
+            coursesState.clearMutationError()
+            setCourseDialog(null)
+          }}
+          onDelete={() => {
+            void coursesState.softDelete(dialogCourse.id).then((ok) => {
+              if (!ok) return
+              setCourseDialog(null)
+              if (openCourseId === dialogCourse.id) setOpenCourseId(null)
+            })
+          }}
+        />
+      ) : null}
+      {lectureDialog && dialogLecture ? (
+        lectureDialog.kind === 'rename' ? (
+          <RenameLectureDialog
+            t={tDesktop}
+            currentTitle={dialogLecture.title?.trim() || ''}
+            identity={lectureIdentity(dialogLectureCourse)}
+            busy={lectureMetadataBusy}
+            error={lectureDialogError}
+            onCancel={() => setLectureDialog(null)}
+            onRename={(title) => {
+              void renameLecture(dialogLecture.id, title).then((ok) => {
+                if (ok) setLectureDialog(null)
+              })
+            }}
+          />
+        ) : lectureDialog.kind === 'move' ? (
+          <MoveLectureDialog
+            t={tDesktop}
+            lectureTitle={dialogLecture.title?.trim() || tDesktop('recording.untitled')}
+            courses={coursesState.courses}
+            currentCourseId={dialogLectureCourse?.id ?? null}
+            busy={coursesState.busy}
+            error={lectureDialogError}
+            onCancel={() => setLectureDialog(null)}
+            onMove={(courseId) => {
+              void moveLectureToCourse(dialogLecture.id, courseId).then((ok) => {
+                if (ok) setLectureDialog(null)
+              })
+            }}
+          />
+        ) : (
+          <DeleteLectureDialog
+            t={tDesktop}
+            lectureTitle={dialogLecture.title?.trim() || tDesktop('recording.untitled')}
+            identity={lectureIdentity(dialogLectureCourse)}
+            busy={deleteActionBusy}
+            error={lectureDialogError}
+            onCancel={() => setLectureDialog(null)}
+            onDelete={() => {
+              // The existing production trash path, unchanged.
+              void commitMoveToTrash([dialogLecture.id]).then(() => {
+                setLectureDialog(null)
+                setWorkspaceView('courses')
+              })
+            }}
+          />
+        )
+      ) : null}
+      {purgeDialog?.kind === 'course' && purgeCourse ? (
+        <ConfirmPurgeDialog
+          t={tDesktop}
+          title={tDesktop('deleted.purgeCourseTitle')}
+          body={tDesktop('deleted.purgeCourseBody')}
+          itemName={purgeCourse.name}
+          identity={courseIdentity(purgeCourse)}
+          busy={coursesState.busy}
+          error={coursesState.mutationError}
+          onCancel={() => {
+            coursesState.clearMutationError()
+            setPurgeDialog(null)
+          }}
+          onConfirm={() => {
+            void coursesState.purge(purgeCourse.id).then((ok) => {
+              if (ok) setPurgeDialog(null)
+            })
+          }}
+        />
+      ) : null}
+      {purgeDialog?.kind === 'lecture' && purgeLecture ? (
+        <ConfirmPurgeDialog
+          t={tDesktop}
+          title={tDesktop('deleted.purgeLectureTitle')}
+          body={tDesktop('deleted.purgeLectureBody')}
+          itemName={purgeLecture.title}
+          identity={lectureIdentity(
+            courseToRestoreWithLecture(purgeLecture, coursesState.courses) ??
+              courseToRestoreWithLecture(purgeLecture, coursesState.deletedCourses),
+          )}
+          busy={deleteActionBusy}
+          error={null}
+          onCancel={() => setPurgeDialog(null)}
+          onConfirm={() => {
+            // The existing production purge: it removes the row, its audio
+            // object and the local copy. Nothing about it changes here.
+            void permanentlyPurgeLectures([purgeLecture.id]).finally(() => setPurgeDialog(null))
+          }}
+        />
+      ) : null}
+      {discardConfirmOpen ? (
+        <ConfirmPurgeDialog
+          t={tDesktop}
+          title={tDesktop('recording.discardTitle')}
+          body={tDesktop('recording.discardBody')}
+          itemName={title.trim() || tDesktop('recording.untitled')}
+          identity={activeCourseIdentity}
+          confirmLabel={tDesktop('recording.discard')}
+          busy={saveOrFinishBusy}
+          error={null}
+          onCancel={() => setDiscardConfirmOpen(false)}
+          onConfirm={() => {
+            setDiscardConfirmOpen(false)
+            discardRecording()
+          }}
+        />
+      ) : null}
       {desktopV2Page ? (
         <DesktopV2Shell
-          activeView={workspaceView === 'settings' ? 'settings' : 'record'}
-          onNavigate={(view) => setWorkspaceView(view)}
+          activeView={
+            // While recording, Record stays the active destination whatever the
+            // sidebar was last asked for: the Recording screen outranks every
+            // other view, so the sidebar must not claim otherwise.
+            desktopV2View === 'recording'
+              ? 'record'
+              : workspaceView === 'settings'
+                ? 'settings'
+                : workspaceView === 'courses' || workspaceView === 'lecture'
+                  ? 'courses'
+                  : 'record'
+          }
+          onNavigate={(view) => {
+            // Leaving Courses closes any open Course Detail and Recently
+            // Deleted, so returning later lands on the list rather than on a
+            // stale sub-page.
+            if (view !== 'courses') {
+              setOpenCourseId(null)
+              setCoursesV2DeletedOpen(false)
+            }
+            setWorkspaceView(view)
+          }}
           toolbarTitle={
-            desktopV2View === 'settings' ? tDesktop('settings.title') : tDesktop('nav.record')
+            desktopV2View === 'settings'
+              ? tDesktop('settings.title')
+              : desktopV2View === 'recording'
+                ? tDesktop('nav.record')
+                : desktopV2View === 'lecture' && openLecture
+                  ? openLecture.title?.trim() || tDesktop('recording.untitled')
+                  : desktopV2View === 'recentlyDeleted'
+                  ? tDesktop('courses.recentlyDeleted')
+                  : desktopV2View === 'courseDetail' && openCourse
+                    ? openCourse.name
+                    : desktopV2View === 'courses'
+                      ? tDesktop('courses.title')
+                      : tDesktop('nav.record')
           }
           accountName={profileRow?.username?.trim() || userLabel}
           accountPlan={localOnly ? 'Local only' : getDisplayAccessLabel(sidebarPlanUsage)}
@@ -6338,7 +7463,11 @@ useEffect(() => {
             <input
               className="input"
               value={course}
-              onChange={(e) => setCourse(e.target.value)}
+              onChange={(e) => {
+                setCourse(e.target.value)
+                // A free-form name is not evidence of a particular Course UUID.
+                setRecordingCourseId(null)
+              }}
               disabled={recorder.status !== 'idle' || saveOrFinishBusy}
             />
           </label>
