@@ -1,0 +1,415 @@
+/* ============================================================================
+   Courses V2 and Course Detail.
+
+   The approved Preview design, unchanged: same spacing, radii, type scale,
+   card shape and grid. Every value is an existing --v2-* token.
+
+   There is deliberately NO course colour anywhere in this file. A course's
+   tint and accent are DATA carried on the course row and applied inline by
+   CourseIconTile, so two surfaces cannot disagree about what a course looks
+   like, and no page can reach for a second palette.
+   ============================================================================ */
+
+/* ── The identity tile ───────────────────────────────────────────────────── */
+
+.course-tile {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.course-tile svg {
+  width: var(--course-tile-glyph, 20px);
+  height: var(--course-tile-glyph, 20px);
+}
+
+/* ── Courses page ────────────────────────────────────────────────────────── */
+
+.courses-v2 { width: min(100%, 1120px); margin-inline: auto; }
+
+.courses-v2__head { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.courses-v2__head-spacer { flex: 1; }
+.courses-v2__head h1 {
+  margin: 0;
+  font-family: var(--v2-font-display);
+  font-size: clamp(24.8px, 2.5vw, 32px);
+  font-weight: 700;
+  line-height: 1.2;
+}
+.desktop-v2 .courses-v2__head p {
+  margin: 6px 0 0;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+}
+
+.courses-v2__search {
+  display: inline-flex;
+  min-width: 240px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-paper);
+  color: var(--v2-faint);
+}
+.courses-v2__search input {
+  width: 100%;
+  min-height: 40px;
+  border: 0;
+  background: transparent;
+  color: var(--v2-ink-2);
+  font-family: inherit;
+  font-size: var(--v2-text-sm);
+  outline: none;
+}
+
+/* ── Course cards ────────────────────────────────────────────────────────── */
+
+.courses-v2__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+
+/* Colour is an identity marker, never a filled panel: a 3px edge and a small
+   tile are the only places the accent appears. --course-accent is set inline
+   from the course's own row. */
+.courses-v2__card {
+  --course-accent: var(--v2-faint);
+  position: relative;
+  display: flex;
+  min-height: 192px;
+  flex-direction: column;
+  padding: 20px 21px;
+  overflow: hidden;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--v2-dur-micro), transform var(--v2-dur-micro),
+    box-shadow var(--v2-dur-micro);
+}
+.courses-v2__card::before {
+  position: absolute;
+  inset-block: 20px;
+  inset-inline-start: 0;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--course-accent);
+  content: '';
+}
+.courses-v2__card:hover {
+  border-color: var(--v2-faint);
+  box-shadow: 0 12px 28px var(--v2-shadow-soft);
+  transform: translateY(-1px);
+}
+.courses-v2__card h2 {
+  margin: 20px 0 6px;
+  color: var(--v2-ink-2);
+  font-size: 17px;
+  font-weight: 700;
+}
+.desktop-v2 .courses-v2__card p {
+  margin: 0;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+}
+.courses-v2__foot {
+  display: flex;
+  margin-top: auto;
+  padding-top: 14px;
+  gap: 8px;
+  border-top: 1px solid var(--v2-rule-2);
+  font-size: var(--v2-text-xs);
+}
+.courses-v2__foot-label { color: var(--v2-faint); }
+.courses-v2__foot-value {
+  overflow: hidden;
+  color: var(--v2-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Full-card hit area, beneath the ••• so the menu keeps its own clicks. */
+.courses-v2__card-open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.courses-v2__card-menu { position: absolute; top: 12px; right: 12px; z-index: 2; }
+
+.courses-v2__card--ghost {
+  align-items: flex-start;
+  justify-content: center;
+  border-style: dashed;
+  background: transparent;
+  gap: 10px;
+}
+.courses-v2__card--ghost:disabled { opacity: .45; cursor: not-allowed; }
+.courses-v2__symbol {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--v2-radius-sm);
+  color: var(--v2-muted);
+  font-size: var(--v2-text-lg);
+  font-weight: 700;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+
+.courses-v2__blank {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 64px 32px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+  text-align: center;
+}
+.courses-v2__blank h2 { margin: 0; color: var(--v2-ink-2); font-size: 19px; font-weight: 700; }
+.desktop-v2 .courses-v2__blank p {
+  max-width: 420px;
+  margin: 10px 0 22px;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+  line-height: 1.6;
+}
+
+/* ── Recent lectures ─────────────────────────────────────────────────────── */
+
+.courses-v2__recent { margin-top: 40px; }
+.courses-v2__section-line { display: flex; align-items: center; gap: 12px; }
+.courses-v2__recent h2 { margin: 0 0 14px; color: var(--v2-ink-2); font-size: 15px; font-weight: 700; }
+.courses-v2__list { display: flex; flex-direction: column; }
+.courses-v2__row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 58px;
+  padding: 10px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--v2-rule-2);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.courses-v2__row:hover { background: var(--v2-paper-2); }
+.courses-v2__row strong {
+  display: block;
+  overflow: hidden;
+  color: var(--v2-ink-2);
+  font-size: var(--v2-text-sm);
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.courses-v2__row small {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 3px;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+}
+.courses-v2__row > span:nth-child(2) { color: var(--v2-muted); font-size: var(--v2-text-xs); }
+/* Background set inline from the owning course's accent. */
+.courses-v2__dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+/* ── Course Detail ───────────────────────────────────────────────────────── */
+
+.course-detail { width: min(100%, 1040px); margin-inline: auto; }
+.course-detail__hero {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 21px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+}
+.course-detail__hero-text { flex: 1; min-width: 0; }
+.course-detail__hero-text h1 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-family: var(--v2-font-display);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.desktop-v2 .course-detail__hero-text p {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+}
+.course-detail__dot {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--v2-faint);
+}
+
+.course-detail__tools { display: flex; align-items: center; gap: 12px; margin: 20px 0 16px; }
+.course-detail__spacer { flex: 1; }
+
+.course-detail__list {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+}
+.course-detail__row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-height: 68px;
+  padding: 12px 16px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.course-detail__row + .course-detail__row { border-top: 1px solid var(--v2-rule-2); }
+.course-detail__row:hover { background: var(--v2-paper-2); }
+.course-detail__row-body { flex: 1; min-width: 0; }
+.course-detail__row-title {
+  display: block;
+  overflow: hidden;
+  color: var(--v2-ink-2);
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.course-detail__row-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 3px;
+  color: var(--v2-faint);
+  font-size: 11.5px;
+}
+
+.course-detail__empty {
+  padding: 56px 32px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+  text-align: center;
+}
+.course-detail__empty h2 { margin: 0; color: var(--v2-ink-2); font-size: 17px; font-weight: 700; }
+.desktop-v2 .course-detail__empty p {
+  max-width: 380px;
+  margin: 8px auto 0;
+  color: var(--v2-muted);
+  font-size: 13.5px;
+  line-height: 21px;
+}
+
+.course-detail__back { margin-top: 24px; }
+
+/* ── Recently Deleted ────────────────────────────────────────────────────────
+   The entry is deliberately the lowest-weight thing on the Courses page: a
+   quiet link below the recent list, not a sidebar destination and not a
+   toolbar button. It is absent entirely while the bin is empty. */
+
+.courses-v2__deleted-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--v2-rule-2);
+}
+.courses-v2__deleted-count { color: var(--v2-faint); font-size: var(--v2-text-xs); }
+
+.deleted-v2 { width: min(100%, 1040px); margin-inline: auto; }
+.deleted-v2__head h1 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-family: var(--v2-font-display);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+}
+.desktop-v2 .deleted-v2__head p {
+  margin: 6px 0 24px;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+}
+
+.deleted-v2__group + .deleted-v2__group { margin-top: 28px; }
+.deleted-v2__group h2 {
+  margin: 0 0 12px;
+  color: var(--v2-ink-2);
+  font-size: 15px;
+  font-weight: 700;
+}
+.desktop-v2 .deleted-v2__scope-note {
+  max-width: 68ch;
+  margin: -4px 0 12px;
+  color: var(--v2-warning-ink);
+  font-size: var(--v2-text-xs);
+  line-height: 1.5;
+}
+
+/* A row here is NOT a button: the row itself does nothing, because a deleted
+   item has no detail view to open. Only the two explicit actions act. */
+.deleted-v2__row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  min-height: 68px;
+  padding: 12px 16px;
+}
+.deleted-v2__row + .deleted-v2__row { border-top: 1px solid var(--v2-rule-2); }
+.deleted-v2__row-body { flex: 1; min-width: 0; }
+.deleted-v2__row-actions { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; }
+/* Permanent deletion has no undo, so it gets a real hit target. Padding only —
+   the type, colour and weight stay the approved quiet-link values. */
+.desktop-v2 .deleted-v2__danger {
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: var(--v2-radius-sm);
+  color: var(--v2-danger-ink);
+}
+.desktop-v2 .deleted-v2__danger:hover:not(:disabled) {
+  background: var(--v2-record-soft);
+  color: var(--v2-danger-ink);
+}
+.desktop-v2 .deleted-v2__danger:disabled { opacity: .45; cursor: not-allowed; }
+
+/* ── Responsive — the approved breakpoints ───────────────────────────────── */
+
+@media (max-width: 1000px) {
+  .courses-v2__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 860px) {
+  .courses-v2__head { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .courses-v2__search { width: 100%; min-width: 0; }
+  .courses-v2__grid { grid-template-columns: minmax(0, 1fr); }
+  .course-detail__row-meta > span:nth-of-type(n + 3) { display: none; }
+  /* Actions drop under the title rather than squeezing it to nothing. */
+  .deleted-v2__row { align-items: flex-start; flex-wrap: wrap; }
+  .deleted-v2__row-actions { width: 100%; padding-left: 53px; }
+}

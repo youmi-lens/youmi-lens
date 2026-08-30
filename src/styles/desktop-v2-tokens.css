@@ -48,9 +48,9 @@
   --v2-warning-soft: #fff6e8;
   --v2-warning-ink: #844309;
 
-  /* Course identity chips */
-  --v2-course-green: #3d7a56;
-  --v2-course-green-soft: #eef5f0;
+  /* Course identity is NOT a token. A course's icon, tint and accent live on
+     its own row and are applied inline by CourseIconTile, so no stylesheet can
+     offer a page a second palette to reach for. */
 
   --v2-shadow-soft: rgb(6 27 52 / 7%);
 

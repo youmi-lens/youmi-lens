@@ -1,0 +1,434 @@
+import { useCallback, useEffect, useReducer, useRef } from 'react'
+import type { CourseIdentity } from '../lib/courses/coursePresets'
+import type { DesktopI18nKey } from '../lib/desktopI18n'
+import { buildCaptionStack } from '../lib/recordingV2Captions'
+import {
+  captionFollowReducer,
+  INITIAL_CAPTION_FOLLOW,
+  isUserScrollUp,
+  shouldPinToBottom,
+  shouldShowJumpToLatest,
+  type ScrollSample,
+} from '../lib/captionAutoFollow'
+import {
+  isTerminalRecordingStage,
+  RECORDING_STAGE_BODY_KEY,
+  RECORDING_STAGE_TITLE_KEY,
+  type RecordingV2Stage,
+} from '../lib/recordingV2Stage'
+import { probeScrollerGeometry } from '../lib/captionDiagnostics'
+import { CourseIconTile } from './CourseIconTile'
+import '../styles/recording-v2.css'
+
+/**
+ * The recording screen, for the whole flow — live capture AND everything after
+ * Stop & Save, up to the point the user opens the saved lecture.
+ *
+ * Why it covers the tail as well: `handleStopAndSave` awaits `recorder.stop()`
+ * first, so the recorder reports idle while the pipeline is still saving and
+ * uploading. Selecting this screen from the recorder alone dropped the user onto
+ * Record Home mid-save, and the outcome banner only existed in the legacy tree.
+ * `resolveRecordingV2Stage` derives the stage from state that already exists.
+ *
+ * What this component is NOT:
+ *   · It is not a recorder or an uploader. No MediaRecorder, no timer, no
+ *     network call, no Supabase. Every value is a prop, every button a callback
+ *     into the existing production handlers.
+ *   · It is not the Overlay. `onOpenOverlay` invokes the existing compact
+ *     deep-navy overlay window, unchanged.
+ *   · It contains no caption de-duplication. Reconciliation belongs to
+ *     `LiveCaptionSessionModel`; this only presents what that model committed.
+ */
+
+type T = (key: DesktopI18nKey, vars?: Record<string, string | number>) => string
+
+export function RecordingV2({
+  t,
+  stage,
+  courseName,
+  courseIdentity,
+  lectureTitle,
+  elapsed,
+  languageLine,
+  sourceCommitted,
+  sourceDraft,
+  translationCommitted,
+  translationDraft,
+  translationEnabled,
+  translationPending,
+  notice,
+  failureMessage,
+  busy,
+  canOpenOverlay,
+  onOpenOverlay,
+  onDiscard,
+  onPause,
+  onResume,
+  onStopAndSave,
+  onViewLecture,
+  onRecordAnother,
+  onRetry,
+}: {
+  t: T
+  stage: RecordingV2Stage
+  courseName: string
+  courseIdentity: CourseIdentity
+  lectureTitle: string
+  /** Preformatted clock from App's `formatClock`. */
+  elapsed: string
+  /** e.g. "English → Chinese · Bilingual". */
+  languageLine: string
+  sourceCommitted: string
+  sourceDraft: string
+  translationCommitted: string
+  translationDraft: string
+  translationEnabled: boolean
+  /** True while a source phrase has no translation yet. */
+  translationPending: boolean
+  /** Live-caption banner from the existing session surface, if any. */
+  notice: { tier: 'info' | 'fatal'; text: string } | null
+  /** The real message from a failed save. */
+  failureMessage: string | null
+  busy: boolean
+  canOpenOverlay: boolean
+  onOpenOverlay: () => void
+  onDiscard: () => void
+  onPause: () => void
+  onResume: () => void
+  onStopAndSave: () => void
+  /** Opens the exact saved lecture in the existing Lecture Detail. */
+  onViewLecture: () => void
+  onRecordAnother: () => void
+  onRetry: () => void
+}) {
+  const live = stage === 'recording' || stage === 'paused'
+  const terminal = isTerminalRecordingStage(stage)
+
+  const { history: sourceHistory, current: sourceLine } = buildCaptionStack(
+    sourceCommitted,
+    sourceDraft,
+  )
+  const { current: translationLine } = buildCaptionStack(translationCommitted, translationDraft)
+
+  /* ── Caption history scrolling ──────────────────────────────────────────────
+     A plain `overflow-y: auto` container, so a two-finger trackpad gesture,
+     a wheel and Page Up / Page Down are all handled natively — there is no
+     synthetic drag anywhere. Auto-follow is a state machine rather than an
+     effect that pins the scroller on every render, because the latter fought
+     the reader for control every time a caption arrived. */
+  const [follow, dispatchFollow] = useReducer(captionFollowReducer, INITIAL_CAPTION_FOLLOW)
+  const historyRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const rafRef = useRef(0)
+
+  const pinToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const write = () => {
+      const node = historyRef.current
+      if (!node) return
+      node.scrollTo({ top: node.scrollHeight, behavior })
+    }
+    // Written synchronously first. A rAF-only pin silently stops working
+    // whenever the window is not being painted — and Open Overlay minimises the
+    // main window on purpose — so the frame callback can only ever be a
+    // correction, never the sole mechanism.
+    write()
+    // Then one rAF-batched correction per burst, after layout settles: captions
+    // can arrive faster than a frame, and each write forces a layout flush.
+    cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(write)
+  }, [])
+
+  /**
+   * While this is in the future, a caption arriving may not move the scroller.
+   *
+   * macOS momentum keeps firing `scroll` long after the fingers lift. Pinning
+   * during that window is what made the panel feel like it was pulling against
+   * the gesture.
+   */
+  const userScrollingUntil = useRef(0)
+
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), [])
+
+  // One-shot geometry dump so a real WKWebView session records what the
+  // scroller and every ancestor actually resolved to.
+  useEffect(() => {
+    probeScrollerGeometry(historyRef.current)
+  }, [])
+
+  // New captions may MOVE the scroller, but never change the follow state.
+  useEffect(() => {
+    dispatchFollow({ type: 'captions-changed' })
+  }, [sourceHistory.length, sourceLine])
+
+  useEffect(() => {
+    // Never write scrollTop while the platform is still animating the user's
+    // own gesture — that is what a fight feels like.
+    if (performance.now() < userScrollingUntil.current) return
+    if (shouldPinToBottom(follow)) pinToBottom()
+  }, [follow, sourceHistory.length, sourceLine, pinToBottom])
+
+  const readMetrics = useCallback(() => {
+    const el = historyRef.current
+    if (!el) return null
+    return {
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+    }
+  }, [])
+
+  /** Previous scroll reading — the only way to tell which way the reader moved. */
+  const lastSample = useRef<ScrollSample | null>(null)
+
+  const onHistoryScroll = useCallback(() => {
+    userScrollingUntil.current = performance.now() + 220
+    const metrics = readMetrics()
+    if (!metrics) return
+    const sample: ScrollSample = { scrollTop: metrics.scrollTop, scrollHeight: metrics.scrollHeight }
+    const up = isUserScrollUp(lastSample.current, sample)
+    lastSample.current = sample
+    // Upward intent suspends follow immediately. Reporting it as a plain
+    // position ('scrolled') instead keeps `following` true for the first
+    // NEAR_BOTTOM_PX of the gesture, and the caption arriving a few hundred
+    // milliseconds later pins the reader straight back down — the "auto-follow
+    // steals the scroll" symptom.
+    dispatchFollow(up ? { type: 'user-scrolled-up', metrics } : { type: 'scrolled', metrics })
+  }, [readMetrics])
+
+  /*
+   * There is deliberately NO wheel handler.
+   *
+   * The history is a plain `overflow-y: auto` box, so two-finger scrolling,
+   * momentum, the mouse wheel and Page Up/Down are entirely the platform's —
+   * identical to Safari. Intent is read from the resulting scroll POSITION
+   * instead of from the gesture, which is what keeps the panel from ever
+   * fighting the user's fingers.
+   *
+   * The one thing that could fight is a programmatic pin arriving mid-gesture.
+   * `userScrollingUntil` below suppresses that.
+   */
+
+  /*
+   * Observe the CONTENT, not the scroll container.
+   *
+   * The container is sized by flex and its box never changes, so a
+   * ResizeObserver on it never fires as lines are added. The first version did
+   * exactly that and the very first pin landed while the list was still
+   * unlaid-out — `scrollTo(clientHeight)` clamped to 0 and nothing ever
+   * re-pinned, leaving history stuck at the top for the whole lecture.
+   *
+   * Growth of the inner list is the real signal, and it also covers a window
+   * resize (reflow changes the content height too).
+   */
+  useEffect(() => {
+    const el = contentRef.current
+    if (!el) return
+    const observer = new ResizeObserver(() => {
+      const metrics = readMetrics()
+      if (metrics) dispatchFollow({ type: 'resized', metrics })
+      if (shouldPinToBottom(follow)) pinToBottom()
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+    // Rebuilding on a follow change is cheap: `follow` flips only when the
+    // reader crosses the near-bottom threshold, a handful of times a lecture.
+  }, [follow, pinToBottom, readMetrics])
+
+  const jumpToLatest = useCallback(() => {
+    dispatchFollow({ type: 'jump-to-latest' })
+    pinToBottom('smooth')
+  }, [pinToBottom])
+
+  /* ── Header ─────────────────────────────────────────────────────────────── */
+
+  const header = (
+    <header className="recording-v2__head">
+      <span className="recording-v2__status" data-status={stage}>
+        <span className="recording-v2__dot" aria-hidden="true" />
+        {stage === 'paused' ? t('recording.paused') : t('recording.rec')}
+      </span>
+
+      <span className="recording-v2__chip">
+        <CourseIconTile identity={courseIdentity} size={28} radius={8} glyph={15} />
+        <span className="recording-v2__chip-name">{courseName}</span>
+      </span>
+
+      <span className="recording-v2__title-block">
+        <h1 id="recording-v2-title">{lectureTitle}</h1>
+        <span className="recording-v2__meta">{languageLine}</span>
+      </span>
+
+      <span className="recording-v2__timer" aria-live="polite">
+        <span className="recording-v2__timer-label">{t('recording.elapsed')}</span>
+        <span className="recording-v2__timer-value">{elapsed}</span>
+      </span>
+
+      {canOpenOverlay ? (
+        <button type="button" className="v2-btn" onClick={onOpenOverlay}>
+          {t('recording.openOverlay')}
+        </button>
+      ) : null}
+    </header>
+  )
+
+  /* ── After Stop & Save ──────────────────────────────────────────────────── */
+
+  if (!live) {
+    const titleKey = RECORDING_STAGE_TITLE_KEY[stage as keyof typeof RECORDING_STAGE_TITLE_KEY]
+    const bodyKey = RECORDING_STAGE_BODY_KEY[stage as keyof typeof RECORDING_STAGE_BODY_KEY]
+
+    return (
+      <section className="recording-v2 recording-v2--after" aria-labelledby="recording-v2-title">
+        {header}
+
+        <div className="recording-v2__stage" data-stage={stage} role="status" aria-live="polite">
+          {terminal ? null : <span className="recording-v2__spinner" aria-hidden="true" />}
+          <h2>{titleKey ? t(titleKey) : ''}</h2>
+          <p>{bodyKey ? t(bodyKey) : ''}</p>
+          {/* The real reason, from the existing save pipeline. */}
+          {failureMessage ? <p className="recording-v2__failure">{failureMessage}</p> : null}
+
+          <div className="recording-v2__stage-actions">
+            {stage === 'upload_failed' ? (
+              <button type="button" className="v2-btn v2-btn--record" onClick={onRetry} disabled={busy}>
+                {t('recording.retry')}
+              </button>
+            ) : null}
+            {stage === 'ready' || stage === 'partial_ready' ? (
+              <>
+                <button
+                  type="button"
+                  className="v2-btn v2-btn--record"
+                  onClick={onViewLecture}
+                  disabled={busy}
+                >
+                  {t('recording.viewLecture')}
+                </button>
+                <button type="button" className="v2-btn" onClick={onRecordAnother} disabled={busy}>
+                  {t('recording.recordAnother')}
+                </button>
+              </>
+            ) : null}
+            {stage === 'recovery_required' || stage === 'upload_failed' ? (
+              <button type="button" className="v2-quiet-link" onClick={onRecordAnother}>
+                {t('recording.dismiss')}
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Captions from the session stay readable while it saves. */}
+        {sourceHistory.length > 0 || sourceLine ? (
+          <div className="recording-v2__captions recording-v2__captions--after">
+            <div
+              className="recording-v2__history"
+              ref={historyRef}
+              onScroll={onHistoryScroll}
+                          tabIndex={0}
+              role="log"
+              aria-label={t('recording.sourceLabel')}
+            >
+              {sourceHistory.map((line, index) => (
+                <p key={`${index}-${line.slice(0, 24)}`}>{line}</p>
+              ))}
+              {sourceLine ? <p>{sourceLine}</p> : null}
+            </div>
+          </div>
+        ) : null}
+      </section>
+    )
+  }
+
+  /* ── Live ───────────────────────────────────────────────────────────────── */
+
+  return (
+    <section className="recording-v2" aria-labelledby="recording-v2-title">
+      {header}
+
+      {notice ? (
+        <p
+          className="recording-v2__notice"
+          data-tier={notice.tier}
+          role={notice.tier === 'fatal' ? 'alert' : 'status'}
+        >
+          {notice.text}
+        </p>
+      ) : null}
+
+      <div className="recording-v2__captions">
+        <div className="recording-v2__history-wrap">
+          <div
+            className="recording-v2__history"
+            ref={historyRef}
+            onScroll={onHistoryScroll}
+                      tabIndex={0}
+            role="log"
+            /*
+             * `off`, deliberately. The live line below is the polite live
+             * region; announcing history too would make a screen reader re-read
+             * the whole lecture on every interim token.
+             */
+            aria-live="off"
+            aria-label={t('recording.sourceLabel')}
+          >
+            <div ref={contentRef}>
+              {sourceHistory.map((line, index) => (
+                <p key={`${index}-${line.slice(0, 24)}`}>{line}</p>
+              ))}
+            </div>
+          </div>
+
+          {shouldShowJumpToLatest(follow) ? (
+            <button
+              type="button"
+              className="recording-v2__jump"
+              onClick={jumpToLatest}
+              data-unseen={follow.hasUnseen ? 'true' : undefined}
+            >
+              {t('recording.jumpToLatest')}
+            </button>
+          ) : null}
+        </div>
+
+        <div className="recording-v2__live" aria-live="polite">
+          <p className="recording-v2__source" data-empty={sourceLine ? undefined : 'true'}>
+            {sourceLine || t('recording.waiting')}
+          </p>
+          {translationEnabled ? (
+            <p className="recording-v2__translation" data-empty={translationLine ? undefined : 'true'}>
+              {translationLine || (translationPending ? t('recording.translating') : '')}
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      <footer className="recording-v2__controls">
+        <button
+          type="button"
+          className="v2-quiet-link recording-v2__discard"
+          onClick={onDiscard}
+          disabled={busy}
+        >
+          {t('recording.discard')}
+        </button>
+        <span className="recording-v2__spacer" />
+        <button
+          type="button"
+          className="v2-btn"
+          onClick={stage === 'recording' ? onPause : onResume}
+          disabled={busy}
+        >
+          {stage === 'recording' ? t('recording.pause') : t('recording.resume')}
+        </button>
+        <button
+          type="button"
+          className="v2-btn v2-btn--record"
+          onClick={onStopAndSave}
+          disabled={busy}
+        >
+          {t('recording.stopSave')}
+        </button>
+      </footer>
+    </section>
+  )
+}

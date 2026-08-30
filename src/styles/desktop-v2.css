@@ -31,6 +31,30 @@
 .desktop-v2 *,
 .desktop-v2 *::before,
 .desktop-v2 *::after { box-sizing: border-box; }
+
+/* ── Heading tracking ────────────────────────────────────────────────────────
+   index.css sets `h1 { letter-spacing: -1.68px }` — an ABSOLUTE length tuned
+   for the 56px marketing hero, where it is about -0.03em. Every V2 heading is
+   far smaller, and an absolute value does not scale: inherited onto the 17px
+   recording title it becomes roughly -0.10em, which is what made
+   "Untitled lecture" read as if the letters were touching.
+
+   `.desktop-v2 h1` is (0,1,1) and beats the bare element rule, so V2 headings
+   start from normal tracking. Anything that wants tightening states it in `em`,
+   which is the only unit that stays correct at every size. */
+.desktop-v2 h1,
+.desktop-v2 h2,
+.desktop-v2 h3,
+.desktop-v2 h4 {
+  letter-spacing: normal;
+  font-synthesis-weight: none;
+}
+/* Two class selectors (0,2,0) so the display headings keep their own tracking
+   over the reset above. */
+.desktop-v2 .record-home-v2__heading { letter-spacing: -.035em; }
+.desktop-v2 .courses-v2__head h1,
+.desktop-v2 .course-detail__hero-text h1,
+.desktop-v2 .deleted-v2__head h1 { letter-spacing: -.02em; }
 .desktop-v2 a { color: inherit; text-decoration: none; }
 .desktop-v2 button,
 .desktop-v2 input,
@@ -275,7 +299,6 @@
   font-size: clamp(28.8px, 3vw, 37.6px); /* 1.8rem – 2.35rem */
   font-weight: 700;
   line-height: 1.15;
-  letter-spacing: -.035em;
 }
 .record-home-v2__intro {
   max-width: 608px;
@@ -302,18 +325,10 @@
   padding: 9px 10px;
   border-bottom: 1px solid var(--v2-rule-2);
 }
-.record-home-v2__course-icon {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  flex: 0 0 auto;
-  border-radius: 11px;
-  background: var(--v2-course-green-soft);
-  color: var(--v2-course-green);
-  font-size: var(--v2-text-sm);
-  font-weight: 720;
-}
+/* Size only. The colour is DATA on the course row and is applied inline by
+   CourseIconTile — a hardcoded palette here is what made every course on
+   Record Home look green regardless of its real identity. */
+.record-home-v2__course-icon { flex: 0 0 auto; }
 .record-home-v2__course-copy { min-width: 0; flex: 1; }
 .record-home-v2__course-label {
   display: block;

@@ -1,0 +1,224 @@
+/* ============================================================================
+   Course dialogs and the ••• menu.
+
+   Both are portaled to <body>, which puts them OUTSIDE `.desktop-v2` — the
+   --v2-* custom properties do not resolve there. Each root therefore declares
+   its own palette and font. Values are copied from desktop-v2-tokens.css.
+
+   This is not duplication for its own sake: rendering either of these inside
+   the page tree gets them clipped, because every card and row that hosts one
+   uses `overflow: hidden` for its rounded corners, and an overflow clip cannot
+   be escaped with z-index.
+   ============================================================================ */
+
+.course-dialog-root,
+.course-menu__pop {
+  --c-paper: #ffffff;
+  --c-paper-2: #f7f7f8;
+  --c-paper-3: #f1f1f3;
+  --c-rule: #dfe1e5;
+  --c-rule-2: #ececef;
+  --c-ink: #1b2b4b;
+  --c-muted: #596273;
+  --c-faint: #858b98;
+  --c-navy: #0b1f3b;
+  --c-danger: #a51d29;
+  --c-danger-soft: #fff1f2;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+}
+
+/* ── Dialogs ─────────────────────────────────────────────────────────────── */
+
+.course-dialog-root {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.course-dialog__backdrop { position: absolute; inset: 0; background: rgb(6 27 52 / 34%); }
+.course-dialog__card {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 460px);
+  max-height: calc(100vh - 48px);
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid var(--c-rule);
+  border-radius: 14px;
+  background: var(--c-paper);
+  box-shadow: 0 24px 64px rgb(6 27 52 / 22%);
+}
+.course-dialog__card:focus { outline: none; }
+.course-dialog__title { margin: 0 0 16px; color: var(--c-ink); font-size: 17px; font-weight: 700; }
+.course-dialog__body-text { margin: 14px 0 0; color: var(--c-muted); font-size: 13px; line-height: 1.6; }
+
+.course-dialog__preview {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--c-rule-2);
+  border-radius: 10px;
+  background: var(--c-paper-2);
+}
+.course-dialog__preview-name {
+  overflow: hidden;
+  color: var(--c-ink);
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-dialog__label {
+  display: block;
+  margin: 18px 0 7px;
+  color: var(--c-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.course-dialog__input {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--c-rule);
+  border-radius: 8px;
+  background: var(--c-paper);
+  color: var(--c-ink);
+  font-family: inherit;
+  font-size: 14px;
+}
+.course-dialog__input:focus { border-color: var(--c-navy); outline: none; }
+.course-dialog__error { margin: 8px 0 0; color: var(--c-danger); font-size: 12px; }
+
+.course-dialog__swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.course-dialog__swatch {
+  display: grid;
+  width: 50px;
+  height: 50px;
+  place-items: center;
+  border: 2px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.course-dialog__swatch svg { width: 22px; height: 22px; }
+.course-dialog__swatch[aria-checked='true'] { border-color: var(--c-navy); }
+
+/* Lecture delete carries the device-local truth, in the same words as the
+   Recently Deleted page. */
+.course-dialog__scope-note {
+  margin: 10px 0 0;
+  color: #844309;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Move: a course picker and nothing else. No title field — that is Rename. */
+.course-dialog__choices {
+  display: grid;
+  max-height: 260px;
+  margin-top: 14px;
+  overflow-y: auto;
+  gap: 4px;
+  overscroll-behavior: contain;
+}
+.course-dialog__choice {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--c-ink);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+.course-dialog__choice:hover:not(:disabled) { background: var(--c-paper-3); }
+.course-dialog__choice[aria-checked='true'] {
+  border-color: var(--c-navy);
+  background: var(--c-paper-2);
+}
+.course-dialog__choice:disabled { opacity: .45; cursor: not-allowed; }
+
+.course-dialog__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.course-dialog__btn {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--c-rule);
+  border-radius: 8px;
+  background: var(--c-paper);
+  color: var(--c-ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 620;
+  cursor: pointer;
+}
+.course-dialog__btn:hover:not(:disabled) { border-color: var(--c-faint); background: var(--c-paper-2); }
+.course-dialog__btn:disabled { opacity: .45; cursor: not-allowed; }
+.course-dialog__btn--primary { border-color: var(--c-navy); background: var(--c-navy); color: #fff; }
+.course-dialog__btn--primary:hover:not(:disabled) { background: #123055; border-color: #123055; }
+.course-dialog__btn--danger { border-color: var(--c-danger); background: var(--c-danger); color: #fff; }
+
+/* ── ••• menu ────────────────────────────────────────────────────────────── */
+
+.course-menu { position: relative; display: inline-flex; }
+.course-menu__trigger {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--v2-radius-sm, 8px);
+  background: transparent;
+  color: var(--v2-muted, #596273);
+  cursor: pointer;
+}
+.course-menu__trigger svg { width: 16px; height: 16px; }
+.courses-v2__card:hover .course-menu__trigger,
+.course-menu__trigger[aria-expanded='true'] {
+  border-color: var(--v2-rule, #dfe1e5);
+  background: var(--v2-paper, #fff);
+}
+
+.course-menu__pop {
+  position: fixed;
+  /* Above the page and its sticky chrome, below the dialogs (2000). */
+  z-index: 900;
+  display: grid;
+  min-width: 200px;
+  padding: 5px;
+  border: 1px solid var(--c-rule);
+  border-radius: 12px;
+  background: var(--c-paper);
+  box-shadow: 0 18px 48px rgb(6 27 52 / 14%);
+}
+.course-menu__pop button {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--c-ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.course-menu__pop button:hover:not(:disabled) { background: var(--c-paper-3); }
+.course-menu__pop button:disabled { opacity: .45; cursor: not-allowed; }
+.course-menu__rule { height: 1px; margin: 5px 3px; background: var(--c-rule-2); }
+.course-menu__pop button[data-danger='true'] { color: var(--c-danger); }
+.course-menu__pop button[data-danger='true']:hover:not(:disabled) { background: var(--c-danger-soft); }

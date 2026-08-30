@@ -1,7 +1,9 @@
 import { contentLanguageLabel } from '../lib/contentLanguages'
+import { NEUTRAL_COURSE_IDENTITY, type CourseIdentity } from '../lib/courses/coursePresets'
 import type { LanguagePreferences } from '../lib/languagePreferences'
 import { openRecordLanguageSettings, runRecordHomeStart } from '../lib/recordHomeActions'
 import { useLanguagePreferences } from '../languagePreferencesContext'
+import { CourseIconTile } from './CourseIconTile'
 
 export type RecentLectureItem = {
   id: string
@@ -11,13 +13,6 @@ export type RecentLectureItem = {
   status: 'Ready' | 'Processing' | 'Failed'
 }
 
-/** Two-letter chip for the course, e.g. "CS 250" → "CS". Mirrors the mockup. */
-function courseInitials(course: string): string {
-  const trimmed = course.trim()
-  if (!trimmed) return '—'
-  const alpha = trimmed.replace(/[^A-Za-z一-鿿]/g, '')
-  return (alpha || trimmed).slice(0, 2).toUpperCase()
-}
 
 /**
  * Record Home — a direct port of the approved mockup
@@ -39,6 +34,8 @@ function courseInitials(course: string): string {
  */
 export function RecordHome({
   course,
+  courseIdentity = NEUTRAL_COURSE_IDENTITY,
+  audioSourceLabel,
   title,
   preferences,
   recentLectures,
@@ -52,6 +49,15 @@ export function RecordHome({
   onOpenLecture,
 }: {
   course: string
+  /**
+   * The selected course's REAL identity. Defaults to the neutral tile, which is
+   * the honest answer for Unfiled or for a name with no course row behind it —
+   * it is never a second palette. The previous chip painted every course the
+   * same hardcoded green, which is exactly the drift this phase removes.
+   */
+  courseIdentity?: CourseIdentity
+  /** Read-only source summary, e.g. "System Audio". Omitted when unset. */
+  audioSourceLabel?: string
   title: string
   preferences: LanguagePreferences
   recentLectures: RecentLectureItem[]
@@ -80,9 +86,13 @@ export function RecordHome({
 
         <div className="record-home-v2__setup">
           <div className="record-home-v2__course">
-            <span className="record-home-v2__course-icon" aria-hidden="true">
-              {courseInitials(courseName)}
-            </span>
+            <CourseIconTile
+              identity={courseIdentity}
+              size={42}
+              radius={11}
+              glyph={20}
+              className="record-home-v2__course-icon"
+            />
             <span className="record-home-v2__course-copy">
               <span className="record-home-v2__course-label">{t('record.course')}</span>
               <span className="record-home-v2__course-value">{courseName}</span>
@@ -128,10 +138,14 @@ export function RecordHome({
         </div>
 
         <div className="record-home-v2__summary" aria-label="Current language preferences">
-          <strong>
+          {/* Read-only. Changing the source is Settings' job — no configuration
+              wall returns to Record Home. */}
+          {audioSourceLabel ? <strong>{audioSourceLabel}</strong> : null}
+          <span>
+            {audioSourceLabel ? '· ' : ''}
             {contentLanguageLabel(preferences.captionLanguage)} →{' '}
             {contentLanguageLabel(preferences.translationLanguage)}
-          </strong>
+          </span>
           <span>· {modeLabel}</span>
           <button type="button" onClick={() => openRecordLanguageSettings(onOpenSettings)}>
             {t('record.changeSettings')}

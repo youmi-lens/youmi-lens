@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AiJobStatus, Recording, RecordingDetail } from '../types'
 import { getAiApiBase } from './ai/apiBase'
+import { buildLectureMetadataPatch } from './lectureTitleIntegrity'
 
 const BUCKET = 'lecture-audio'
 
@@ -62,6 +63,8 @@ export type RecordingDbRow = {
   id: string
   user_id: string
   course: string
+  /** Added by the Phase 1B migration; absent on databases without it. */
+  course_id?: string | null
   title: string
   created_at: string
   duration_sec: number
@@ -80,6 +83,15 @@ export type RecordingDbRow = {
   summary_ready?: boolean | null
   translation_ready?: boolean | null
   ai_pipeline_timing?: Record<string, unknown> | null
+  /* Cloud Library Stage 4 — present once the migration has run; `select('*')`
+     simply omits them before then, so no query needs a feature flag. */
+  deleted_at?: string | null
+  deletion_updated_at?: string | null
+  notes?: string | null
+  marked_timestamps?: unknown[] | null
+  title_updated_at?: string | null
+  notes_updated_at?: string | null
+  marks_updated_at?: string | null
 }
 
 const AI_STATUSES: AiJobStatus[] = [
@@ -102,10 +114,14 @@ export function mapDbRowToRecording(r: RecordingDbRow): Recording {
   return {
     id: r.id,
     course: r.course,
+    // `select('*')` returns this once the Phase 1B migration has run and simply
+    // omits it before then, so no query needs a feature flag.
+    courseId: r.course_id ?? undefined,
     title: r.title,
     createdAt: new Date(r.created_at).getTime(),
     durationSec: r.duration_sec,
     mime: r.mime,
+    storagePath: r.storage_path,
     transcript: r.transcript ?? undefined,
     transcriptRaw: r.transcript_raw ?? undefined,
     summaryEn: r.summary_en ?? undefined,
@@ -122,13 +138,76 @@ export function mapDbRowToRecording(r: RecordingDbRow): Recording {
       r.ai_pipeline_timing && typeof r.ai_pipeline_timing === 'object'
         ? (r.ai_pipeline_timing as Recording['aiPipelineTiming'])
         : undefined,
+    // Cloud Library Stage 4 — account-level fields (undefined where absent).
+    deletedAt: r.deleted_at ? new Date(r.deleted_at).getTime() : r.deleted_at === null ? null : undefined,
+    deletionUpdatedAt: r.deletion_updated_at ? new Date(r.deletion_updated_at).getTime() : undefined,
+    notes: r.notes ?? undefined,
+    markedTimestamps: Array.isArray(r.marked_timestamps) ? r.marked_timestamps : undefined,
+    titleUpdatedAt: r.title_updated_at ? new Date(r.title_updated_at).getTime() : undefined,
+    notesUpdatedAt: r.notes_updated_at ? new Date(r.notes_updated_at).getTime() : undefined,
+    marksUpdatedAt: r.marks_updated_at ? new Date(r.marks_updated_at).getTime() : undefined,
   }
 }
 
-export async function listRecordings(
+/**
+ * A fetched library, split by the authoritative cloud deletion state.
+ *
+ * Both halves come from ONE round trip. Filtering deleted rows out in SQL would
+ * have been tidier per-query, but Recently Deleted needs exactly the rows that
+ * filter removes, and a second query for them would let the two lists disagree
+ * about the same instant.
+ */
+export type LectureLists = {
+  /** Not deleted in the cloud. */
+  active: Recording[]
+  /** `deleted_at` is set — the rows Recently Deleted shows. */
+  deleted: Recording[]
+  /**
+   * Whether this database answers the deletion question at all.
+   *
+   * `false` on a project that predates Cloud Library Stage 4, where the column
+   * is simply absent from `select('*')`. The caller uses it to decide whether
+   * cloud deletion is authoritative or the legacy device-local trash still is.
+   * It is NOT a guess: it is true only if a real row carried the field.
+   */
+  cloudDeletionAvailable: boolean
+}
+
+/**
+ * Split mapped rows by deletion state.
+ *
+ * Three-valued on purpose, and the distinction is the whole point:
+ *   `undefined` — the column is absent (unmigrated database). Not deleted, and
+ *                 not evidence that the database supports deletion.
+ *   `null`      — the column exists and this row is active.
+ *   number      — deleted at that instant.
+ *
+ * Collapsing `undefined` and `null` would make an unmigrated project look like
+ * it had a working deletion contract, and the legacy trash would stop being
+ * consulted while nothing replaced it.
+ */
+export function partitionLecturesByDeletion(rows: readonly Recording[]): LectureLists {
+  const active: Recording[] = []
+  const deleted: Recording[] = []
+  let cloudDeletionAvailable = false
+  for (const row of rows) {
+    if (row.deletedAt !== undefined) cloudDeletionAvailable = true
+    if (typeof row.deletedAt === 'number') deleted.push(row)
+    else active.push(row)
+  }
+  return { active, deleted, cloudDeletionAvailable }
+}
+
+/**
+ * The library, both halves, in one fetch.
+ *
+ * This is the repository entry point the UI uses; nothing above it issues its
+ * own query for deleted rows.
+ */
+export async function listLectures(
   supabase: SupabaseClient,
   userId: string,
-): Promise<Recording[]> {
+): Promise<LectureLists> {
   const { data, error } = await supabase
     .from('recordings')
     .select('*')
@@ -136,13 +215,28 @@ export async function listRecordings(
     .order('created_at', { ascending: false })
 
   if (error) throw error
-  return (data as RecordingDbRow[]).map(mapDbRowToRecording)
+  return partitionLecturesByDeletion((data as RecordingDbRow[]).map(mapDbRowToRecording))
+}
+
+/**
+ * ACTIVE lectures only.
+ *
+ * Kept as the narrow entry point so every existing caller became
+ * deletion-aware without changing: a lecture deleted on another device stops
+ * appearing here as soon as the row is read.
+ */
+export async function listRecordings(
+  supabase: SupabaseClient,
+  userId: string,
+): Promise<Recording[]> {
+  return (await listLectures(supabase, userId)).active
 }
 
 export async function getRecordingDetail(
   supabase: SupabaseClient,
   userId: string,
   id: string,
+  options: { signAudio?: boolean } = {},
 ): Promise<RecordingDetail | null> {
   const { data, error } = await supabase
     .from('recordings')
@@ -155,17 +249,21 @@ export async function getRecordingDetail(
   if (!data) return null
 
   const row = data as RecordingDbRow
-  const { data: signed, error: signErr } = await supabase.storage
-    .from(BUCKET)
-    .createSignedUrl(row.storage_path, 3600)
-
-  if (signErr || !signed?.signedUrl) throw signErr ?? new Error('Could not sign audio URL')
-
-  return {
+  const detail: RecordingDetail = {
     ...mapDbRowToRecording(row),
-    audioUrl: signed.signedUrl,
     storagePath: row.storage_path,
   }
+  if (options.signAudio === false) return detail
+  return { ...detail, audioUrl: await getRecordingAudioUrl(supabase, row.storage_path) }
+}
+
+/** Resolves playback separately so a signer delay cannot block Lecture Detail. */
+export async function getRecordingAudioUrl(supabase: SupabaseClient, storagePath: string): Promise<string> {
+  const { data: signed, error: signErr } = await supabase.storage
+    .from(BUCKET)
+    .createSignedUrl(storagePath, 3600)
+  if (signErr || !signed?.signedUrl) throw signErr ?? new Error('Could not sign audio URL')
+  return signed.signedUrl
 }
 
 export async function downloadRecordingBlob(
@@ -282,6 +380,7 @@ export async function uploadLectureAudioViaServer(
   durationSec?: number,
   metadata?: {
     course: string
+    courseId?: string | null
     title: string
     liveTranscript: string
     liveTranscriptRaw: string
@@ -304,6 +403,7 @@ export async function uploadLectureAudioViaServer(
   }
   if (metadata) {
     form.append('course', metadata.course)
+    if (metadata.courseId) form.append('course_id', metadata.courseId)
     form.append('title', metadata.title)
     form.append('live_transcript', metadata.liveTranscript)
     form.append('live_transcript_raw', metadata.liveTranscriptRaw)
@@ -368,6 +468,7 @@ export function lectureRecordingInsertPayload(input: {
   id: string
   userId: string
   course: string
+  courseId?: string | null
   title: string
   durationSec: number
   mime: string
@@ -384,6 +485,7 @@ export function lectureRecordingInsertPayload(input: {
     id: input.id,
     user_id: input.userId,
     course: input.course,
+    ...(input.courseId ? { course_id: input.courseId } : {}),
     title: input.title,
     duration_sec: input.durationSec,
     mime: input.mime,
@@ -405,6 +507,7 @@ export async function insertLectureRecordingRow(input: {
   userId: string
   id: string
   course: string
+  courseId?: string | null
   title: string
   durationSec: number
   mime: string
@@ -419,6 +522,7 @@ export async function insertLectureRecordingRow(input: {
         id: input.id,
         userId: input.userId,
         course: input.course,
+        courseId: input.courseId,
         title: input.title,
         durationSec: input.durationSec,
         mime: input.mime,
@@ -519,22 +623,145 @@ export async function updateRecordingAi(
   if (error) throw error
 }
 
-/** Update lecture display fields only (course / title). Does not touch audio, transcripts, or AI columns. */
+/**
+ * PATCH lecture display fields. Does not touch audio, transcripts or AI columns.
+ *
+ * Both fields are OPTIONAL and a field that is absent is not written. The
+ * signature used to be `{ course: string; title: string }` — both mandatory —
+ * so a caller that only wanted to move a lecture had to supply a title, and the
+ * obvious thing to supply was the display fallback. That is how a placeholder
+ * gets persisted over a name the user chose.
+ *
+ * `buildLectureMetadataPatch` additionally drops a `title` that is empty or a
+ * known placeholder, so the fallback cannot reach the row even if a caller
+ * passes it explicitly.
+ */
 export async function updateRecordingMetadata(
   supabase: SupabaseClient,
   userId: string,
   id: string,
-  patch: { course: string; title: string },
+  patch: { course?: string; title?: string },
 ): Promise<void> {
+  const payload = buildLectureMetadataPatch(patch)
+  // Nothing safe to write — a no-op beats an UPDATE that blanks a title.
+  if (Object.keys(payload).length === 0) return
+
   const { error } = await supabase
     .from('recordings')
-    .update({ course: patch.course, title: patch.title })
+    .update(payload)
     .eq('id', id)
     .eq('user_id', userId)
 
+  if (!error) return
+
+  // A database that predates Cloud Library Stage 4 has no `title_updated_at`,
+  // and the whole UPDATE fails on it. Retry with the clock dropped: the rename
+  // itself matters more than the freshness stamp, and an unmigrated project has
+  // no cross-device conflict for the stamp to resolve anyway.
+  if (isMissingColumn(error) && payload.title_updated_at !== undefined) {
+    const { title_updated_at: _clock, ...withoutClock } = payload
+    void _clock
+    const retry = await supabase
+      .from('recordings')
+      .update(withoutClock)
+      .eq('id', id)
+      .eq('user_id', userId)
+    if (retry.error) throw retry.error
+    return
+  }
+
+  throw error
+}
+
+/**
+ * Thrown when the database has no `recordings.deleted_at` (a project before the
+ * Cloud Library migration). The caller catches this to fall back to the legacy
+ * localStorage trash registry, so an older production database keeps working.
+ */
+export class CloudSoftDeleteUnavailableError extends Error {
+  constructor() {
+    super('recordings.deleted_at is not available on this database')
+    this.name = 'CloudSoftDeleteUnavailableError'
+  }
+}
+
+function isMissingColumn(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null
+  if (!e) return false
+  if (e.code === '42703' || e.code === 'PGRST204') return true
+  return /deleted_at|deletion_updated_at|does not exist|schema cache/i.test(e.message ?? '')
+}
+
+/**
+ * Cloud Library Stage 4: ACCOUNT-LEVEL soft delete (the authoritative model,
+ * replacing the device-local localStorage trash). Sets `deleted_at` +
+ * `deletion_updated_at` so every client — iPad, Desktop, future Windows —
+ * reconciles by freshness. Never touches Storage or the row's content.
+ */
+export async function softDeleteRecordingRemote(
+  supabase: SupabaseClient,
+  userId: string,
+  id: string,
+  nowIso: string = new Date().toISOString(),
+): Promise<void> {
+  const { error } = await supabase
+    .from('recordings')
+    .update({ deleted_at: nowIso, deletion_updated_at: nowIso })
+    .eq('id', id)
+    .eq('user_id', userId)
+  if (error) {
+    if (isMissingColumn(error)) throw new CloudSoftDeleteUnavailableError()
+    throw error
+  }
+}
+
+/** Stage 4: account-level RESTORE. Stamps a NEW deletion clock so it wins over any stale tombstone. */
+export async function restoreRecordingRemote(
+  supabase: SupabaseClient,
+  userId: string,
+  id: string,
+  nowIso: string = new Date().toISOString(),
+): Promise<void> {
+  const { error } = await supabase
+    .from('recordings')
+    .update({ deleted_at: null, deletion_updated_at: nowIso })
+    .eq('id', id)
+    .eq('user_id', userId)
+  if (error) {
+    if (isMissingColumn(error)) throw new CloudSoftDeleteUnavailableError()
+    throw error
+  }
+}
+
+/**
+ * Stage 4: write account-level Notes / Marks with their freshness clocks. Marks
+ * stay structured JSON (never flattened). No-op when nothing is supplied.
+ */
+export async function updateRecordingNotesMarks(
+  supabase: SupabaseClient,
+  userId: string,
+  id: string,
+  patch: { notes?: string; markedTimestamps?: unknown[] },
+  nowIso: string = new Date().toISOString(),
+): Promise<void> {
+  const payload: Record<string, unknown> = {}
+  if (patch.notes !== undefined) {
+    payload.notes = patch.notes
+    payload.notes_updated_at = nowIso
+  }
+  if (patch.markedTimestamps !== undefined) {
+    payload.marked_timestamps = patch.markedTimestamps
+    payload.marks_updated_at = nowIso
+  }
+  if (Object.keys(payload).length === 0) return
+  const { error } = await supabase.from('recordings').update(payload).eq('id', id).eq('user_id', userId)
   if (error) throw error
 }
 
+/**
+ * PERMANENT delete (purge from Recently Deleted): removes the Storage object and
+ * hard-deletes the row. Soft delete above is the default user-facing "delete".
+ */
 export async function deleteRecordingRemote(
   supabase: SupabaseClient,
   userId: string,

@@ -30,7 +30,9 @@ const v2Tokens = readFileSync(new URL('../styles/desktop-v2-tokens.css', import.
 const contextValue: LanguagePreferencesContextValue = {
   preferences: DEFAULT_LANGUAGE_PREFERENCES,
   setPreference: () => undefined,
-  t: (key) => translateDesktop('en', key),
+  // Vars must be forwarded. A test double that drops them is the same defect as
+  // the production provider had, and would hide it again.
+  t: (key, vars) => translateDesktop('en', key, vars),
 }
 
 function render(node: ReturnType<typeof createElement>): string {
@@ -140,9 +142,19 @@ describe('shell selection', () => {
     expect(v2Css).not.toContain('display: none !important')
   })
 
-  it('an ACTIVE recording is excluded from the V2 path', () => {
-    // desktopV2View only claims `record` while the recorder is idle.
-    expect(appSource).toContain("workspaceView === 'record' && recorder.status === 'idle'")
+  it('an ACTIVE recording takes the V2 path, ahead of every other view', () => {
+    // INVERTED from Phase 1A, deliberately. This assertion used to require
+    // `workspaceView === 'record' && recorder.status === 'idle'`, i.e. that a
+    // live recording fell back to the legacy `.yl-shell`. Real-account QA
+    // confirmed that as a regression against the approved Preview: pressing
+    // Start swapped the whole window back to the old cockpit. `recording` is now
+    // the FIRST branch of desktopV2View, so no other view can outrank it.
+    // Now keyed on the derived STAGE, not the recorder: `handleStopAndSave`
+    // awaits `recorder.stop()` first, so the recorder reports idle while the
+    // pipeline is still saving — keying on it dropped the user onto Record Home
+    // mid-save.
+    expect(appSource).toContain('ownsRecordingScreen(recordingStage)\n      ? \'recording\'')
+    expect(appSource).not.toContain("workspaceView === 'record' && recorder.status === 'idle'")
   })
 
   it('the nested DesktopSidebar was removed from the legacy sidebar prop', () => {

@@ -1,10 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
+
+/**
+ * The controls this player hands back to its parent.
+ *
+ * Marks need to move playback, and there must be exactly one audio element on
+ * the screen — a second `<audio>` would play over the first and desynchronise
+ * the scrubber. So the parent gets a handle into THIS element instead of its
+ * own player.
+ */
+export type AudioPlayerHandle = {
+  /** Move playback to `seconds`. Does not start or stop playback. */
+  seekTo: (seconds: number) => void
+  /** Current playback position in seconds, for creating a mark. */
+  currentTime: () => number
+}
 
 type Props = {
   recordingId: string
   src: string
   /** Saved duration from DB; shown immediately and merged with browser metadata when ready. */
   durationSecFallback: number
+  /** Filled with the handle above while this player is mounted. */
+  controlsRef?: RefObject<AudioPlayerHandle | null>
 }
 
 function formatAudioClock(totalSec: number): string {
@@ -20,7 +37,12 @@ function formatAudioClock(totalSec: number): string {
 /**
  * Lecture playback: fixed total duration (left = progress, right = length), scrub, play/pause.
  */
-export function RecordingAudioPlayer({ recordingId, src, durationSecFallback }: Props) {
+export function RecordingAudioPlayer({
+  recordingId,
+  src,
+  durationSecFallback,
+  controlsRef,
+}: Props) {
   const ref = useRef<HTMLAudioElement>(null)
   const scrubRef = useRef(false)
   const [playing, setPlaying] = useState(false)
@@ -94,6 +116,33 @@ export function RecordingAudioPlayer({ recordingId, src, durationSecFallback }: 
   }, [recordingId, src, mergeTotalFromBrowser])
 
   const safeMax = Math.max(frozenTotalSec, 0.001)
+
+  /*
+   * Publish the handle.
+   *
+   * `seekTo` writes the same `el.currentTime` the scrubber writes and mirrors it
+   * into `currentSec`, so the transport reflects the jump immediately instead of
+   * waiting for the next `timeupdate`. Playback state is deliberately untouched:
+   * jumping to a mark while paused must not start playing, and jumping while
+   * playing must not stop it.
+   */
+  useEffect(() => {
+    if (!controlsRef) return
+    controlsRef.current = {
+      seekTo: (seconds: number) => {
+        const el = ref.current
+        if (!el || !Number.isFinite(seconds)) return
+        const clamped = Math.min(Math.max(0, seconds), Math.max(frozenTotalSec, 0.001))
+        scrubRef.current = false
+        el.currentTime = clamped
+        setCurrentSec(clamped)
+      },
+      currentTime: () => ref.current?.currentTime ?? 0,
+    }
+    return () => {
+      controlsRef.current = null
+    }
+  }, [controlsRef, frozenTotalSec])
 
   const togglePlay = () => {
     const el = ref.current

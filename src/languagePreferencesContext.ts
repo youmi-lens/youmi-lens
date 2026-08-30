@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import type { DesktopI18nKey } from './lib/desktopI18n'
+import type { DesktopI18nKey, DesktopI18nVars } from './lib/desktopI18n'
 import type {
   LanguagePreferenceName,
   LanguagePreferences,
@@ -11,7 +11,14 @@ export type LanguagePreferencesContextValue = {
     name: K,
     value: LanguagePreferences[K],
   ) => void
-  t: (key: DesktopI18nKey) => string
+  /**
+   * `vars` is NOT optional decoration. Any key whose string contains `{count}`
+   * renders that placeholder literally without it. This signature was
+   * `(key) => string`, which type-checks against callers that pass variables —
+   * TypeScript allows a function to ignore extra arguments — and that is
+   * precisely how `{count} courses` reached production.
+   */
+  t: (key: DesktopI18nKey, vars?: DesktopI18nVars) => string
 }
 
 export const LanguagePreferencesContext = createContext<LanguagePreferencesContextValue | null>(null)

@@ -1,0 +1,433 @@
+/* ============================================================================
+   Active recording — the V2 presentation layer.
+
+   Replaces the legacy `.yl-shell` cockpit that Start Recording used to fall
+   back into. Only presentation lives here: the recorder, its safety and
+   recovery behaviour, the upload path and the Overlay window are untouched.
+
+   Every value is an existing --v2-* token. There is no course palette in this
+   file — the identity chip is coloured inline from the course row, exactly as
+   on Courses and Course Detail.
+   ============================================================================ */
+
+/* The recording screen is the only V2 view that needs a DEFINITE height:
+   history has to scroll inside it while the live line and the bottom controls
+   stay pinned and reachable.
+
+   The shared shell is sized with `min-height: 100dvh`, so it grows with its
+   content and the document scrolls — right for every browsing view, but it left
+   the recording controls 268px below the fold at 800x600, because `flex: 1` on
+   an unbounded parent resolves to "as tall as the content".
+
+   `:has` scopes the constraint to this one view. No other V2 page is affected;
+   the rules simply do not match when `.recording-v2` is absent from the tree. */
+.desktop-v2:has(.recording-v2) {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.desktop-v2:has(.recording-v2) .desktop-v2-main {
+  min-height: 0;
+}
+.desktop-v2-page:has(> .recording-v2) {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  /* The shared page area is `overflow: auto`, which made it a SECOND scroll
+     container wrapping the history. Two nested scrollers meant a two-finger
+     gesture could be claimed by the outer one, and the visible boundary between
+     "history" and "page" was ambiguous. On this view the history is the only
+     scroller. */
+  overflow: hidden;
+}
+
+.recording-v2 {
+  display: flex;
+  width: min(100%, 1040px);
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  margin-inline: auto;
+}
+
+/* Fallback for a WebView without :has — approximate, but never taller than the
+   page area, so the controls stay reachable. */
+@supports not (selector(:has(> *))) {
+  .recording-v2 { flex: 0 1 auto; min-height: calc(100vh - 176px); }
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+
+.recording-v2__head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--v2-rule);
+}
+.recording-v2__spacer { flex: 1; }
+
+.recording-v2__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: var(--v2-radius-pill);
+  font-size: var(--v2-text-xs);
+  font-weight: 700;
+  letter-spacing: .06em;
+}
+.recording-v2__dot { width: 7px; height: 7px; border-radius: 50%; background: currentcolor; }
+.recording-v2__status[data-status='recording'] {
+  background: var(--v2-record-soft);
+  color: var(--v2-record);
+}
+/* The pulse is the one motion cue that recording is live; it is the same
+   signal the Overlay uses, and it respects the reduced-motion preference. */
+.recording-v2__status[data-status='recording'] .recording-v2__dot {
+  animation: recording-v2-pulse 1.6s ease-in-out infinite;
+}
+.recording-v2__status[data-status='paused'] {
+  background: var(--v2-warning-soft);
+  color: var(--v2-warning-ink);
+}
+/* Every post-recording stage: the mic is off, so the chip stops shouting REC
+   in red and becomes neutral chrome. */
+.recording-v2__status:not([data-status='recording']):not([data-status='paused']) {
+  background: var(--v2-paper-3);
+  color: var(--v2-muted);
+}
+.recording-v2__status[data-status='ready'],
+.recording-v2__status[data-status='partial_ready'] {
+  background: var(--v2-success-soft);
+  color: var(--v2-success-ink);
+}
+.recording-v2__status[data-status='upload_failed'] {
+  background: var(--v2-record-soft);
+  color: var(--v2-danger-ink);
+}
+
+@keyframes recording-v2-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .recording-v2__status[data-status='recording'] .recording-v2__dot { animation: none; }
+}
+
+.recording-v2__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 4px 11px 4px 4px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-pill);
+  background: var(--v2-paper);
+}
+.recording-v2__chip-name {
+  overflow: hidden;
+  color: var(--v2-ink-2);
+  font-size: var(--v2-text-sm);
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* `flex: 1` and `min-width: 0`: the title takes the slack rather than being
+   squeezed by its siblings, and can actually shrink to an ellipsis instead of
+   forcing the header wider than the window. */
+.recording-v2__title-block { min-width: 0; flex: 1; }
+.recording-v2__title-block h1 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--v2-ink-2);
+  font-family: var(--v2-font-display);
+  font-size: 17px;
+  font-weight: 700;
+  /* Explicit, and in em. The inherited `-1.68px` from index.css is ~-0.10em at
+     this size, which is what made the letters collide. */
+  letter-spacing: normal;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recording-v2__meta {
+  display: block;
+  margin-top: 2px;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+}
+
+.recording-v2__timer { display: flex; flex-direction: column; align-items: flex-end; }
+.recording-v2__timer-label {
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.recording-v2__timer-value {
+  color: var(--v2-ink-2);
+  font-size: 19px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.recording-v2__notice {
+  margin: 14px 0 0;
+  padding: 10px 13px;
+  border-radius: var(--v2-radius-sm);
+  font-size: var(--v2-text-sm);
+  line-height: 1.5;
+}
+.recording-v2__notice[data-tier='info'] { background: var(--v2-paper-2); color: var(--v2-muted); }
+.recording-v2__notice[data-tier='fatal'] { background: var(--v2-record-soft); color: var(--v2-danger-ink); }
+
+/* ── Captions ────────────────────────────────────────────────────────────────
+   One column, not two. The old cockpit put source and translation in side-by-
+   side cards, which made a student read across the screen for a single spoken
+   sentence; here the translation sits directly under the line it translates. */
+
+.recording-v2__captions {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  margin-top: 20px;
+}
+
+/* Positioning context for the Jump-to-latest affordance and for the top fade.
+   `min-height: 0` is load-bearing on every link of this chain: a flex child
+   defaults to `min-height: auto`, which lets content push the box taller than
+   its parent instead of scrolling inside it. */
+.recording-v2__history-wrap {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+/* The fade is an OVERLAY, not a mask on the scroller.
+   `-webkit-mask-image` on a scroll container forces it into a composited layer
+   and drops WebKit's fast scrolling path — in the real WKWebView that is what
+   made two-finger scrolling feel heavy and reluctant, while Chromium was fine.
+   A pointer-transparent gradient over the top edge looks identical and leaves
+   the scroller on the fast path. */
+.recording-v2__history-wrap::before {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 56px;
+  background: linear-gradient(to bottom, var(--v2-paper) 0%, rgb(255 255 255 / 0%) 100%);
+  content: '';
+  pointer-events: none;
+}
+
+/* A real scroll container. Two-finger trackpad, wheel and Page Up/Down are all
+   the platform's own — there is no synthetic drag anywhere in this file.
+   `overscroll-behavior: contain` stops a flick at the top of the history from
+   chaining into the page behind it. */
+.recording-v2__history {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  /* Never `smooth`: at live-caption rates a smooth scroll is still animating
+     when the next pin arrives, so the view chases the bottom and never settles.
+     The one deliberate animation is the Jump button, which passes it per call. */
+  scroll-behavior: auto;
+  /* The gesture belongs to this element, not to a parent. */
+  touch-action: pan-y;
+}
+.recording-v2__history:focus-visible {
+  outline: 2px solid var(--v2-focus);
+  outline-offset: 2px;
+}
+.desktop-v2 .recording-v2__history p {
+  /* Paired rhythm: a settled line sits closer to the next than to itself. */
+  max-width: 74ch;
+  margin: 0 0 12px;
+  color: var(--v2-faint);
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* Low priority by design: small, quiet, floating clear of the text column, and
+   only present while the reader has scrolled away. */
+.desktop-v2 .recording-v2__jump {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  min-height: 30px;
+  padding: 0 13px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-pill);
+  background: var(--v2-paper);
+  box-shadow: 0 6px 18px var(--v2-shadow-soft);
+  color: var(--v2-muted);
+  font-family: inherit;
+  font-size: var(--v2-text-xs);
+  font-weight: 620;
+  cursor: pointer;
+  transform: translateX(-50%);
+}
+.desktop-v2 .recording-v2__jump:hover { border-color: var(--v2-faint); color: var(--v2-ink-2); }
+/* A dot, not a number: captions arrive constantly and a counter would flicker. */
+.desktop-v2 .recording-v2__jump[data-unseen='true']::before {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--v2-record);
+  content: '';
+  vertical-align: middle;
+}
+
+.recording-v2__live {
+  flex: 0 0 auto;
+  /* One very long interim must not push the controls off-screen; it wraps and
+     scrolls inside its own box instead of expanding the page. */
+  max-height: 38vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-top: 16px;
+  border-top: 1px solid var(--v2-rule-2);
+}
+/* The strongest thing on the screen: largest, darkest, and directly above its
+   own translation. Wider line-height than history because this is the line the
+   reader is tracking in real time. */
+.desktop-v2 .recording-v2__source {
+  max-width: 68ch;
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-size: 21px;
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.desktop-v2 .recording-v2__translation {
+  max-width: 68ch;
+  margin: 8px 0 0;
+  color: var(--v2-muted);
+  font-size: 17px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.desktop-v2 .recording-v2__source[data-empty='true'],
+.desktop-v2 .recording-v2__translation[data-empty='true'] {
+  color: var(--v2-faint);
+  font-weight: 500;
+}
+
+/* ── Post-recording stage panel ──────────────────────────────────────────────
+   One panel for all eight states. The layout does not change between them, so
+   the screen never appears to jump while the pipeline advances. */
+
+.recording-v2__stage {
+  flex: 0 0 auto;
+  margin-top: 32px;
+  padding: 28px 24px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+  text-align: center;
+}
+.desktop-v2 .recording-v2__stage h2 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+.desktop-v2 .recording-v2__stage p {
+  max-width: 44ch;
+  margin: 8px auto 0;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+  line-height: 1.6;
+}
+.desktop-v2 .recording-v2__failure {
+  margin-top: 10px;
+  color: var(--v2-danger-ink);
+}
+.recording-v2__stage-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 22px;
+}
+.recording-v2__stage-actions:empty { margin-top: 0; }
+
+.recording-v2__spinner {
+  display: block;
+  width: 22px;
+  height: 22px;
+  margin: 0 auto 14px;
+  border: 2px solid var(--v2-rule);
+  border-top-color: var(--v2-navy);
+  border-radius: 50%;
+  animation: recording-v2-spin 720ms linear infinite;
+}
+@keyframes recording-v2-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .recording-v2__spinner { animation-duration: 2.4s; }
+}
+
+/* While saving, the captions are reference material, not the focus. */
+.recording-v2__captions--after { margin-top: 24px; }
+.recording-v2__captions--after .recording-v2__history { max-height: 34vh; }
+
+/* ── Controls ────────────────────────────────────────────────────────────── */
+
+.recording-v2__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+/* Discard destroys the session with no undo. The shared quiet-link style is a
+   bare 17px text run; that is fine for navigation, and too small a target for
+   this. Padding only — the type, colour and weight are the approved ones. */
+.desktop-v2 .recording-v2__discard {
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: var(--v2-radius-sm);
+  color: var(--v2-danger-ink);
+}
+.desktop-v2 .recording-v2__discard:hover:not(:disabled) {
+  background: var(--v2-record-soft);
+  color: var(--v2-danger-ink);
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .recording-v2__head { flex-wrap: wrap; }
+  /* `flex: 1 0 100%` — not `width: 100%`. With the `flex: 1` the title carries
+     at wide sizes, a plain width leaves flex-basis at 0 and the title ends up
+     squeezed onto the first row to the right of Open Overlay instead of
+     wrapping to its own line. */
+  .recording-v2__title-block { order: 4; flex: 1 0 100%; }
+  .recording-v2__spacer { display: none; }
+  .desktop-v2 .recording-v2__source { font-size: 19px; }
+  .desktop-v2 .recording-v2__translation { font-size: 16px; }
+}
+
+@supports not (selector(:has(> *))) {
+  @media (max-width: 860px) and (max-height: 650px) {
+    .recording-v2 { min-height: calc(100vh - 144px); }
+  }
+}

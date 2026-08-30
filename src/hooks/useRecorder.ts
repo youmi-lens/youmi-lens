@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { flushSync } from 'react-dom'
+import { createLivePcmAudioContext, resolveAudioContextCtor } from '../lib/livePcmCapture'
 import { logMediaEnvironmentOnce } from '../lib/mediaEnvDebug'
 import {
   buildMediaRecorderOptions,
@@ -65,12 +66,32 @@ export function useRecorder(opts?: {
    */
   onPcmChunkRef?: RefObject<((buffer: ArrayBuffer, sampleRate: number) => void) | null>
   /**
+   * Fired the moment the capture AudioContext exists, with the rate the stream
+   * will ACTUALLY use — before any PCM has been produced.
+   *
+   * The live session is warmed ahead of Record using
+   * `probeDefaultAudioSampleRate()`, which opens a bare AudioContext and reports
+   * the hardware OUTPUT rate. Opening the microphone can change it: on macOS a
+   * Bluetooth headset switches to its HFP mode when the mic is acquired, so the
+   * capture context comes back at a different rate than the warm used. The
+   * adapter then sees a mismatch on the first PCM frame and tears the upstream
+   * session down for a full reconnect — at the exact moment the user starts
+   * speaking. This callback moves that reconnect earlier, into the gap between
+   * pressing Start and the first word.
+   */
+  onCaptureSampleRate?: (sampleRate: number) => void
+  /**
    * Local A/B only: when true, do not clone the mic or run the live slice MediaRecorder cycle.
    * Main track is unchanged. Used to test whether the Youmi live chain interferes with main recording.
    */
   experimentalSkipLiveSlice?: boolean
   /** Owner isolation key for durable sessions (`userId` or `local` / `anonymous`). */
   getOwnerKey?: () => string
+  /**
+   * Read at Start and never again, so the source is frozen for the session —
+   * changing the setting mid-lecture cannot change what is being captured.
+   */
+  getAudioSource?: () => 'microphone' | 'system'
 }) {
   const [status, setStatus] = useState<RecordingStatus>('idle')
   const [elapsedSec, setElapsedSec] = useState(0)
@@ -244,12 +265,53 @@ export function useRecorder(opts?: {
         )
         return null
       }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-        },
-      })
+      /*
+       * One stream, two possible origins.
+       *
+       * Everything after this line is identical for both: the same MediaRecorder
+       * writes the durable file and the same AudioContext produces live PCM. The
+       * caption engine, the upload and the recovery path never learn which was
+       * used — which is exactly why System Audio does not need a second
+       * recording implementation.
+       */
+      const source = opts?.getAudioSource?.() ?? 'microphone'
+      let stream: MediaStream
+      if (source === 'system') {
+        if (typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+          setError('This build cannot capture computer audio.')
+          return null
+        }
+        // `video` is required by the spec to get a picker at all, but the track
+        // is stopped immediately below: no frame is ever read, encoded or saved.
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+          },
+        })
+        for (const track of stream.getVideoTracks()) {
+          track.stop()
+          stream.removeTrack(track)
+        }
+        if (stream.getAudioTracks().length === 0) {
+          // Never fall back to the microphone here. Recording the room while the
+          // UI says "System Audio" is worse than refusing.
+          for (const track of stream.getTracks()) track.stop()
+          setError(
+            'No computer audio was shared. Choose a screen or window and tick “Share audio”, then try again.',
+          )
+          return null
+        }
+      } else {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+          },
+        })
+      }
       streamRef.current = stream
       const mime = pickMime()
       mimeRef.current = mime || 'audio/webm'
@@ -346,12 +408,25 @@ export function useRecorder(opts?: {
       // after this recorder.start() call; reading it here would always be null.
       if (pcmChunkRef) {
         try {
-          // Avoid TS complaining about AudioContext; cast through unknown
-          const ACtx = (window.AudioContext ||
-            (window as unknown as Record<string, unknown>).webkitAudioContext) as typeof AudioContext
-          const ctx = new ACtx()
+          // Fixed at LIVE_PCM_SAMPLE_RATE so the rate the upstream ASR session
+          // was warmed at is the rate frames actually arrive at. A default
+          // context follows the device, which can move when the input opens,
+          // and the resulting mid-record re-handshake costs seconds of caption
+          // latency. Falls back to the default context if the platform refuses.
+          const ACtx = resolveAudioContextCtor()
+          if (!ACtx) throw new Error('AudioContext unavailable')
+          const ctx = createLivePcmAudioContext(ACtx)
           audioContextRef.current = ctx
           const sampleRate = ctx.sampleRate
+
+          // Announce the REAL capture rate now, while the user is still reaching
+          // for their first word. If it differs from the warm rate the upstream
+          // reconnect happens here instead of on the first spoken frame.
+          try {
+            opts?.onCaptureSampleRate?.(sampleRate)
+          } catch {
+            /* diagnostics must never break capture */
+          }
 
           const source = ctx.createMediaStreamSource(stream)
           audioSourceRef.current = source

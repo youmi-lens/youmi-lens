@@ -1,0 +1,7 @@
+{
+  "productName": "Youmi Lens P0 Recovery QA",
+  "identifier": "com.youmilens.desktop.stagingqa.refresh",
+  "build": {
+    "beforeBuildCommand": "npm run build:qa-staging"
+  }
+}

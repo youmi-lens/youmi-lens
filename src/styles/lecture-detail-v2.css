@@ -1,0 +1,324 @@
+/* ============================================================================
+   Lecture Detail V2.
+
+   Replaces the legacy detail that lived in YoumiLensShell's transcript and
+   summary slots. Same V2 token set as Courses and Recording — no new palette,
+   no new type scale, no course colour in this file (the identity tiles are
+   coloured inline from the course row).
+   ============================================================================ */
+
+.lecture-v2 { width: min(100%, 1040px); margin-inline: auto; }
+
+/* ── Toolbar ─────────────────────────────────────────────────────────────── */
+
+.lecture-v2__bar { display: flex; align-items: center; margin-bottom: 20px; }
+.lecture-v2__bar-spacer { flex: 1; }
+
+.lecture-v2__menu { position: relative; display: inline-flex; }
+.lecture-v2__menu-pop {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  display: grid;
+  min-width: 200px;
+  padding: 5px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-paper);
+  box-shadow: 0 18px 48px rgb(6 27 52 / 14%);
+}
+.desktop-v2 .lecture-v2__menu-pop button {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--v2-radius-xs);
+  background: transparent;
+  color: var(--v2-ink-2);
+  font-family: inherit;
+  font-size: var(--v2-text-sm);
+  font-weight: 550;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.desktop-v2 .lecture-v2__menu-pop button:hover:not(:disabled) { background: var(--v2-paper-3); }
+.desktop-v2 .lecture-v2__menu-pop button:disabled { opacity: .45; cursor: not-allowed; }
+.desktop-v2 .lecture-v2__menu-pop button[data-danger='true'] { color: var(--v2-danger-ink); }
+.desktop-v2 .lecture-v2__menu-pop button[data-danger='true']:hover:not(:disabled) {
+  background: var(--v2-record-soft);
+}
+
+/* ── Header ──────────────────────────────────────────────────────────────── */
+
+.lecture-v2__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--v2-rule);
+}
+.lecture-v2__head-text { flex: 1; min-width: 0; }
+.lecture-v2__head-text h1 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-family: var(--v2-font-display);
+  font-size: 24px;
+  font-weight: 700;
+  /* em, never the inherited absolute -1.68px from index.css. */
+  letter-spacing: -.02em;
+  line-height: 1.3;
+}
+.desktop-v2 .lecture-v2__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+}
+.lecture-v2__course { display: inline-flex; align-items: center; gap: 6px; }
+.lecture-v2__dot {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--v2-faint);
+}
+
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+
+.lecture-v2__tabs { display: flex; gap: 4px; margin: 20px 0 0; }
+.desktop-v2 .lecture-v2__tab {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--v2-muted);
+  font-family: inherit;
+  font-size: var(--v2-text-sm);
+  font-weight: 620;
+  cursor: pointer;
+}
+.desktop-v2 .lecture-v2__tab:hover { color: var(--v2-ink-2); }
+.desktop-v2 .lecture-v2__tab[aria-selected='true'] {
+  border-bottom-color: var(--v2-navy);
+  color: var(--v2-ink-2);
+}
+
+.lecture-v2__panel { padding-top: 22px; }
+.lecture-v2__panel-tools { display: flex; justify-content: flex-end; margin-bottom: 14px; }
+
+/* ── Summary language switch ─────────────────────────────────────────────── */
+
+.lecture-v2__locale {
+  display: inline-flex;
+  gap: 2px;
+  margin-bottom: 20px;
+  padding: 3px;
+  border-radius: var(--v2-radius-pill);
+  background: var(--v2-paper-3);
+}
+.desktop-v2 .lecture-v2__locale-btn {
+  min-height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--v2-radius-pill);
+  background: transparent;
+  color: var(--v2-muted);
+  font-family: inherit;
+  font-size: var(--v2-text-xs);
+  font-weight: 620;
+  cursor: pointer;
+}
+.desktop-v2 .lecture-v2__locale-btn[aria-pressed='true'] {
+  background: var(--v2-paper);
+  box-shadow: 0 1px 3px var(--v2-shadow-soft);
+  color: var(--v2-ink-2);
+}
+
+/* ── Content ─────────────────────────────────────────────────────────────── */
+
+.lecture-v2__section + .lecture-v2__section { margin-top: 28px; }
+.desktop-v2 .lecture-v2__section h2 {
+  margin: 0 0 10px;
+  color: var(--v2-ink-2);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+/* One readable column. `max-width` in ch keeps the measure right at any window
+   width instead of stretching a 1000px line the eye cannot track. */
+.desktop-v2 .lecture-v2__prose p {
+  max-width: 74ch;
+  margin: 0 0 12px;
+  color: var(--v2-ink-2);
+  font-size: 15px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.desktop-v2 .lecture-v2__prose p:last-child { margin-bottom: 0; }
+/* Selectable as one continuous block — the point of not using cards. */
+.lecture-v2__transcript { user-select: text; }
+
+.desktop-v2 .lecture-v2__note {
+  max-width: 74ch;
+  margin: 0 0 16px;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+  line-height: 1.55;
+}
+
+.lecture-v2__empty {
+  padding: 56px 32px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+  text-align: center;
+}
+.desktop-v2 .lecture-v2__empty h2 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+.desktop-v2 .lecture-v2__empty p {
+  max-width: 46ch;
+  margin: 8px auto 0;
+  color: var(--v2-muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* ── Notes ───────────────────────────────────────────────────────────────── */
+
+.lecture-v2__notes-label {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Same measure as the transcript column, so Notes reads as the same document
+   rather than a different width of page. */
+.desktop-v2 .lecture-v2__notes {
+  display: block;
+  width: 100%;
+  max-width: 74ch;
+  min-height: 220px;
+  padding: 14px 16px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-paper);
+  color: var(--v2-ink-2);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.7;
+  resize: vertical;
+}
+.desktop-v2 .lecture-v2__notes:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: 1px;
+}
+.desktop-v2 .lecture-v2__notes::placeholder { color: var(--v2-faint); }
+
+.lecture-v2__notes-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 74ch;
+  margin-top: 12px;
+}
+.lecture-v2__notes-spacer { flex: 1 1 auto; }
+.desktop-v2 .lecture-v2__notes-hint {
+  margin: 0;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+}
+.desktop-v2 .lecture-v2__notes-ok {
+  margin: 0;
+  color: var(--v2-success-ink);
+  font-size: var(--v2-text-xs);
+  font-weight: 600;
+}
+.desktop-v2 .lecture-v2__notes-error {
+  margin: 0;
+  color: var(--v2-danger-ink);
+  font-size: var(--v2-text-xs);
+  font-weight: 600;
+}
+.desktop-v2 .lecture-v2__notes-read {
+  white-space: pre-wrap;
+}
+
+/* ── Player + Marks ──────────────────────────────────────────────────────── */
+
+.lecture-v2__player {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--v2-rule);
+}
+
+.lecture-v2__marks { margin-top: 20px; }
+.lecture-v2__marks-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.desktop-v2 .lecture-v2__marks-head h2 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-size: var(--v2-text-base);
+  font-weight: 700;
+  letter-spacing: normal;
+}
+.desktop-v2 .lecture-v2__marks-count {
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+}
+
+/* A row of chips, not a table — this is a jump list, not an editor. */
+.lecture-v2__mark-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.desktop-v2 .lecture-v2__mark {
+  padding: 6px 12px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-pill);
+  background: var(--v2-paper-3);
+  color: var(--v2-ink-2);
+  font-size: var(--v2-text-sm);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.desktop-v2 .lecture-v2__mark:hover:not(:disabled) {
+  background: var(--v2-paper);
+  box-shadow: 0 1px 3px var(--v2-shadow-soft);
+}
+.desktop-v2 .lecture-v2__mark:focus-visible {
+  outline: 2px solid var(--v2-accent);
+  outline-offset: 1px;
+}
+.desktop-v2 .lecture-v2__mark:disabled { opacity: 0.5; cursor: default; }
+
+@media (max-width: 860px) {
+  .lecture-v2__head { flex-wrap: wrap; }
+  .lecture-v2__head-text { flex: 1 0 100%; order: 3; }
+}

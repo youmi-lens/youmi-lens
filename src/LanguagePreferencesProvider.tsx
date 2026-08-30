@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { LanguagePreferencesContext } from './languagePreferencesContext'
-import { translateDesktop } from './lib/desktopI18n'
+import {
+  translateDesktop,
+  type DesktopI18nKey,
+  type DesktopI18nVars,
+} from './lib/desktopI18n'
 import {
   DEFAULT_LANGUAGE_PREFERENCES,
   persistLanguagePreferences,
@@ -43,8 +47,8 @@ export function LanguagePreferencesProvider({ children }: { children: ReactNode 
     () => ({
       preferences,
       setPreference,
-      t: (key: Parameters<typeof translateDesktop>[1]) =>
-        translateDesktop(preferences.appLocale, key),
+      t: (key: DesktopI18nKey, vars?: DesktopI18nVars) =>
+        translateDesktop(preferences.appLocale, key, vars),
     }),
     [preferences, setPreference],
   )

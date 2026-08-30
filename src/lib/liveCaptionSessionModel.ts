@@ -166,6 +166,13 @@ export class LiveCaptionSessionModel {
       const text = normalizeEnglishPrimaryPayloadOrReject(ev.text)
       if (!text) return projectView(this.s)
       if (open >= 0 && seq < open) return projectView(this.s)
+      // A late interim for a segment that has already been committed would
+      // reappear as the gray current line while the same words sit in history —
+      // the sentence rendered twice. zh_interim has always guarded this with
+      // `finalizedZhIds`; English had no equivalent.
+      if (this.s.committedEn.some((line) => line.id === ev.segmentId)) {
+        return projectView(this.s)
+      }
 
       if (this.s.currentZh && this.s.currentZh.id !== ev.segmentId) {
         this.s.currentZh = null
@@ -183,19 +190,51 @@ export class LiveCaptionSessionModel {
 
     // ── en_final ───────────────────────────────────────────────────────────
     // Text is already de-overlapped novelText from the engine.
-    // Append-only to keep committed monotonic.
+    //
+    // Reconciliation is keyed on `segmentId`, exactly as zh_final has always
+    // been. This branch used to be unconditional append:
+    //
+    //     committedEn = [...committedEn, { id, text }]
+    //
+    // with no check for an id already present, so any repeat of a final — a
+    // provider retry, a duplicated frame, or a reconnect replaying the session —
+    // committed the same sentence again. That is the observed bug: one spoken
+    // sentence stacking up many times in the caption stream.
+    //
+    // Identity, not text, decides. The same sentence genuinely spoken twice
+    // arrives under two different segment ids and is kept twice; only the SAME
+    // segment collapses. No global text dedupe is performed anywhere, because
+    // that would silently delete legitimate repetition.
     if (ev.type === 'en_final') {
       const text = normalizeEnglishPrimaryPayloadOrReject(ev.text)
       if (!text) return projectView(this.s)
-      if (open >= 0 && seq < open) return projectView(this.s)
+      if (open >= 0 && seq < open) {
+        // An out-of-order final for an ALREADY COMMITTED segment is still a
+        // legitimate correction of that segment; only unknown stale ids drop.
+        const known = this.s.committedEn.some((line) => line.id === ev.segmentId)
+        if (!known) return projectView(this.s)
+      }
 
       this.s.lastEnFinalSanitizedById.set(ev.segmentId, sanitizeEnglishForZhTranslate(text))
-      this.s.committedEn = [...this.s.committedEn, { id: ev.segmentId, text }]
+
+      const existing = this.s.committedEn.findIndex((line) => line.id === ev.segmentId)
+      if (existing >= 0) {
+        // Replace in place: a corrected final keeps its position in the
+        // transcript, and an identical replay is a no-op rather than a copy.
+        if (this.s.committedEn[existing].text !== text) {
+          this.s.committedEn = this.s.committedEn.map((line, i) =>
+            i === existing ? { id: ev.segmentId, text } : line,
+          )
+        }
+      } else {
+        this.s.committedEn = [...this.s.committedEn, { id: ev.segmentId, text }]
+      }
+
       if (this.s.currentEn?.id === ev.segmentId) {
         this.s.currentEn = null
         this.s.displayGrayEn = ''
       }
-      this.s.openUtteranceSeq = seq
+      this.s.openUtteranceSeq = Math.max(this.s.openUtteranceSeq, seq)
       return projectView(this.s)
     }
 

@@ -1,5 +1,6 @@
 import type { Recording, RecordingDetail } from '../types'
 import type { PendingUploadMeta } from './pendingUploads'
+import { titleForPersist } from './lectureTitleIntegrity'
 
 const DB_NAME = 'lecture-companion'
 // v4 (Phase 2D-2): additive `pending_uploads` for failed cloud uploads.
@@ -154,6 +155,12 @@ export async function updateRecordingLocal(
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
     const next: Row = { ...existing, ...patch }
+    // A patch may carry `title` only when it is a real rename. An empty string
+    // or a display placeholder is dropped, so the stored name survives — the
+    // same guard `updateRecordingMetadata` applies to the cloud row.
+    if ('title' in patch && titleForPersist(patch.title) === undefined) {
+      next.title = existing.title
+    }
     tx.objectStore(STORE).put(next)
   })
 }
