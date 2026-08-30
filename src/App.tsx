@@ -225,6 +225,7 @@ import {
   findCourseForRecording,
   lectureIdentity,
   lecturesInCourse,
+  reconcileCourseSelection,
 } from './lib/courses/courseModel'
 import {
   courseToRestoreWithLecture,
@@ -2729,7 +2730,13 @@ function RecordingWorkspace({
     aiPipelineBusy,
   ])
 
-  const [course, setCourse] = useState('CS 101')
+  /**
+   * Empty (Unfiled) until reconciled against the real course list below. This
+   * must never start as a literal course name: a hardcoded default here has no
+   * course row behind it, and would display exactly like the bug this session
+   * fixed (Record Home showing "CS 101" while no such course exists).
+   */
+  const [course, setCourse] = useState('')
   /** Canonical Course UUID for the lecture currently being prepared. */
   const [recordingCourseId, setRecordingCourseId] = useState<string | null>(null)
   const [title, setTitle] = useState('')
@@ -3203,14 +3210,45 @@ const [editLectureModal, setEditLectureModal] = useState<{
     recoveryPending: recoveredSessions.length > 0 && recorder.status === 'idle' && flow.phase === 'idle',
   })
 
-  /** The identity of the course currently selected on Record Home. */
-  const activeCourseIdentity = useMemo(
-    () =>
-      courseIdentity(
-        findCourseForRecording({ course, courseId: recordingCourseId }, coursesState.courses),
-      ),
+  /**
+   * The canonical Course row behind Record Home's current selection, looked up
+   * by `recordingCourseId` first and only falling back to a name match for a
+   * selection that predates Phase 1B. This is the single source of truth for
+   * what Record Home may call "selected" — never the raw `course` string on
+   * its own, which can otherwise go stale (a rename, delete, or an app launch
+   * that starts from a hardcoded default with no real row behind it at all).
+   */
+  const selectedCourseRecord = useMemo(
+    () => findCourseForRecording({ course, courseId: recordingCourseId }, coursesState.courses),
     [course, recordingCourseId, coursesState.courses],
   )
+
+  /** The identity of the course currently selected on Record Home. */
+  const activeCourseIdentity = useMemo(() => courseIdentity(selectedCourseRecord), [selectedCourseRecord])
+
+  /**
+   * Reconciles the Record Home selection against the live course list once it
+   * has actually loaded (never while `coursesState.loading` is true — a still-
+   * empty list mid-fetch is not evidence the selected course is gone).
+   *
+   * A found row wins outright: its canonical `id`/`name` replace whatever is
+   * currently held, so a rename or a stale/legacy selection self-heals without
+   * a separate string-matching patch. A row that resolves to nothing — deleted,
+   * purged, or (as at first launch) a hardcoded default with no course behind
+   * it — clears the selection to Unfiled rather than continuing to show a name
+   * with no course behind it.
+   */
+  useEffect(() => {
+    if (coursesState.loading) return
+    const decision = reconcileCourseSelection({ course, courseId: recordingCourseId }, selectedCourseRecord)
+    if (decision.action === 'adopt') {
+      setRecordingCourseId(decision.id)
+      setCourse(decision.name)
+    } else if (decision.action === 'clear') {
+      setRecordingCourseId(null)
+      setCourse('')
+    }
+  }, [coursesState.loading, selectedCourseRecord, recordingCourseId, course])
 
   const unfiledRecordings = useMemo(
     () =>
@@ -6589,7 +6627,9 @@ useEffect(() => {
                     : row,
                 ),
               )
-              setCourse((current) => (current.trim() === previous.trim() ? name : current))
+              // Record Home's own selection is reconciled by the
+              // selectedCourseRecord effect once coursesState.courses reflects
+              // the rename — no name-matching patch needed here.
             })
           }}
         />

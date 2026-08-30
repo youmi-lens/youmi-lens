@@ -1567,3 +1567,31 @@ describe('course identity', () => {
     expect(model).not.toMatch(/hash|charCodeAt|Math\.random/i)
   })
 })
+
+/* ── Record / Courses course-state consistency ───────────────────────────────
+ * Regression guard for a real Owner QA finding: Record Home displayed "CS 101"
+ * as the selected course while no such course existed on the Courses page.
+ * Root cause was a hardcoded string default with no course row behind it,
+ * never validated against the live course list, plus a rename sync that
+ * matched by display name instead of by id. */
+describe('Record Home and Courses share one canonical course source', () => {
+  it('Record Home selection and Courses both key off coursesState.courses', () => {
+    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8')
+    // The canonical lookup behind Record Home's selection.
+    expect(app).toContain('findCourseForRecording({ course, courseId: recordingCourseId }, coursesState.courses)')
+    // What CoursesPage is actually handed.
+    expect(app).toMatch(/<CoursesPage[\s\S]{0,200}courses=\{coursesState\.courses\}/)
+  })
+
+  it('the selection reconciliation runs through the shared pure decision function, not ad-hoc name matching', () => {
+    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8')
+    expect(app).toContain('reconcileCourseSelection({ course, courseId: recordingCourseId }, selectedCourseRecord)')
+    // The fragile rename patch this replaced: `current.trim() === previous.trim()`.
+    expect(app).not.toContain('current.trim() === previous.trim()')
+  })
+
+  it('never starts from a hardcoded course name with no row behind it', () => {
+    const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8')
+    expect(app).not.toMatch(/const \[course, setCourse\] = useState\('[^']+'\)/)
+  })
+})

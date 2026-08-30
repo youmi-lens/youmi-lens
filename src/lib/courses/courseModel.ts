@@ -197,6 +197,41 @@ export function findCourseForRecording(
   return courses.find((course) => course.deletedAt === null && courseNameKey(course.name) === key) ?? null
 }
 
+/**
+ * What Record Home's course selection should do once the live course list is
+ * known, given a canonical match (or lack of one) from `findCourseForRecording`.
+ *
+ * A match wins outright — its `id`/`name` are the truth, so a rename or a
+ * selection that only ever matched by legacy name self-heals to the real row.
+ * No match means the selection has nothing behind it (deleted, purged, or a
+ * hardcoded default from before any course existed): it clears to Unfiled
+ * rather than continuing to show a name with no course behind it.
+ *
+ * `'keep'` is reported whenever the current state already agrees, so a caller
+ * driving a React effect from this can skip the `setState` calls that would
+ * otherwise re-run the effect for no reason.
+ */
+export type CourseSelectionReconciliation =
+  | { action: 'keep' }
+  | { action: 'adopt'; id: string; name: string }
+  | { action: 'clear' }
+
+export function reconcileCourseSelection(
+  current: { course: string; courseId: string | null },
+  match: Course | null,
+): CourseSelectionReconciliation {
+  if (match) {
+    if (match.id !== current.courseId || match.name !== current.course) {
+      return { action: 'adopt', id: match.id, name: match.name }
+    }
+    return { action: 'keep' }
+  }
+  if (current.courseId !== null || current.course !== '') {
+    return { action: 'clear' }
+  }
+  return { action: 'keep' }
+}
+
 /** Active lectures inside one course, newest first. */
 export function lecturesInCourse(
   courseId: string,
