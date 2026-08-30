@@ -2731,10 +2731,12 @@ function RecordingWorkspace({
   ])
 
   /**
-   * Empty (Unfiled) until reconciled against the real course list below. This
-   * must never start as a literal course name: a hardcoded default here has no
-   * course row behind it, and would display exactly like the bug this session
-   * fixed (Record Home showing "CS 101" while no such course exists).
+   * Empty until reconciled against the real course list below, which adopts
+   * the first canonical course once one is known (or leaves this empty only
+   * if there are truly none yet). This must never start as a literal course
+   * name: a hardcoded default here has no course row behind it, and would
+   * display exactly like the bug this session fixed (Record Home showing
+   * "CS 101" while no such course exists).
    */
   const [course, setCourse] = useState('')
   /** Canonical Course UUID for the lecture currently being prepared. */
@@ -3233,14 +3235,20 @@ const [editLectureModal, setEditLectureModal] = useState<{
    *
    * A found row wins outright: its canonical `id`/`name` replace whatever is
    * currently held, so a rename or a stale/legacy selection self-heals without
-   * a separate string-matching patch. A row that resolves to nothing — deleted,
-   * purged, or (as at first launch) a hardcoded default with no course behind
-   * it — clears the selection to Unfiled rather than continuing to show a name
-   * with no course behind it.
+   * a separate string-matching patch, and an already-valid selection is never
+   * displaced by this effect. With no match, Record Home always points at a
+   * real course when one exists: `coursesState.courses[0]` — the same
+   * canonical order Courses/Course Detail already render — is adopted instead
+   * of falling back to Unfiled. Only a genuinely empty course list clears the
+   * selection.
    */
   useEffect(() => {
     if (coursesState.loading) return
-    const decision = reconcileCourseSelection({ course, courseId: recordingCourseId }, selectedCourseRecord)
+    const decision = reconcileCourseSelection(
+      { course, courseId: recordingCourseId },
+      selectedCourseRecord,
+      coursesState.courses,
+    )
     if (decision.action === 'adopt') {
       setRecordingCourseId(decision.id)
       setCourse(decision.name)
@@ -3248,7 +3256,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
       setRecordingCourseId(null)
       setCourse('')
     }
-  }, [coursesState.loading, selectedCourseRecord, recordingCourseId, course])
+  }, [coursesState.loading, selectedCourseRecord, coursesState.courses, recordingCourseId, course])
 
   const unfiledRecordings = useMemo(
     () =>

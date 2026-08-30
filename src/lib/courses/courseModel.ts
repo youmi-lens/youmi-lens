@@ -202,10 +202,18 @@ export function findCourseForRecording(
  * known, given a canonical match (or lack of one) from `findCourseForRecording`.
  *
  * A match wins outright — its `id`/`name` are the truth, so a rename or a
- * selection that only ever matched by legacy name self-heals to the real row.
- * No match means the selection has nothing behind it (deleted, purged, or a
- * hardcoded default from before any course existed): it clears to Unfiled
- * rather than continuing to show a name with no course behind it.
+ * selection that only ever matched by legacy name self-heals to the real row,
+ * and an existing valid selection is never displaced just because some other
+ * course (e.g. a newly created one) now sorts first.
+ *
+ * With no match — the selection is missing, stale, deleted, or (as with the
+ * hardcoded default this replaced) never had a course behind it at all — the
+ * FIRST course in `courses` is adopted instead, in the exact order the caller
+ * already uses for Courses/Course Detail. This function does not sort or
+ * otherwise decide what "first" means; it only reads `courses[0]`. Record
+ * Home should always point at a real course when one exists — Unfiled is not
+ * offered as a resting state while real courses are available. Only a
+ * genuinely empty `courses` clears the selection.
  *
  * `'keep'` is reported whenever the current state already agrees, so a caller
  * driving a React effect from this can skip the `setState` calls that would
@@ -219,12 +227,17 @@ export type CourseSelectionReconciliation =
 export function reconcileCourseSelection(
   current: { course: string; courseId: string | null },
   match: Course | null,
+  courses: readonly Course[],
 ): CourseSelectionReconciliation {
   if (match) {
     if (match.id !== current.courseId || match.name !== current.course) {
       return { action: 'adopt', id: match.id, name: match.name }
     }
     return { action: 'keep' }
+  }
+  const first = courses[0]
+  if (first) {
+    return { action: 'adopt', id: first.id, name: first.name }
   }
   if (current.courseId !== null || current.course !== '') {
     return { action: 'clear' }

@@ -1585,9 +1585,20 @@ describe('Record Home and Courses share one canonical course source', () => {
 
   it('the selection reconciliation runs through the shared pure decision function, not ad-hoc name matching', () => {
     const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8')
-    expect(app).toContain('reconcileCourseSelection({ course, courseId: recordingCourseId }, selectedCourseRecord)')
+    expect(app).toMatch(
+      /reconcileCourseSelection\(\s*\{ course, courseId: recordingCourseId \},\s*selectedCourseRecord,\s*coursesState\.courses,?\s*\)/,
+    )
     // The fragile rename patch this replaced: `current.trim() === previous.trim()`.
     expect(app).not.toContain('current.trim() === previous.trim()')
+  })
+
+  it('falls back to the first canonical course, never a fabricated "Unfiled" placeholder, when the selection is invalid', () => {
+    // The product correction after the first fix: Record Home must point at a
+    // real course whenever one exists, using coursesState.courses[0] — not a
+    // synthetic "Unfiled" resting state — while real courses are available.
+    const model = readFileSync(new URL('../lib/courses/courseModel.ts', import.meta.url), 'utf8')
+    expect(model).toContain('const first = courses[0]')
+    expect(model).not.toMatch(/courses\[0\][\s\S]{0,80}sort\(/)
   })
 
   it('never starts from a hardcoded course name with no row behind it', () => {

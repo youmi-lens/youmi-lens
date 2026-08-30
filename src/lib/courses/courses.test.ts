@@ -219,80 +219,70 @@ describe('Record Home course-selection reconciliation', () => {
   function selection(course: string, courseId: string | null) {
     return { course, courseId }
   }
+  function decide(current: ReturnType<typeof selection>, courses: readonly Course[]) {
+    return reconcileCourseSelection(current, findCourseForRecording(current, courses), courses)
+  }
 
-  it('1 · a persisted selection that still exists is kept as-is', () => {
-    const courses = [course({ id: 'c1', name: 'CS 250' })]
-    const current = selection('CS 250', 'c1')
-    const match = findCourseForRecording(current, courses)
-    expect(reconcileCourseSelection(current, match)).toEqual({ action: 'keep' })
+  it('1 · no selection, courses exist → the first canonical course is selected', () => {
+    const courses = [course({ id: 'c1', name: 'Alpha' }), course({ id: 'c2', name: 'Beta' })]
+    expect(decide(selection('', null), courses)).toEqual({ action: 'adopt', id: 'c1', name: 'Alpha' })
   })
 
-  it('2 · a persisted selection whose course was renamed adopts the new name, not the stale one', () => {
-    const courses = [course({ id: 'c1', name: 'CS 250 Renamed' })]
-    const current = selection('CS 250', 'c1') // stale display name; id still matches
-    const match = findCourseForRecording(current, courses)
-    expect(reconcileCourseSelection(current, match)).toEqual({
-      action: 'adopt',
-      id: 'c1',
-      name: 'CS 250 Renamed',
-    })
-  })
-
-  it('3 · a persisted selection whose course was deleted clears rather than keeps showing the old name', () => {
+  it('2 · a stale selection (no row behind it), courses exist → the first canonical course is selected', () => {
     // Exactly the reported bug shape: a course id/name with nothing behind it —
-    // here because the course was soft-deleted, so it is absent from the
-    // active list entirely, same as a hardcoded default that never existed.
-    const courses: Course[] = []
-    const current = selection('CS 101', null)
-    const match = findCourseForRecording(current, courses)
-    expect(match).toBeNull()
-    expect(reconcileCourseSelection(current, match)).toEqual({ action: 'clear' })
+    // a hardcoded default, or a row that no longer exists under that id or name.
+    const courses = [course({ id: 'c1', name: 'Alpha' }), course({ id: 'c2', name: 'Beta' })]
+    expect(decide(selection('CS 101', null), courses)).toEqual({ action: 'adopt', id: 'c1', name: 'Alpha' })
+    expect(decide(selection('CS 101', 'gone'), courses)).toEqual({ action: 'adopt', id: 'c1', name: 'Alpha' })
   })
 
-  it('4 · a course that disappears after a live delete falls back safely on the next reconciliation', () => {
-    const before = [course({ id: 'c1', name: 'CS 250' })]
+  it('3 · the selected course is deleted, other courses remain → the first remaining canonical course is selected', () => {
+    const before = [course({ id: 'c1', name: 'CS 250' }), course({ id: 'c2', name: 'Math' })]
     const current = selection('CS 250', 'c1')
-    expect(reconcileCourseSelection(current, findCourseForRecording(current, before))).toEqual({
-      action: 'keep',
-    })
-    // The course list refreshes after the delete; c1 is gone.
-    const after: Course[] = []
-    expect(reconcileCourseSelection(current, findCourseForRecording(current, after))).toEqual({
-      action: 'clear',
-    })
+    expect(decide(current, before)).toEqual({ action: 'keep' })
+    // c1 is soft-deleted; the active list refreshes without it.
+    const after = [course({ id: 'c2', name: 'Math' })]
+    expect(decide(current, after)).toEqual({ action: 'adopt', id: 'c2', name: 'Math' })
   })
 
-  it('5 · a newly created course is adopted by id the moment it appears in the course list', () => {
-    const coursesBeforeCreate: Course[] = []
-    const current = selection('', null)
-    expect(reconcileCourseSelection(current, findCourseForRecording(current, coursesBeforeCreate))).toEqual({
-      action: 'keep',
-    })
-    // create() sets course + courseId directly (App.tsx), then the list refetches.
-    const afterCreate = [course({ id: 'new-1', name: 'New Course' })]
-    const created = selection('New Course', 'new-1')
-    expect(reconcileCourseSelection(created, findCourseForRecording(created, afterCreate))).toEqual({
-      action: 'keep',
-    })
+  it('4 · a valid selected course remains selected, even when it does not sort first', () => {
+    const courses = [course({ id: 'c1', name: 'Alpha' }), course({ id: 'c2', name: 'Beta' })]
+    expect(decide(selection('Beta', 'c2'), courses)).toEqual({ action: 'keep' })
   })
 
-  it('6 · a restored course becomes selectable again once it is back in the active list', () => {
+  it('5 · a renamed selected course keeps the same id and adopts the canonical new name', () => {
+    const courses = [course({ id: 'c1', name: 'CS 250 Renamed' }), course({ id: 'c2', name: 'Beta' })]
+    const current = selection('CS 250', 'c1') // stale display name; id still matches
+    expect(decide(current, courses)).toEqual({ action: 'adopt', id: 'c1', name: 'CS 250 Renamed' })
+  })
+
+  it('6 · a newly-created course sorting first does not steal an existing valid selection', () => {
+    // c2 is the user's current, still-valid selection. c1 is a brand new course
+    // that now sits first in canonical order — the fallback must not apply,
+    // because a match already exists.
+    const courses = [course({ id: 'c1', name: 'Newest' }), course({ id: 'c2', name: 'My Course' })]
+    expect(decide(selection('My Course', 'c2'), courses)).toEqual({ action: 'keep' })
+  })
+
+  it('7 · zero courses → the genuine no-course state, never a fabricated selection', () => {
+    expect(decide(selection('', null), [])).toEqual({ action: 'keep' })
+    expect(decide(selection('CS 101', null), [])).toEqual({ action: 'clear' })
+    expect(decide(selection('CS 250', 'c1'), [])).toEqual({ action: 'clear' })
+  })
+
+  it('Unfiled is never the fallback while real courses exist', () => {
+    const courses = [course({ id: 'c1', name: 'Alpha' })]
+    for (const current of [selection('', null), selection('CS 101', null), selection('gone', 'missing')]) {
+      expect(decide(current, courses).action).toBe('adopt')
+    }
+  })
+
+  it('a restored course is adopted again once it is back in the active list (no other courses)', () => {
     const whileDeleted: Course[] = []
     const restored = [course({ id: 'c1', name: 'CS 250' })]
     const current = selection('CS 250', 'c1')
-    expect(reconcileCourseSelection(current, findCourseForRecording(current, whileDeleted))).toEqual({
-      action: 'clear',
-    })
-    expect(reconcileCourseSelection(current, findCourseForRecording(current, restored))).toEqual({
-      action: 'keep',
-    })
-  })
-
-  it('never invents a course row — no match means Unfiled, never a fabricated identity', () => {
-    const courses: Course[] = []
-    const current = selection('CS 101', null)
-    const decision = reconcileCourseSelection(current, findCourseForRecording(current, courses))
-    expect(decision.action).not.toBe('adopt')
+    expect(decide(current, whileDeleted)).toEqual({ action: 'clear' })
+    expect(decide(current, restored)).toEqual({ action: 'keep' })
   })
 })
 
