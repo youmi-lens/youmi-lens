@@ -2593,6 +2593,8 @@ function RecordingWorkspace({
   const [backupError, setBackupError] = useState<string | null>(null)
   const [backupMsg, setBackupMsg] = useState<string | null>(null)
   const [deleteActionBusy, setDeleteActionBusy] = useState(false)
+  /** Recently Deleted restore failure, user-safe copy only. Cleared on the next attempt. */
+  const [restoreError, setRestoreError] = useState<string | null>(null)
   const [cloudTrash, setCloudTrash] = useState<Record<string, CloudTrashedMeta>>({})
   const [globalSelectArmed, setGlobalSelectArmed] = useState(false)
   const [trashConfirmModal, setTrashConfirmModal] = useState<{ ids: string[]; scope: TrashDeletionScope } | null>(
