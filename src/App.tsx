@@ -3367,7 +3367,15 @@ const [editLectureModal, setEditLectureModal] = useState<{
 
         // Render the lecture row first. Storage signing is independent and may
         // be slow or fail; it must never keep the whole lecture in Loading.
-        const row = await getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false })
+        // The row fetch itself is bounded too — a stalled/queued request here
+        // (e.g. contention with the background AI-status poll) must reach the
+        // same failure/Retry path below rather than leaving the audio section
+        // on "Loading audio…" with no way out.
+        const row = await withTimeout(
+          getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false }),
+          SAVE_META_TIMEOUT_MS,
+          'Load lecture detail',
+        )
         if (cancelled || !row) return
         setDetail(row)
         try {

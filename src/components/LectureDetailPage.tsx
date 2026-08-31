@@ -501,9 +501,13 @@ export function LectureDetailPage({
           />
         ) : (
           <div className="lecture-v2__note">
-            <p>{audioError ? t('lecture.audioUnavailable') : t('lecture.audioLoading')}</p>
-            {audioError ? (
-              <button type="button" className="v2-btn" onClick={onRetryAudio}>
+            {/* A failed row fetch (`detailLoadFailed`) never produces `audioUrl`
+                or `audioError` — without this check the audio section stayed on
+                "Loading audio…" forever even after the row load itself had
+                already reached its own Retry state above. */}
+            <p>{audioError || detailLoadFailed ? t('lecture.audioUnavailable') : t('lecture.audioLoading')}</p>
+            {audioError || detailLoadFailed ? (
+              <button type="button" className="v2-btn" onClick={detailLoadFailed ? onRetryDetail : onRetryAudio}>
                 {t('recording.retry')}
               </button>
             ) : null}

@@ -84,3 +84,45 @@ describe('LectureDetailPage distinguishes fetch failure from genuinely absent co
     expect(html).not.toContain('No summary yet')
   })
 })
+
+/**
+ * Owner QA blocker: after Save Lecture started working, opening the saved
+ * lecture left the audio section on "Loading audio…" forever, with no error
+ * and no Retry. Root cause: the row-select fetch (`getRecordingDetail`) had
+ * no timeout guard (unlike the signed-URL fetch beside it), and even when it
+ * DID fail, the player block only reacted to `audioError` — never to
+ * `detailLoadFailed` — so a failed/never-settling row fetch left the audio
+ * area with no terminal state at all. See the paired fix in App.tsx (the
+ * row fetch is now wrapped in the same `withTimeout` as the signed-URL
+ * fetch).
+ */
+describe('the audio section always reaches a truthful terminal state', () => {
+  it('shows "Loading audio…" only while nothing has failed yet', () => {
+    const html = render(null, { audioUrl: null, audioError: null, detailLoadFailed: false })
+    expect(html).toContain('Loading audio')
+  })
+
+  it('a signed-URL failure (row loaded fine) shows the unavailable state with Retry', () => {
+    const detail: RecordingDetail = { ...recording, storagePath: 'u1/r1.webm' }
+    const html = render(detail, { audioUrl: null, audioError: 'boom', detailLoadFailed: false })
+    expect(html).not.toContain('Loading audio')
+    expect(html).toContain('not available')
+    expect(html).toContain('Try again')
+  })
+
+  it('a failed/timed-out row fetch ALSO leaves the audio section, not stuck on Loading', () => {
+    // This is the exact bug: detailLoadFailed used to be invisible to the
+    // player block, so this case rendered "Loading audio…" with no escape.
+    const html = render(null, { audioUrl: null, audioError: null, detailLoadFailed: true })
+    expect(html).not.toContain('Loading audio')
+    expect(html).toContain('not available')
+    expect(html).toContain('Try again')
+  })
+
+  it('a resolved audioUrl renders the player, not the loading/error note', () => {
+    const detail: RecordingDetail = { ...recording, storagePath: 'u1/r1.webm' }
+    const html = render(detail, { audioUrl: 'https://example.com/signed.webm', detailLoadFailed: false })
+    expect(html).not.toContain('Loading audio')
+    expect(html).not.toContain('not available')
+  })
+})
