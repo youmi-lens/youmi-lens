@@ -70,6 +70,18 @@ export function visiblePendingUploads(
     .sort((a, b) => b.createdAt - a.createdAt)
 }
 
+/**
+ * True for a legacy pending upload with no canonical Course id — the retry
+ * path must refuse to upload/save it, and the UI must require an explicit
+ * Course choice, rather than silently keeping its stale text `course` label
+ * or defaulting to the first Course. Single source of truth for both the
+ * `handleRetryPendingUpload` guard and the Pending Uploads list UI so they
+ * can never disagree.
+ */
+export function pendingUploadNeedsCourseChoice(m: Pick<PendingUploadMeta, 'courseId'>): boolean {
+  return !m.courseId
+}
+
 /** Short, user-facing status for a pending item. */
 export function pendingStatusLabel(m: Pick<PendingUploadMeta, 'state'>): string {
   return m.state === 'uploading' ? 'Uploading…' : 'Saved on this device · Retry required'

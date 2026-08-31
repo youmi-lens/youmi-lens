@@ -4,6 +4,7 @@ import {
   visiblePendingUploads,
   pendingStatusLabel,
   pendingStatusDetail,
+  pendingUploadNeedsCourseChoice,
   type PendingUploadMeta,
 } from './pendingUploads'
 
@@ -51,5 +52,25 @@ describe('pending upload recovery model (Phase 2D-2)', () => {
     expect(detail).toMatch(/safe on this device/)
     expect(detail).toMatch(/nothing needs to be re-recorded/)
     expect(detail).not.toMatch(/sk_|Bearer|token/i)
+  })
+
+  /**
+   * Owner QA evidence: two rows landed in the staging DB with `course_id:
+   * null` but a real-looking `course: "Staging ML Test"` text label — a
+   * legacy pending upload (created before course-id capture existed)
+   * retried through `handleRetryPendingUpload`, which had no guard at all.
+   * `pendingUploadNeedsCourseChoice` is the single source of truth the
+   * retry handler and the Pending Uploads list UI both consult, so they can
+   * never disagree about whether a real Course choice is still required.
+   */
+  describe('a legacy pending upload with no canonical course id', () => {
+    it('needs an explicit Course choice — courseId absent, null, or empty are all "needs choice"', () => {
+      expect(pendingUploadNeedsCourseChoice(pending({ courseId: undefined }))).toBe(true)
+      expect(pendingUploadNeedsCourseChoice(pending({ courseId: null }))).toBe(true)
+    })
+
+    it('a pending upload with a real courseId does not need a choice', () => {
+      expect(pendingUploadNeedsCourseChoice(pending({ courseId: 'course-c' }))).toBe(false)
+    })
   })
 })

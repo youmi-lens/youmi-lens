@@ -51,6 +51,7 @@ import {
 } from './lib/db'
 import {
   beginFinalizeRecordingSession,
+  assignRecordingSessionCourse,
   completeRecordingSessionPersist,
   deleteRecordingSession,
   keepRecordingSessionForLater,
@@ -62,6 +63,7 @@ import {
   sanitizeUploadErrorCategory,
   pendingStatusLabel,
   pendingStatusDetail,
+  pendingUploadNeedsCourseChoice,
   type PendingUploadMeta,
 } from './lib/pendingUploads'
 import { buildLocalBackupZip, importLocalBackupZip } from './lib/localBackup'
@@ -1646,6 +1648,7 @@ function RecordingWorkspace({
   const [recentAi, setRecentAi] = useState<RecentAiOutcome>(null)
   /** Unfinished durable sessions recovered on startup (owner-isolated). */
   const [recoveredSessions, setRecoveredSessions] = useState<RecordingSessionMeta[]>([])
+  const [selectedRecoverySessionId, setSelectedRecoverySessionId] = useState<string | null>(null)
   const [recoveryBusyId, setRecoveryBusyId] = useState<string | null>(null)
   const [recoveryDeleteConfirmId, setRecoveryDeleteConfirmId] = useState<string | null>(null)
 
@@ -2868,6 +2871,17 @@ const [editLectureModal, setEditLectureModal] = useState<{
     setCloudTrash(loadCloudTrashRegistry(userId))
   }, [userId, localOnly])
 
+  // Recovery is a list, not an implicit "first item". Default to the newest
+  // durable session (the store sorts newest-first), while preserving an
+  // explicit choice as long as that item remains recoverable.
+  useEffect(() => {
+    setSelectedRecoverySessionId((current) =>
+      current && recoveredSessions.some((session) => session.id === current)
+        ? current
+        : (recoveredSessions[0]?.id ?? null),
+    )
+  }, [recoveredSessions])
+
   useEffect(() => {
     setGlobalSelectArmed(false)
   }, [libraryActiveScope, libraryPickMode])
@@ -2945,6 +2959,11 @@ const [editLectureModal, setEditLectureModal] = useState<{
         await refreshList()
         return
       }
+      // Legacy pending upload with no canonical course — never silently
+      // retry into a default/first Course. The picker in the Pending
+      // Uploads list must persist a real choice first (see
+      // handleAssignPendingUploadCourse), same contract as recovery.
+      if (pendingUploadNeedsCourseChoice(rec)) return
       await updatePendingUpload(id, { state: 'uploading', updatedAt: Date.now() })
       setPendingUploads((prev) => prev.map((p) => (p.id === id ? { ...p, state: 'uploading' } : p)))
       try {
@@ -3061,6 +3080,17 @@ const [editLectureModal, setEditLectureModal] = useState<{
     localOnly,
     recordings: recordingsInLibrary,
   })
+
+  const handleAssignPendingUploadCourse = useCallback(
+    async (id: string, courseId: string) => {
+      const selectedCourse = coursesState.courses.find((item) => item.id === courseId)
+      if (!selectedCourse) return
+      await updatePendingUpload(id, { course: selectedCourse.name, courseId: selectedCourse.id, updatedAt: Date.now() })
+      await refreshList()
+    },
+    [coursesState.courses, refreshList],
+  )
+
   const cloudLibraryRouteKey =
     !localOnly && userId && workspaceView === 'courses'
       ? `${userId}:${openCourseId ?? 'grid'}`
@@ -3234,6 +3264,24 @@ const [editLectureModal, setEditLectureModal] = useState<{
 
   /** The identity of the course currently selected on Record Home. */
   const activeCourseIdentity = useMemo(() => courseIdentity(selectedCourseRecord), [selectedCourseRecord])
+
+  const selectedRecoverySession = useMemo(
+    () => recoveredSessions.find((session) => session.id === selectedRecoverySessionId) ?? null,
+    [recoveredSessions, selectedRecoverySessionId],
+  )
+  const selectedRecoveryCourse = useMemo(
+    () => selectedRecoverySession?.courseId
+      ? coursesState.courses.find((item) => item.id === selectedRecoverySession.courseId) ?? null
+      : null,
+    [selectedRecoverySession, coursesState.courses],
+  )
+  const recoveryNeedsCourseChoice = Boolean(selectedRecoverySession && !selectedRecoverySession.courseId)
+  const recordingHeaderCourseName = recordingStage === 'recovery_required'
+    ? (selectedRecoveryCourse?.name ?? (recoveryNeedsCourseChoice ? 'Choose course' : (selectedRecoverySession?.course?.trim() || 'Course unavailable')))
+    : (course.trim() || tDesktop('record.unfiled'))
+  const recordingHeaderCourseIdentity = recordingStage === 'recovery_required'
+    ? courseIdentity(selectedRecoveryCourse)
+    : activeCourseIdentity
 
   /**
    * Reconciles the Record Home selection against the live course list once it
@@ -3504,7 +3552,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
     }
   }, [userId, localOnly])
 
-  const startRecording = () => {
+  const startRecording = (sessionContext?: { course?: string; courseId?: string | null; title?: string }) => {
     if (!localOnly && usesHosted) {
       void refreshHostedHealth()
     }
@@ -3536,7 +3584,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
     if (typeof document !== 'undefined') {
       document.documentElement.lang = liveLang
     }
-    void recorder.start()
+    void recorder.start(sessionContext)
   }
 
   const discardRecording = () => {
@@ -3584,6 +3632,12 @@ const [editLectureModal, setEditLectureModal] = useState<{
     async (session: RecordingSessionMeta) => {
       if (recoveryBusyId || saveInFlightRef.current) return
       if (recorder.status === 'recording' || recorder.status === 'paused') return
+      // Do not mutate the durable state until a Course is known. Legacy
+      // sessions remain recoverable while the user chooses one explicitly.
+      if (!session.courseId) {
+        endCapture({ kind: 'failure', recordingId: session.id, outcome: 'other', message: 'Choose a course before saving this recovered recording.', at: Date.now() })
+        return
+      }
       setRecoveryBusyId(session.id)
       saveInFlightRef.current = true
       dispatchFlow({ type: 'CAPTURE_BEGIN', recordingId: session.id })
@@ -3610,10 +3664,6 @@ const [editLectureModal, setEditLectureModal] = useState<{
           return
         }
         const { blob, mime } = fin.assembled
-        if (!session.courseId) {
-          endCapture({ kind: 'failure', recordingId: session.id, outcome: 'other', message: 'This older recovered recording has no saved course identity. Choose a course before saving it.', at: Date.now() })
-          return
-        }
         const courseVal = session.course?.trim() || 'Course'
         const recoveryCourseId = session.courseId
         const titleVal = session.title?.trim() || `Lecture ${formatDate(session.startedAt)}`
@@ -3778,6 +3828,14 @@ const [editLectureModal, setEditLectureModal] = useState<{
       prev.map((s) => (s.id === sessionId ? { ...s, status: 'kept' as const } : s)),
     )
   }, [])
+
+  const handleAssignRecoveryCourse = useCallback(async (sessionId: string, courseId: string) => {
+    const selectedCourse = coursesState.courses.find((item) => item.id === courseId)
+    if (!selectedCourse) return
+    const next = await assignRecordingSessionCourse(sessionId, { id: selectedCourse.id, name: selectedCourse.name })
+    if (!next) return
+    setRecoveredSessions((prev) => prev.map((session) => session.id === sessionId ? next : session))
+  }, [coursesState.courses])
 
   const handleRecoverDelete = useCallback(async (sessionId: string) => {
     if (recoveryDeleteConfirmId !== sessionId) {
@@ -5492,8 +5550,8 @@ useEffect(() => {
     <RecordingV2
       t={tDesktop}
       stage={recordingStage}
-      courseName={course.trim() || tDesktop('record.unfiled')}
-      courseIdentity={activeCourseIdentity}
+      courseName={recordingHeaderCourseName}
+      courseIdentity={recordingHeaderCourseIdentity}
       lectureTitle={title.trim() || tDesktop('recording.untitled')}
       elapsed={formatClock(recorder.elapsedSec)}
       languageLine={`${tDesktop(AUDIO_SOURCE_LABEL_KEY[audioSource])} · ${spokenLanguageLabel(liveLang)} → ${
@@ -5565,15 +5623,30 @@ useEffect(() => {
         setRecentCapture(null)
       }}
       onRecoverRecording={() => {
-        const session = recoveredSessions[0]
+        const session = selectedRecoverySession
         if (session) void handleRecoverSave(session)
       }}
       onDiscardRecovery={() => {
-        const session = recoveredSessions[0]
+        const session = selectedRecoverySession
         if (session) void handleRecoverDelete(session.id)
       }}
       onCancelRecoveryDiscard={() => setRecoveryDeleteConfirmId(null)}
-      recoveryDiscardConfirm={Boolean(recoveredSessions[0] && recoveryDeleteConfirmId === recoveredSessions[0].id)}
+      recoveryDiscardConfirm={Boolean(selectedRecoverySession && recoveryDeleteConfirmId === selectedRecoverySession.id)}
+      recoveryItems={recoveredSessions.map((session) => ({
+        id: session.id,
+        label: `${new Date(session.startedAt).toLocaleString()} · ${session.course?.trim() || 'Course not chosen'}`,
+      }))}
+      selectedRecoveryId={selectedRecoverySessionId}
+      selectedRecoveryNeedsCourse={recoveryNeedsCourseChoice}
+      recoveryCourseOptions={coursesState.courses.map((item) => ({ id: item.id, name: item.name }))}
+      onSelectRecovery={setSelectedRecoverySessionId}
+      onAssignRecoveryCourse={(courseId) => {
+        if (selectedRecoverySession) void handleAssignRecoveryCourse(selectedRecoverySession.id, courseId)
+      }}
+      onCreateRecoveryCourse={() => {
+        setCourseDialog({ kind: 'create' })
+        setWorkspaceView('courses')
+      }}
     />
   )
 
@@ -5718,7 +5791,7 @@ useEffect(() => {
           setRecordingCourseId(openCourse.id)
           setOpenCourseId(null)
           setWorkspaceView('record')
-          startRecording()
+          startRecording({ course: openCourse.name, courseId: openCourse.id, title: title.trim() })
         }}
         // The EXISTING Lecture Detail. `openCourseId` is deliberately kept, so
         // leaving the lecture returns to this course rather than to the grid.
@@ -6038,17 +6111,40 @@ useEffect(() => {
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 600, fontSize: 14 }}>{p.title}</div>
                           <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
-                            {p.course} · {Math.max(1, Math.round(p.durationSec / 60))} min · {pendingStatusLabel(p)}
+                            {/* A legacy pending upload with no canonical course must never
+                                display its stale text label as if it still owns that Course. */}
+                            {pendingUploadNeedsCourseChoice(p) ? 'Choose course' : p.course} ·{' '}
+                            {Math.max(1, Math.round(p.durationSec / 60))} min · {pendingStatusLabel(p)}
                           </div>
                           <div style={{ fontSize: 12, color: '#8492a6', marginTop: 4, lineHeight: 1.45 }}>
                             {pendingStatusDetail(p)}
                           </div>
+                          {pendingUploadNeedsCourseChoice(p) ? (
+                            <select
+                              aria-label="Choose course before retrying this pending upload"
+                              value=""
+                              disabled={p.state === 'uploading'}
+                              onChange={(e) => {
+                                if (e.target.value) void handleAssignPendingUploadCourse(p.id, e.target.value)
+                              }}
+                              style={{ fontSize: 12, marginTop: 6 }}
+                            >
+                              <option value="" disabled>
+                                Choose course
+                              </option>
+                              {coursesState.courses.map((c) => (
+                                <option key={c.id} value={c.id}>
+                                  {c.name}
+                                </option>
+                              ))}
+                            </select>
+                          ) : null}
                         </div>
                         <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                           <button
                             type="button"
                             className="btn small"
-                            disabled={p.state === 'uploading'}
+                            disabled={p.state === 'uploading' || pendingUploadNeedsCourseChoice(p)}
                             onClick={() => void handleRetryPendingUpload(p.id)}
                           >
                             {p.state === 'uploading' ? 'Uploading…' : 'Retry upload'}
@@ -7649,7 +7745,7 @@ useEffect(() => {
                 <button
                   type="button"
                   className="yl-btn-primary"
-                  onClick={startRecording}
+                  onClick={() => startRecording()}
                   disabled={saveOrFinishBusy}
                 >
                   {saveOrFinishBusy ? 'Please wait…' : 'Start'}

@@ -98,7 +98,9 @@ export async function listPendingUploads(userId: string): Promise<PendingUploadM
 
 export async function updatePendingUpload(
   id: string,
-  patch: Partial<Pick<PendingUploadMeta, 'state' | 'lastErrorCategory' | 'attempts' | 'updatedAt' | 'cloudUploaded'>>,
+  patch: Partial<
+    Pick<PendingUploadMeta, 'state' | 'lastErrorCategory' | 'attempts' | 'updatedAt' | 'cloudUploaded' | 'course' | 'courseId'>
+  >,
 ): Promise<void> {
   const existing = await getPendingUploadWithBlob(id)
   if (!existing) return

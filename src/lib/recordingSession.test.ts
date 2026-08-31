@@ -8,6 +8,7 @@ import {
   planPostPersistCleanup,
   shouldAcceptChunkIndex,
   visibleRecoverableSessions,
+  withSessionCourse,
   withSessionStatus,
   type RecordingSessionMeta,
 } from './recordingSession'
@@ -72,6 +73,12 @@ describe('recordingSession pure model (Phase 2D-4)', () => {
       id: 'legacy', ownerKey: 'user-A', mime: 'audio/webm', requestedBitrate: 64_000,
     })
     expect(legacy.courseId).toBeNull()
+  })
+
+  it('requires an explicit legacy-course assignment and persists that exact canonical id', () => {
+    const legacy = session({ courseId: null, course: undefined })
+    const assigned = withSessionCourse(legacy, { id: 'course-c', name: 'Course C' }, 2_000)
+    expect(assigned).toMatchObject({ id: legacy.id, courseId: 'course-c', course: 'Course C', updatedAt: 2_000 })
   })
 
   it('accepts ordered chunks and rejects duplicates / gaps', () => {
@@ -142,6 +149,14 @@ describe('recordingSession pure model (Phase 2D-4)', () => {
     expect(visibleRecoverableSessions(all, 'user-B').map((s) => s.id)).toEqual(['b'])
   })
 
+  it('orders multiple recoverable sessions newest-first so a new crash is never masked by an older legacy one', () => {
+    const visible = visibleRecoverableSessions([
+      session({ id: 'legacy', status: 'recording', chunkCount: 1, updatedAt: 100, courseId: null }),
+      session({ id: 'new-course-c', status: 'recording', chunkCount: 1, updatedAt: 200, courseId: 'course-c' }),
+    ], 'user-A')
+    expect(visible.map((item) => item.id)).toEqual(['new-course-c', 'legacy'])
+  })
+
   it('ownerKey isolates local vs cloud vs anonymous', () => {
     expect(ownerKeyForUser('u1', false)).toBe('u1')
     expect(ownerKeyForUser(undefined, true)).toBe('local')
@@ -181,6 +196,21 @@ describe('recordingSession wiring regressions (App + recorder)', () => {
     expect(recovery).toContain('const recoveryCourseId = session.courseId')
     expect(recovery).toContain('courseId: recoveryCourseId')
     expect(recovery).not.toContain('courseId: recordingCourseId')
+  })
+
+  it('Course Detail passes its explicit course snapshot into the Start call before React state commits', () => {
+    const courseStart = appSrc.slice(appSrc.indexOf('onStartLecture={() => {'), appSrc.indexOf('// The EXISTING Lecture Detail.'))
+    expect(courseStart).toContain('startRecording({ course: openCourse.name, courseId: openCourse.id')
+    expect(recorderSrc).toContain('sessionContextOverride ?? opts?.getSessionContext?.()')
+  })
+
+  it('retrying a legacy pending upload with no canonical course is guarded the same way as session recovery', () => {
+    // Owner QA evidence: staging rows landed with course_id: null because
+    // handleRetryPendingUpload had no guard at all, unlike handleRecoverSave.
+    const retry = appSrc.slice(appSrc.indexOf('const handleRetryPendingUpload'), appSrc.indexOf('const handleAssignPendingUploadCourse'))
+    expect(retry).toContain('if (pendingUploadNeedsCourseChoice(rec)) return')
+    expect(appSrc).toContain('const handleAssignPendingUploadCourse = useCallback(')
+    expect(appSrc).toMatch(/disabled=\{p\.state === 'uploading' \|\| pendingUploadNeedsCourseChoice\(p\)\}/)
   })
 
   it('deletion of recovered recording requires confirmation', () => {

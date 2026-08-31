@@ -161,6 +161,15 @@ export function withHeartbeat(
   }
 }
 
+/** Explicitly binds a legacy durable session to a real canonical Course. */
+export function withSessionCourse(
+  session: RecordingSessionMeta,
+  course: { id: string; name: string },
+  now = Date.now(),
+): RecordingSessionMeta {
+  return { ...session, courseId: course.id, course: course.name, updatedAt: now }
+}
+
 /** Sessions the current owner may recover (never another user). */
 export function visibleRecoverableSessions(
   all: RecordingSessionMeta[],

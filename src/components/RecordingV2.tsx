@@ -72,6 +72,13 @@ export function RecordingV2({
   onDiscardRecovery,
   onCancelRecoveryDiscard,
   recoveryDiscardConfirm,
+  recoveryItems = [],
+  selectedRecoveryId = null,
+  selectedRecoveryNeedsCourse = false,
+  recoveryCourseOptions = [],
+  onSelectRecovery = () => {},
+  onAssignRecoveryCourse = () => {},
+  onCreateRecoveryCourse = () => {},
 }: {
   t: T
   stage: RecordingV2Stage
@@ -110,6 +117,13 @@ export function RecordingV2({
   onDiscardRecovery: () => void
   onCancelRecoveryDiscard: () => void
   recoveryDiscardConfirm: boolean
+  recoveryItems?: Array<{ id: string; label: string }>
+  selectedRecoveryId?: string | null
+  selectedRecoveryNeedsCourse?: boolean
+  recoveryCourseOptions?: Array<{ id: string; name: string }>
+  onSelectRecovery?: (id: string) => void
+  onAssignRecoveryCourse?: (courseId: string) => void
+  onCreateRecoveryCourse?: () => void
 }) {
   const live = stage === 'recording' || stage === 'paused'
   const terminal = isTerminalRecordingStage(stage)
@@ -321,11 +335,32 @@ export function RecordingV2({
             ) : null}
             {stage === 'recovery_required' ? (
               <>
+                {recoveryItems.length > 1 ? (
+                  <label className="recording-v2__recovery-select">
+                    <span>Recovered recording</span>
+                    <select value={selectedRecoveryId ?? ''} onChange={(event) => onSelectRecovery(event.target.value)} disabled={busy}>
+                      {recoveryItems.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+                {selectedRecoveryNeedsCourse ? (
+                  <label className="recording-v2__recovery-select">
+                    <span>Choose course before saving</span>
+                    {recoveryCourseOptions.length ? (
+                      <select value="" onChange={(event) => onAssignRecoveryCourse(event.target.value)} disabled={busy}>
+                        <option value="" disabled>Choose course</option>
+                        {recoveryCourseOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                      </select>
+                    ) : (
+                      <button type="button" className="v2-btn" onClick={onCreateRecoveryCourse} disabled={busy}>Create a course</button>
+                    )}
+                  </label>
+                ) : null}
                 <button
                   type="button"
                   className="v2-btn v2-btn--record"
                   onClick={onRecoverRecording}
-                  disabled={busy}
+                  disabled={busy || selectedRecoveryNeedsCourse}
                 >
                   {t('recording.recover')}
                 </button>

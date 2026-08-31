@@ -458,6 +458,64 @@ describe('Recording V2', () => {
     expect(markup).not.toContain('>Dismiss<')
   })
 
+  it('requires a real canonical Course choice for a legacy recovery and never renders a default course chip', () => {
+    const markup = renderRecording({
+      stage: 'recovery_required',
+      courseName: 'Choose course',
+      courseIdentity: { icon: 'document-text-outline', tint: '#EDF2F7', accent: '#0B1F3B' },
+      recoveryItems: [{ id: 'legacy', label: 'Earlier recording · Course not chosen' }],
+      selectedRecoveryId: 'legacy',
+      selectedRecoveryNeedsCourse: true,
+      recoveryCourseOptions: [{ id: 'course-c', name: 'Course C' }],
+    })
+    expect(markup).toContain('Choose course before saving')
+    expect(markup).toContain('Course C')
+    expect(markup).toContain('>Choose course<')
+    expect(markup).toContain('Recover recording</button>')
+    expect(markup).toMatch(/disabled[^>]*>Recover recording<\/button>/)
+    expect(markup).not.toContain('CS 101')
+  })
+
+  it('offers a Create-a-course path instead of an empty selector when no Courses exist yet', () => {
+    const markup = renderRecording({
+      stage: 'recovery_required',
+      recoveryItems: [{ id: 'legacy', label: 'Earlier recording · Course not chosen' }],
+      selectedRecoveryId: 'legacy',
+      selectedRecoveryNeedsCourse: true,
+      recoveryCourseOptions: [],
+    })
+    expect(markup).toContain('Create a course')
+    expect(markup).not.toContain('<select')
+    expect(markup).toMatch(/disabled[^>]*>Recover recording<\/button>/)
+  })
+
+  it('a legacy recovery with a real courseId never shows the course picker and Recover stays enabled', () => {
+    const markup = renderRecording({
+      stage: 'recovery_required',
+      courseName: 'Course C',
+      recoveryItems: [{ id: 'known', label: 'Known session · Course C' }],
+      selectedRecoveryId: 'known',
+      selectedRecoveryNeedsCourse: false,
+      recoveryCourseOptions: [{ id: 'course-c', name: 'Course C' }],
+    })
+    expect(markup).not.toContain('Choose course before saving')
+    expect(markup).not.toMatch(/disabled[^>]*>Recover recording<\/button>/)
+  })
+
+  it('renders a deterministic chooser when more than one durable recovery exists', () => {
+    const markup = renderRecording({
+      stage: 'recovery_required',
+      recoveryItems: [
+        { id: 'newest', label: 'Newest · Course C' },
+        { id: 'legacy', label: 'Older · Course not chosen' },
+      ],
+      selectedRecoveryId: 'newest',
+    })
+    expect(markup).toContain('Recovered recording')
+    expect(markup).toContain('Newest · Course C')
+    expect(markup).toContain('Older · Course not chosen')
+  })
+
   it('hides the live controls once the mic has stopped', () => {
     const markup = renderRecording({ stage: 'uploading' })
     expect(markup).not.toContain('Stop &amp; Save')
@@ -768,7 +826,7 @@ describe('Course → Start Lecture entry', () => {
     expect(block).toContain('setRecordingCourseId(openCourse.id)')
     expect(block).toContain('setCourse(openCourse.name)')
     // Recording V2 opens immediately via the SAME single recorder entry point.
-    expect(block).toContain('startRecording()')
+    expect(block).toContain('startRecording({ course: openCourse.name, courseId: openCourse.id')
   })
 
   it('Finish/upload writes the same canonical course_id', () => {

@@ -247,7 +247,7 @@ export function useRecorder(opts?: {
     liveStreamRef.current = null
   }, [teardownPcmCapture])
 
-  const start = useCallback(async (): Promise<string | null> => {
+  const start = useCallback(async (sessionContextOverride?: { course?: string; courseId?: string | null; title?: string }): Promise<string | null> => {
     setError(null)
     try {
       const existing = mediaRecorderRef.current
@@ -328,7 +328,10 @@ export function useRecorder(opts?: {
       persistChainRef.current = Promise.resolve()
 
       const ownerKey = opts?.getOwnerKey?.() ?? 'anonymous'
-      const sessionContext = opts?.getSessionContext?.()
+      // A Course Detail CTA changes React state and starts capture in the same
+      // event. Take its explicit snapshot when provided rather than reading a
+      // pre-commit render closure.
+      const sessionContext = sessionContextOverride ?? opts?.getSessionContext?.()
       await createRecordingSession({
         id: sessionId,
         ownerKey,

@@ -16,6 +16,7 @@ import {
   shouldAcceptChunkIndex,
   visibleRecoverableSessions,
   withHeartbeat,
+  withSessionCourse,
   withSessionStatus,
   type RecordingSessionMeta,
   type RecordingSessionStatus,
@@ -84,6 +85,18 @@ export async function updateRecordingSessionStatus(
   const existing = await getRecordingSession(id)
   if (!existing) return null
   const next = withSessionStatus(existing, status)
+  await putRecordingSession(next)
+  return next
+}
+
+/** Assign a canonical Course to a legacy recovery item only after explicit user choice. */
+export async function assignRecordingSessionCourse(
+  id: string,
+  course: { id: string; name: string },
+): Promise<RecordingSessionMeta | null> {
+  const existing = await getRecordingSession(id)
+  if (!existing) return null
+  const next = withSessionCourse(existing, course)
   await putRecordingSession(next)
   return next
 }
