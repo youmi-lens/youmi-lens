@@ -3365,18 +3365,41 @@ const [editLectureModal, setEditLectureModal] = useState<{
           return
         }
 
-        // Render the lecture row first. Storage signing is independent and may
-        // be slow or fail; it must never keep the whole lecture in Loading.
-        // The row fetch itself is bounded too — a stalled/queued request here
-        // (e.g. contention with the background AI-status poll) must reach the
-        // same failure/Retry path below rather than leaving the audio section
-        // on "Loading audio…" with no way out.
-        const row = await withTimeout(
-          getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false }),
-          SAVE_META_TIMEOUT_MS,
-          'Load lecture detail',
-        )
-        if (cancelled || !row) return
+        // The list is already refreshed before Save reports success (see
+        // handleStopAndSave / refreshList), so a freshly saved recording's
+        // canonical row — storagePath included — is already sitting in
+        // `recordingsInLibrary` by the time this effect can possibly run.
+        // Using it directly skips a redundant single-row re-fetch that raced
+        // the just-completed INSERT often enough to matter in practice: a
+        // null result from that race used to be swallowed silently
+        // (`if (!row) return`), leaving the audio section on "Loading
+        // audio…" forever with no error and no Retry — the exact "new
+        // lecture never becomes playable" Owner QA report.
+        const cachedRow = recordingsRef.current.find((r) => r.id === selectedId)
+        let row: RecordingDetail | null =
+          cachedRow?.storagePath ? { ...cachedRow, storagePath: cachedRow.storagePath } : null
+
+        if (!row) {
+          // Render the lecture row first. Storage signing is independent and
+          // may be slow or fail; it must never keep the whole lecture in
+          // Loading. The row fetch itself is bounded too — a stalled/queued
+          // request here (e.g. contention with the background AI-status
+          // poll) must reach the same failure/Retry path below rather than
+          // leaving the audio section on "Loading audio…" with no way out.
+          row = await withTimeout(
+            getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false }),
+            SAVE_META_TIMEOUT_MS,
+            'Load lecture detail',
+          )
+        }
+        if (cancelled) return
+        if (!row) {
+          // Genuinely not found (or a still-propagating write a manual Retry
+          // can recover from) — a real terminal failure, never a silent
+          // forever-Loading with no way out.
+          setDetailLoadFailed(true)
+          return
+        }
         setDetail(row)
         try {
           const signed = await withTimeout(
