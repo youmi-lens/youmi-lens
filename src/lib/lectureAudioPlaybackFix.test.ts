@@ -61,6 +61,14 @@ describe('save-result to Lecture Detail owns one fresh loader lifecycle', () => 
     expect(saveTail).not.toContain('setSelectedId(recordingId)')
   })
 
+  it('recovery and pending-upload retry leave selection to View lecture so its loader always runs', () => {
+    const recovery = appSrc.slice(appSrc.indexOf('const handleRecoverSave'), appSrc.indexOf('const handleRecoverKeep'))
+    const retry = appSrc.slice(appSrc.indexOf('const handleRetryPendingUpload'), appSrc.indexOf('const handleDeletePendingUpload'))
+    expect(recovery).not.toContain('setSelectedId(recordingId)')
+    expect(retry).not.toContain('setSelectedId(id)')
+    expect(retry).toContain("setRecentCapture({ kind: 'success', recordingId: id, at: Date.now() })")
+  })
+
   it('the View lecture action routes through the shared opener', () => {
     expect(appSrc).toMatch(/const id = recentCapture\?\.recordingId[\s\S]*?if \(id\) openLectureDetail\(id\)/)
   })

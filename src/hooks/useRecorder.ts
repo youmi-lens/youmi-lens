@@ -87,6 +87,7 @@ export function useRecorder(opts?: {
   experimentalSkipLiveSlice?: boolean
   /** Owner isolation key for durable sessions (`userId` or `local` / `anonymous`). */
   getOwnerKey?: () => string
+  getSessionContext?: () => { course?: string; courseId?: string | null; title?: string }
   /**
    * Read at Start and never again, so the source is frozen for the session —
    * changing the setting mid-lecture cannot change what is being captured.
@@ -327,11 +328,15 @@ export function useRecorder(opts?: {
       persistChainRef.current = Promise.resolve()
 
       const ownerKey = opts?.getOwnerKey?.() ?? 'anonymous'
+      const sessionContext = opts?.getSessionContext?.()
       await createRecordingSession({
         id: sessionId,
         ownerKey,
         mime: mime || 'audio/webm',
         requestedBitrate: bitrate,
+        course: sessionContext?.course,
+        courseId: sessionContext?.courseId ?? null,
+        title: sessionContext?.title,
       })
       setActiveSessionId(sessionId)
 

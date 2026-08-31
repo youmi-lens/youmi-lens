@@ -109,8 +109,10 @@ describe('5 · a save that only reaches local pending-upload is a visible, recov
       appSrc.indexOf('const handleRecoverSave = useCallback('),
       appSrc.indexOf('const handleRecoverKeep = useCallback('),
     )
-    expect(recovery).toMatch(/uploadLectureAudioViaServer\(supabase, recordingId, blob, mime, durationSec, \{\s*course: courseVal,\s*[\s\S]*?courseId: recordingCourseId,/)
-    expect(recovery).toMatch(/insertLectureRecordingRow\(\{\s*[\s\S]*?course: courseVal,\s*courseId: recordingCourseId,/)
+    expect(recovery).toContain('const recoveryCourseId = session.courseId')
+    expect(recovery).toMatch(/uploadLectureAudioViaServer\(supabase, recordingId, blob, mime, durationSec, \{\s*course: courseVal,\s*[\s\S]*?courseId: recoveryCourseId,/)
+    expect(recovery).toMatch(/insertLectureRecordingRow\(\{\s*[\s\S]*?course: courseVal,\s*courseId: recoveryCourseId,/)
+    expect(recovery).toContain("This older recovered recording has no saved course identity")
   })
 
   it('retry reuses the exact same recording id — idempotent insert, never a duplicate lecture', () => {

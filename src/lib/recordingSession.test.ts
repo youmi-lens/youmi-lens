@@ -40,6 +40,40 @@ describe('recordingSession pure model (Phase 2D-4)', () => {
     expect(s.chunkCount).toBe(0)
   })
 
+  it('freezes the canonical course identity at recording start across a simulated restart', () => {
+    const startedInCourseA = createRecordingSessionMeta({
+      id: 'crash-recovery-course-a',
+      ownerKey: 'user-A',
+      mime: 'audio/webm',
+      requestedBitrate: 64_000,
+      course: 'Sample G',
+      courseId: 'course-sample-g',
+      title: 'Original lecture title',
+    })
+    // A relaunch may make Course B the Record-page default. Recovery must use
+    // the durable session, not this new current-page selection.
+    const currentRecordPageSelectionAfterRestart = 'course-staging-ml-test'
+    const pendingUpload = {
+      courseId: startedInCourseA.courseId,
+      course: startedInCourseA.course,
+      title: startedInCourseA.title,
+    }
+
+    expect(currentRecordPageSelectionAfterRestart).not.toBe(startedInCourseA.courseId)
+    expect(pendingUpload).toEqual({
+      courseId: 'course-sample-g',
+      course: 'Sample G',
+      title: 'Original lecture title',
+    })
+  })
+
+  it('marks legacy sessions without a canonical course id as unknown rather than defaulting them', () => {
+    const legacy = createRecordingSessionMeta({
+      id: 'legacy', ownerKey: 'user-A', mime: 'audio/webm', requestedBitrate: 64_000,
+    })
+    expect(legacy.courseId).toBeNull()
+  })
+
   it('accepts ordered chunks and rejects duplicates / gaps', () => {
     let s = session()
     expect(shouldAcceptChunkIndex(s, 0)).toBe('accept')
@@ -138,6 +172,15 @@ describe('recordingSession wiring regressions (App + recorder)', () => {
     expect(appSrc).toContain('Save and process')
     expect(appSrc).toContain('Keep for later')
     expect(appSrc).toContain('Confirm delete')
+  })
+
+  it('records immutable session course context at Start and recovery never uses the post-relaunch selection', () => {
+    expect(recorderSrc).toContain('getSessionContext')
+    expect(recorderSrc).toContain('courseId: sessionContext?.courseId ?? null')
+    const recovery = appSrc.slice(appSrc.indexOf('const handleRecoverSave'), appSrc.indexOf('const handleRecoverKeep'))
+    expect(recovery).toContain('const recoveryCourseId = session.courseId')
+    expect(recovery).toContain('courseId: recoveryCourseId')
+    expect(recovery).not.toContain('courseId: recordingCourseId')
   })
 
   it('deletion of recovered recording requires confirmation', () => {

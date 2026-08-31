@@ -31,6 +31,7 @@ export interface RecordingSessionMeta {
   chunkCount: number
   totalBytes: number
   course?: string
+  courseId?: string | null
   title?: string
 }
 
@@ -91,6 +92,7 @@ export function createRecordingSessionMeta(input: {
   requestedBitrate: number
   startedAt?: number
   course?: string
+  courseId?: string | null
   title?: string
 }): RecordingSessionMeta {
   const now = input.startedAt ?? Date.now()
@@ -107,6 +109,7 @@ export function createRecordingSessionMeta(input: {
     chunkCount: 0,
     totalBytes: 0,
     course: input.course,
+    courseId: input.courseId ?? null,
     title: input.title,
   }
 }

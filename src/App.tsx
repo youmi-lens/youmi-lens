@@ -1638,6 +1638,7 @@ function RecordingWorkspace({
     // Skip the MediaRecorder blob-slice cycle when PCM streaming drives the live engine (v2 path).
     experimentalSkipLiveSlice: useLiveEngineV2ForHosted || (experimentSkipYoumiLiveSlice && usesHosted),
     getOwnerKey: getRecordingOwnerKey,
+    getSessionContext: () => ({ course: course.trim(), courseId: recordingCourseId, title: title.trim() }),
   })
 
   const [flow, dispatchFlow] = useReducer(recordingFlowReducer, initialRecordingFlow)
@@ -2993,7 +2994,10 @@ const [editLectureModal, setEditLectureModal] = useState<{
           /* processing can be started later from the lecture; upload already safe */
         }
         await refreshList()
-        setSelectedId(id)
+        // Do not preselect the lecture here. The terminal recovery UI owns the
+        // subsequent View lecture action; preselecting the same id makes that
+        // action a no-op and skips its fresh detail/audio load.
+        setRecentCapture({ kind: 'success', recordingId: id, at: Date.now() })
       } catch (err) {
         await updatePendingUpload(id, {
           state: 'upload_failed',
@@ -3606,8 +3610,13 @@ const [editLectureModal, setEditLectureModal] = useState<{
           return
         }
         const { blob, mime } = fin.assembled
-        const courseVal = course.trim() || 'Course'
-        const titleVal = title.trim() || `Lecture ${formatDate(session.startedAt)}`
+        if (!session.courseId) {
+          endCapture({ kind: 'failure', recordingId: session.id, outcome: 'other', message: 'This older recovered recording has no saved course identity. Choose a course before saving it.', at: Date.now() })
+          return
+        }
+        const courseVal = session.course?.trim() || 'Course'
+        const recoveryCourseId = session.courseId
+        const titleVal = session.title?.trim() || `Lecture ${formatDate(session.startedAt)}`
         const durationSec = session.approxDurationSec || 0
         const recordingId = session.id
 
@@ -3632,7 +3641,6 @@ const [editLectureModal, setEditLectureModal] = useState<{
             await refreshList()
           } catch { /* ignore */ }
           endCapture({ kind: 'success', recordingId, at: Date.now() })
-          setSelectedId(recordingId)
           return
         }
 
@@ -3658,7 +3666,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                   // Recovery is a normal lecture save. Keep the canonical id
                   // alongside the legacy label so a recovered lecture cannot
                   // be detached by a course rename or refresh.
-                  courseId: recordingCourseId,
+                  courseId: recoveryCourseId,
                   title: titleVal,
                   liveTranscript: '',
                   liveTranscriptRaw: '',
@@ -3680,7 +3688,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 userId,
                 id: recordingId,
                 course: courseVal,
-                courseId: recordingCourseId,
+                courseId: recoveryCourseId,
                 title: titleVal,
                 durationSec,
                 mime,
@@ -3698,14 +3706,13 @@ const [editLectureModal, setEditLectureModal] = useState<{
             await refreshList()
           } catch { /* ignore */ }
           endCapture({ kind: 'success', recordingId, at: Date.now() })
-          setSelectedId(recordingId)
         } catch (upErr) {
           await withTimeout(
             savePendingUpload({
               id: recordingId,
               userId,
               course: courseVal,
-              courseId: recordingCourseId,
+              courseId: recoveryCourseId,
               title: titleVal,
               durationSec,
               mime,
@@ -3755,9 +3762,6 @@ const [editLectureModal, setEditLectureModal] = useState<{
     [
       recoveryBusyId,
       recorder.status,
-      course,
-      recordingCourseId,
-      title,
       localOnly,
       supabase,
       userId,

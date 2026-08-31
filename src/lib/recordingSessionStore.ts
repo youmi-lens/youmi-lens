@@ -43,6 +43,7 @@ export async function createRecordingSession(input: {
   mime: string
   requestedBitrate: number
   course?: string
+  courseId?: string | null
   title?: string
 }): Promise<RecordingSessionMeta> {
   const meta = createRecordingSessionMeta(input)
