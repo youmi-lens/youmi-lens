@@ -109,11 +109,42 @@ describe('5 · a save that only reaches local pending-upload is a visible, recov
       appSrc.indexOf('const handleRecoverSave = useCallback('),
       appSrc.indexOf('const handleRecoverKeep = useCallback('),
     )
-    expect(recovery).toContain('const recoveryCourseId = session.courseId')
+    expect(recovery).toContain('const recoveryCourseId = fresh.courseId')
     expect(recovery).toMatch(/uploadLectureAudioViaServer\(supabase, recordingId, blob, mime, durationSec, \{\s*course: courseVal,\s*[\s\S]*?courseId: recoveryCourseId,/)
     expect(recovery).toMatch(/insertLectureRecordingRow\(\{\s*[\s\S]*?course: courseVal,\s*courseId: recoveryCourseId,/)
     expect(recovery).toContain("Choose a course before saving this recovered recording")
-    expect(recovery.indexOf('if (!session.courseId)')).toBeLessThan(recovery.indexOf('beginFinalizeRecordingSession(session.id)'))
+    expect(recovery.indexOf('if (!fresh.courseId)')).toBeLessThan(recovery.indexOf('beginFinalizeRecordingSession(fresh.id)'))
+  })
+
+  it('re-reads the durable session instead of trusting the closure argument, so a just-assigned course is never missed', () => {
+    // Owner QA evidence: recovered lectures landed with course_id: null in
+    // the database despite showing a real-looking course text label —
+    // consistent with `handleRecoverSave` using a `session` argument that
+    // was stale relative to the durable record (e.g. captured a render
+    // before a course assignment committed). Re-fetching fresh from
+    // IndexedDB removes that class of staleness entirely.
+    const recovery = appSrc.slice(
+      appSrc.indexOf('const handleRecoverSave = useCallback('),
+      appSrc.indexOf('const handleRecoverKeep = useCallback('),
+    )
+    expect(recovery).toContain('const fresh = await getRecordingSession(session.id)')
+    expect(recovery.indexOf('const fresh = await getRecordingSession')).toBeLessThan(
+      recovery.indexOf('if (!fresh.courseId)'),
+    )
+  })
+
+  it('derives a heartbeat-independent duration floor from chunk count, so a quick crash never reports ~0s', () => {
+    // Owner QA evidence: two recovered lectures both stored duration_sec: 0
+    // despite containing real, multi-chunk audio — the 15s heartbeat never
+    // got a chance to fire before the crash. chunkCount * checkpoint
+    // interval is always at least as accurate as the last heartbeat.
+    const recovery = appSrc.slice(
+      appSrc.indexOf('const handleRecoverSave = useCallback('),
+      appSrc.indexOf('const handleRecoverKeep = useCallback('),
+    )
+    expect(recovery).toMatch(
+      /const durationSec = Math\.max\(\s*fresh\.approxDurationSec \|\| 0,\s*Math\.round\(\(fresh\.chunkCount \* MAIN_RECORDER_REQUEST_DATA_MS\) \/ 1000\),\s*\)/,
+    )
   })
 
   it('retry reuses the exact same recording id — idempotent insert, never a duplicate lecture', () => {

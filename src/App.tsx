@@ -30,7 +30,7 @@ import {
   type DragStartEvent,
 } from '@dnd-kit/core'
 import { useAuth } from './useAuth'
-import { useRecorder, LIVE_WHISPER_SLICE_MS } from './hooks/useRecorder'
+import { useRecorder, LIVE_WHISPER_SLICE_MS, MAIN_RECORDER_REQUEST_DATA_MS } from './hooks/useRecorder'
 import {
   deleteRecordingLocal,
   deleteTrashRecordingLocalPermanently,
@@ -54,6 +54,7 @@ import {
   assignRecordingSessionCourse,
   completeRecordingSessionPersist,
   deleteRecordingSession,
+  getRecordingSession,
   keepRecordingSessionForLater,
   listRecoverableRecordingSessions,
 } from './lib/recordingSessionStore'
@@ -3632,22 +3633,33 @@ const [editLectureModal, setEditLectureModal] = useState<{
     async (session: RecordingSessionMeta) => {
       if (recoveryBusyId || saveInFlightRef.current) return
       if (recorder.status === 'recording' || recorder.status === 'paused') return
-      // Do not mutate the durable state until a Course is known. Legacy
-      // sessions remain recoverable while the user chooses one explicitly.
-      if (!session.courseId) {
-        endCapture({ kind: 'failure', recordingId: session.id, outcome: 'other', message: 'Choose a course before saving this recovered recording.', at: Date.now() })
+      // Re-read the durable session instead of trusting the React-closure
+      // argument: `session` can be a snapshot from an earlier render (e.g. the
+      // moment just before a course was assigned via the picker), and this
+      // save must never write a stale/blank course identity just because a
+      // click landed a render behind. The IndexedDB row is the one place a
+      // just-assigned courseId is guaranteed current.
+      const fresh = await getRecordingSession(session.id)
+      if (!fresh) {
+        endCapture({ kind: 'failure', recordingId: session.id, outcome: 'other', message: 'This recovered recording is no longer available.', at: Date.now() })
         return
       }
-      setRecoveryBusyId(session.id)
+      // Do not mutate the durable state until a Course is known. Legacy
+      // sessions remain recoverable while the user chooses one explicitly.
+      if (!fresh.courseId) {
+        endCapture({ kind: 'failure', recordingId: fresh.id, outcome: 'other', message: 'Choose a course before saving this recovered recording.', at: Date.now() })
+        return
+      }
+      setRecoveryBusyId(fresh.id)
       saveInFlightRef.current = true
-      dispatchFlow({ type: 'CAPTURE_BEGIN', recordingId: session.id })
+      dispatchFlow({ type: 'CAPTURE_BEGIN', recordingId: fresh.id })
       try {
-        const fin = await beginFinalizeRecordingSession(session.id)
+        const fin = await beginFinalizeRecordingSession(fresh.id)
         if (fin.action === 'already_done') {
-          setRecoveredSessions((prev) => prev.filter((s) => s.id !== session.id))
+          setRecoveredSessions((prev) => prev.filter((s) => s.id !== fresh.id))
           endCapture({
             kind: 'list_refresh_warn',
-            recordingId: session.id,
+            recordingId: fresh.id,
             message: 'This recording was already saved. Check Recent or Pending uploads.',
             at: Date.now(),
           })
@@ -3656,7 +3668,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
         if (fin.action !== 'proceed' || !fin.assembled) {
           endCapture({
             kind: 'failure',
-            recordingId: session.id,
+            recordingId: fresh.id,
             outcome: 'other',
             message: 'Could not recover this recording (no usable audio). You can Keep for later or Delete.',
             at: Date.now(),
@@ -3664,11 +3676,21 @@ const [editLectureModal, setEditLectureModal] = useState<{
           return
         }
         const { blob, mime } = fin.assembled
-        const courseVal = session.course?.trim() || 'Course'
-        const recoveryCourseId = session.courseId
-        const titleVal = session.title?.trim() || `Lecture ${formatDate(session.startedAt)}`
-        const durationSec = session.approxDurationSec || 0
-        const recordingId = session.id
+        const courseVal = fresh.course?.trim() || 'Course'
+        const recoveryCourseId = fresh.courseId
+        const titleVal = fresh.title?.trim() || `Lecture ${formatDate(fresh.startedAt)}`
+        // The 15s heartbeat may never fire before a quick crash, leaving
+        // `approxDurationSec` at (or near) 0 even though several 5-second
+        // checkpoints of real audio were durably persisted — the exact "only
+        // a small portion recovered" symptom, when in fact the chunks (and
+        // the assembled blob) hold much more than the heartbeat ever saw.
+        // A chunk-count floor is heartbeat-independent and always at least
+        // as accurate as the last heartbeat.
+        const durationSec = Math.max(
+          fresh.approxDurationSec || 0,
+          Math.round((fresh.chunkCount * MAIN_RECORDER_REQUEST_DATA_MS) / 1000),
+        )
+        const recordingId = fresh.id
 
         if (localOnly) {
           dispatchFlow({ type: 'CAPTURE_UPLOAD' })
@@ -3677,7 +3699,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
               id: recordingId,
               course: courseVal,
               title: titleVal,
-              createdAt: session.startedAt,
+              createdAt: fresh.startedAt,
               durationSec,
               mime,
               audioBlob: blob,
@@ -3768,7 +3790,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
               mime,
               lang: liveLang,
               translateTarget,
-              createdAt: session.startedAt,
+              createdAt: fresh.startedAt,
               updatedAt: Date.now(),
               state: 'upload_failed',
               lastErrorCategory: sanitizeUploadErrorCategory(upErr),

@@ -193,7 +193,7 @@ describe('recordingSession wiring regressions (App + recorder)', () => {
     expect(recorderSrc).toContain('getSessionContext')
     expect(recorderSrc).toContain('courseId: sessionContext?.courseId ?? null')
     const recovery = appSrc.slice(appSrc.indexOf('const handleRecoverSave'), appSrc.indexOf('const handleRecoverKeep'))
-    expect(recovery).toContain('const recoveryCourseId = session.courseId')
+    expect(recovery).toContain('const recoveryCourseId = fresh.courseId')
     expect(recovery).toContain('courseId: recoveryCourseId')
     expect(recovery).not.toContain('courseId: recordingCourseId')
   })
