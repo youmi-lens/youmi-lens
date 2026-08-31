@@ -390,6 +390,10 @@ function renderRecording(overrides: Partial<Parameters<typeof RecordingV2>[0]> =
       onViewLecture: () => undefined,
       onRecordAnother: () => undefined,
       onRetry: () => undefined,
+      onRecoverRecording: () => undefined,
+      onDiscardRecovery: () => undefined,
+      onCancelRecoveryDiscard: () => undefined,
+      recoveryDiscardConfirm: false,
       ...overrides,
     }),
   )
@@ -445,6 +449,13 @@ describe('Recording V2', () => {
     const markup = renderRecording({ stage: 'upload_failed', failureMessage: 'Storage rejected the upload.' })
     expect(markup).toContain('Storage rejected the upload.')
     expect(markup).toContain('Try again')
+  })
+
+  it('offers real recover and discard actions for a durable interrupted recording', () => {
+    const markup = renderRecording({ stage: 'recovery_required' })
+    expect(markup).toContain('Recover recording')
+    expect(markup).toContain('Discard')
+    expect(markup).not.toContain('>Dismiss<')
   })
 
   it('hides the live controls once the mic has stopped', () => {

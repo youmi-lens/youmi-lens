@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   applyAcceptedChunk,
+  assembleRecoveredChunks,
   createRecordingSessionMeta,
   ownerKeyForUser,
   planFinalize,
@@ -73,6 +74,26 @@ describe('recordingSession pure model (Phase 2D-4)', () => {
     const plan = planPostPersistCleanup(session({ status: 'finalizing' }))
     expect(plan.action).toBe('cleanup')
     expect(plan.next.status).toBe('finalized')
+  })
+
+  it('reconstructs a non-empty durable recording from ordered checkpoints', async () => {
+    const rebuilt = assembleRecoveredChunks(session({ chunkCount: 2 }), [
+      { index: 0, blob: new Blob(['webm-header']) },
+      { index: 1, blob: new Blob(['cluster-data']) },
+    ])
+    expect(rebuilt).not.toBeNull()
+    expect(rebuilt!.mime).toBe('audio/webm;codecs=opus')
+    expect(await rebuilt!.blob.text()).toBe('webm-headercluster-data')
+  })
+
+  it('refuses corrupt or incomplete durable checkpoints instead of pretending recovery is safe', () => {
+    expect(assembleRecoveredChunks(session({ chunkCount: 2 }), [
+      { index: 0, blob: new Blob(['header']) },
+    ])).toBeNull()
+    expect(assembleRecoveredChunks(session({ chunkCount: 2 }), [
+      { index: 0, blob: new Blob(['header']) },
+      { index: 2, blob: new Blob(['gap']) },
+    ])).toBeNull()
   })
 
   it('startup recovery lists only the owner’s unfinished sessions with chunks', () => {

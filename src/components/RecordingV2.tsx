@@ -68,6 +68,10 @@ export function RecordingV2({
   onViewLecture,
   onRecordAnother,
   onRetry,
+  onRecoverRecording,
+  onDiscardRecovery,
+  onCancelRecoveryDiscard,
+  recoveryDiscardConfirm,
 }: {
   t: T
   stage: RecordingV2Stage
@@ -100,6 +104,12 @@ export function RecordingV2({
   onViewLecture: () => void
   onRecordAnother: () => void
   onRetry: () => void
+  /** Saves the selected durable interrupted session through the normal pipeline. */
+  onRecoverRecording: () => void
+  /** First press arms deletion; the second performs the durable cleanup. */
+  onDiscardRecovery: () => void
+  onCancelRecoveryDiscard: () => void
+  recoveryDiscardConfirm: boolean
 }) {
   const live = stage === 'recording' || stage === 'paused'
   const terminal = isTerminalRecordingStage(stage)
@@ -309,7 +319,27 @@ export function RecordingV2({
                 </button>
               </>
             ) : null}
-            {stage === 'recovery_required' || stage === 'upload_failed' ? (
+            {stage === 'recovery_required' ? (
+              <>
+                <button
+                  type="button"
+                  className="v2-btn v2-btn--record"
+                  onClick={onRecoverRecording}
+                  disabled={busy}
+                >
+                  {t('recording.recover')}
+                </button>
+                <button type="button" className="v2-btn" onClick={onDiscardRecovery} disabled={busy}>
+                  {recoveryDiscardConfirm ? t('recording.confirmDiscard') : t('recording.discard')}
+                </button>
+                {recoveryDiscardConfirm ? (
+                  <button type="button" className="v2-quiet-link" onClick={onCancelRecoveryDiscard}>
+                    {t('common.cancel')}
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+            {stage === 'upload_failed' ? (
               <button type="button" className="v2-quiet-link" onClick={onRecordAnother}>
                 {t('recording.dismiss')}
               </button>

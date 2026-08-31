@@ -8,6 +8,7 @@
 import { openLectureCompanionDb } from './db'
 import {
   applyAcceptedChunk,
+  assembleRecoveredChunks,
   chunkRowId,
   createRecordingSessionMeta,
   planFinalize,
@@ -155,9 +156,7 @@ export async function assembleRecordingBlob(
   const session = await getRecordingSession(sessionId)
   if (!session) return null
   const rows = await listRecordingChunks(sessionId)
-  const parts = rows.map((r) => r.blob)
-  const blob = new Blob(parts, { type: session.mime || 'audio/webm' })
-  return { blob, mime: session.mime || blob.type || 'audio/webm' }
+  return assembleRecoveredChunks(session, rows)
 }
 
 /**

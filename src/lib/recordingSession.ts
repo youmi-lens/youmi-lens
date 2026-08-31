@@ -43,6 +43,27 @@ export interface RecordingChunkMeta {
   createdAt: number
 }
 
+/**
+ * Rebuild the locally durable part of an interrupted MediaRecorder session.
+ *
+ * WebKit's first `requestData()` chunk carries the WebM header and later
+ * chunks carry subsequent clusters. Keeping their original order in one Blob
+ * is therefore the same stream the recorder would have produced at Stop.
+ * Refuse a gap or an empty checkpoint rather than offering a misleading
+ * recovery action for corrupted IndexedDB data.
+ */
+export function assembleRecoveredChunks(
+  session: Pick<RecordingSessionMeta, 'mime' | 'chunkCount'>,
+  chunks: ReadonlyArray<{ index: number; blob: Blob }>,
+): { blob: Blob; mime: string } | null {
+  if (session.chunkCount <= 0 || chunks.length !== session.chunkCount) return null
+  const ordered = [...chunks].sort((a, b) => a.index - b.index)
+  if (ordered.some((chunk, index) => chunk.index !== index || chunk.blob.size <= 0)) return null
+  const mime = session.mime || 'audio/webm'
+  const blob = new Blob(ordered.map((chunk) => chunk.blob), { type: mime })
+  return blob.size > 0 ? { blob, mime } : null
+}
+
 /** Statuses that mean "show recovery UI on startup". */
 export const RECOVERABLE_SESSION_STATUSES: readonly RecordingSessionStatus[] = [
   'recording',

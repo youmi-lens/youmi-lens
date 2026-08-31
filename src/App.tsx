@@ -5555,6 +5555,16 @@ useEffect(() => {
         }
         setRecentCapture(null)
       }}
+      onRecoverRecording={() => {
+        const session = recoveredSessions[0]
+        if (session) void handleRecoverSave(session)
+      }}
+      onDiscardRecovery={() => {
+        const session = recoveredSessions[0]
+        if (session) void handleRecoverDelete(session.id)
+      }}
+      onCancelRecoveryDiscard={() => setRecoveryDeleteConfirmId(null)}
+      recoveryDiscardConfirm={Boolean(recoveredSessions[0] && recoveryDeleteConfirmId === recoveredSessions[0].id)}
     />
   )
 

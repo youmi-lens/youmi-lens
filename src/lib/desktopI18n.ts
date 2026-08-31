@@ -52,6 +52,7 @@ export const DESKTOP_I18N_KEYS = [
   'recording.uploadFailed', 'recording.uploadFailedBody',
   'recording.recoveryRequired', 'recording.recoveryRequiredBody',
   'recording.viewLecture', 'recording.recordAnother', 'recording.retry', 'recording.dismiss',
+  'recording.recover', 'recording.confirmDiscard',
   'recording.jumpToLatest',
   // Truthful scope of lecture deletion — device-local today.
   'deleted.lectureScopeNotice',
@@ -178,6 +179,7 @@ const en: DesktopDictionary = {
   'recording.recoveryRequiredBody': 'A previous session ended before it was saved. Choose what to do with it.',
   'recording.viewLecture': 'View lecture', 'recording.recordAnother': 'Record another',
   'recording.retry': 'Try again', 'recording.dismiss': 'Dismiss',
+  'recording.recover': 'Recover recording', 'recording.confirmDiscard': 'Confirm discard',
   'recording.jumpToLatest': 'Jump to latest',
   'deleted.lectureScopeNotice':
     'Deleted lectures are currently stored on this Mac and may still appear on other devices.',
@@ -314,6 +316,7 @@ const zhHans: DesktopDictionary = {
   'recording.recoveryRequiredBody': '上一次录音在保存前结束了。请选择如何处理。',
   'recording.viewLecture': '查看讲次', 'recording.recordAnother': '再录一节',
   'recording.retry': '重试', 'recording.dismiss': '知道了',
+  'recording.recover': '恢复录音', 'recording.confirmDiscard': '确认丢弃',
   'recording.jumpToLatest': '回到最新',
   'deleted.lectureScopeNotice': '删除的讲次目前只保存在这台 Mac 上，在其他设备上可能仍会出现。',
   'lecture.back': '返回', 'lecture.inCourse': '属于 {course}', 'lecture.actions': '讲次操作',
@@ -444,6 +447,7 @@ const dictionaries: Record<ContentLanguageCode, DesktopDictionary> = {
     'recording.recoveryRequiredBody': '前回のセッションは保存される前に終了しました。処理を選んでください。',
     'recording.viewLecture': '講義を見る', 'recording.recordAnother': 'もう一度録音',
     'recording.retry': '再試行', 'recording.dismiss': '閉じる',
+    'recording.recover': '録音を復元', 'recording.confirmDiscard': '破棄を確認',
     'recording.jumpToLatest': '最新へ移動',
     'deleted.lectureScopeNotice':
       '削除した講義は現在この Mac に保存されており、他のデバイスではまだ表示される場合があります。',
@@ -571,6 +575,7 @@ const dictionaries: Record<ContentLanguageCode, DesktopDictionary> = {
     'recording.recoveryRequiredBody': 'Une session précédente s’est terminée avant d’être enregistrée. Choisissez quoi en faire.',
     'recording.viewLecture': 'Voir la séance', 'recording.recordAnother': 'Enregistrer une autre',
     'recording.retry': 'Réessayer', 'recording.dismiss': 'Fermer',
+    'recording.recover': 'Récupérer l’enregistrement', 'recording.confirmDiscard': 'Confirmer l’abandon',
     'recording.jumpToLatest': 'Aller au plus récent',
     'deleted.lectureScopeNotice':
       'Les séances supprimées sont actuellement stockées sur ce Mac et peuvent encore apparaître sur d’autres appareils.',
@@ -698,6 +703,7 @@ const dictionaries: Record<ContentLanguageCode, DesktopDictionary> = {
     'recording.recoveryRequiredBody': 'Una sesión anterior terminó antes de guardarse. Elige qué hacer con ella.',
     'recording.viewLecture': 'Ver clase', 'recording.recordAnother': 'Grabar otra',
     'recording.retry': 'Reintentar', 'recording.dismiss': 'Cerrar',
+    'recording.recover': 'Recuperar grabación', 'recording.confirmDiscard': 'Confirmar descarte',
     'recording.jumpToLatest': 'Ir a lo último',
     'deleted.lectureScopeNotice':
       'Las clases eliminadas se guardan actualmente en este Mac y podrían seguir apareciendo en otros dispositivos.',
@@ -825,6 +831,7 @@ const dictionaries: Record<ContentLanguageCode, DesktopDictionary> = {
     'recording.recoveryRequiredBody': '이전 세션이 저장되기 전에 종료되었습니다. 처리 방법을 선택하세요.',
     'recording.viewLecture': '강의 보기', 'recording.recordAnother': '다시 녹음',
     'recording.retry': '다시 시도', 'recording.dismiss': '닫기',
+    'recording.recover': '녹음 복구', 'recording.confirmDiscard': '폐기 확인',
     'recording.jumpToLatest': '최신으로 이동',
     'deleted.lectureScopeNotice':
       '삭제한 강의는 현재 이 Mac에 저장되며 다른 기기에서는 계속 표시될 수 있습니다.',
