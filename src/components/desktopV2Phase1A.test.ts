@@ -228,6 +228,26 @@ describe('Record Home', () => {
     expect(html).toContain('English')
     expect(html).toContain('record-home-v2__summary')
   })
+
+  /**
+   * Owner QA: a fresh account with zero real Courses could still show a
+   * fake `Unfiled` course-like row and let Start Recording begin. Every
+   * lecture must belong to a real Course — an empty `course` prop here only
+   * ever means the account genuinely has none yet (see
+   * `reconcileCourseSelection`'s 'clear' action), never a deliberate
+   * "leave this one unfiled" choice, so it must read as "none yet".
+   */
+  it('a genuinely empty Course (zero Courses) reads as "no courses yet", never a fake Unfiled category', () => {
+    const html = render(createElement(RecordHome, { ...recordHomeProps, course: '' }))
+    expect(html).toContain('No courses yet')
+    expect(html).not.toContain('Unfiled')
+  })
+
+  it('a real selected Course still renders normally', () => {
+    const html = render(createElement(RecordHome, recordHomeProps))
+    expect(html).toContain('CS 250')
+    expect(html).not.toContain('No courses yet')
+  })
 })
 
 // ── 10 / 11 · Settings ─────────────────────────────────────────────────────

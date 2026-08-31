@@ -204,6 +204,83 @@ describe('recordingSession wiring regressions (App + recorder)', () => {
     expect(recorderSrc).toContain('sessionContextOverride ?? opts?.getSessionContext?.()')
   })
 
+  /**
+   * Owner QA: on a fresh account with zero real Courses, Record Home's Start
+   * Recording button could still begin recording under a fake `Unfiled`
+   * state. Every lecture must belong to a real Course, so Start Recording
+   * must gate into Create Course first — and, matching the stale-closure
+   * bug already found once for Course Detail, the just-created Course's
+   * canonical id must be passed explicitly into the Start call rather than
+   * relying on `setCourse`/`setRecordingCourseId` having committed first.
+   */
+  describe('zero-course Start Recording gates into Create Course, then starts with the explicit new id', () => {
+    it('Record Home Start Recording opens Create Course (with intent to start) instead of recording directly when there are zero courses', () => {
+      const onStart = appSrc.slice(
+        appSrc.indexOf('onStartRecording={() => {'),
+        appSrc.indexOf('onOpenSettings={() => {'),
+      )
+      expect(onStart).toContain('coursesState.courses.length === 0')
+      expect(onStart).toContain("setCourseDialog({ kind: 'create', thenStartRecording: true })")
+      expect(onStart).not.toMatch(/coursesState\.courses\.length === 0[\s\S]{0,80}startRecording\(\)/)
+    })
+
+    it('never gates on a still-loading course list as if it were genuinely empty', () => {
+      const onStart = appSrc.slice(
+        appSrc.indexOf('onStartRecording={() => {'),
+        appSrc.indexOf('onOpenSettings={() => {'),
+      )
+      expect(onStart).toContain('!coursesState.loading && coursesState.courses.length === 0')
+    })
+
+    it('a successful create started for that reason starts recording with the new course’s explicit id, not a state read', () => {
+      const onCreate = appSrc.slice(appSrc.indexOf('onCreate={(name, preset) => {'), appSrc.indexOf('/>\n      ) : null}\n      {courseDialog?.kind === \'rename\''))
+      expect(onCreate).toContain("courseDialog?.kind === 'create' && courseDialog.thenStartRecording")
+      expect(onCreate).toMatch(/if \(thenStartRecording\) \{[\s\S]*?startRecording\(\{ course: created\.name, courseId: created\.id, title: title\.trim\(\) \}\)/)
+    })
+
+    it('an ordinary course creation (New Course button) does not also start a recording', () => {
+      const onCreate = appSrc.slice(appSrc.indexOf('onCreate={(name, preset) => {'), appSrc.indexOf('/>\n      ) : null}\n      {courseDialog?.kind === \'rename\''))
+      // The start call is conditional on the intent flag, not unconditional.
+      expect(onCreate).toMatch(/if \(thenStartRecording\) \{/)
+    })
+  })
+
+  /**
+   * Owner QA: crash-audio completeness and the persisted course_id are now
+   * both correct, but the header visibly jumped to the CURRENT Record-page
+   * Course the instant Recover was clicked — because `recordingStage`
+   * leaves 'recovery_required' the moment the save begins, and the header's
+   * ternary had no other way to know a recovery save was still in flight.
+   */
+  describe('the recovery header keeps showing the recovery item’s own Course through the whole save, not just while a decision is pending', () => {
+    it('freezes the save’s own Course into state the instant handleRecoverSave commits to it', () => {
+      const recovery = appSrc.slice(appSrc.indexOf('const handleRecoverSave = useCallback('), appSrc.indexOf('const handleRecoverKeep = useCallback('))
+      expect(recovery).toContain('setRecoveryUploadCourse(coursesState.courses.find((c) => c.id === fresh.courseId) ?? null)')
+      expect(recovery.indexOf('setRecoveryUploadCourse(coursesState.courses.find')).toBeLessThan(
+        recovery.indexOf("dispatchFlow({ type: 'CAPTURE_BEGIN'"),
+      )
+      expect(recovery).toContain('setRecoveryUploadCourse(null)')
+    })
+
+    it('the header derives Course from the frozen recovery Course whenever one is in flight, never only from recordingStage', () => {
+      expect(appSrc).toContain(
+        "const showingRecoveryCourse = recordingStage === 'recovery_required' || Boolean(recoveryUploadCourse)",
+      )
+      expect(appSrc).toMatch(/const recordingHeaderCourseName = showingRecoveryCourse/)
+      expect(appSrc).toMatch(/const recordingHeaderCourseIdentity = showingRecoveryCourse/)
+      // The old bug's exact shape: gating purely on the stage, which stops
+      // being 'recovery_required' the moment the save starts.
+      expect(appSrc).not.toMatch(
+        /const recordingHeaderCourseName = recordingStage === 'recovery_required'\s*\n\s*\? \(selectedRecoveryCourse/,
+      )
+    })
+
+    it('once the save finishes (success or failure), the frozen Course is released so the next recovery starts clean', () => {
+      const recovery = appSrc.slice(appSrc.indexOf('const handleRecoverSave = useCallback('), appSrc.indexOf('const handleRecoverKeep = useCallback('))
+      expect(recovery).toMatch(/\} finally \{[\s\S]*?setRecoveryUploadCourse\(null\)[\s\S]*?\}/)
+    })
+  })
+
   it('retrying a legacy pending upload with no canonical course is guarded the same way as session recovery', () => {
     // Owner QA evidence: staging rows landed with course_id: null because
     // handleRetryPendingUpload had no guard at all, unlike handleRecoverSave.

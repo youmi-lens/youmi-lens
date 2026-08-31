@@ -74,7 +74,11 @@ export function RecordHome({
   const modeLabel =
     preferences.languageMode === 'bilingual' ? t('record.bilingual') : t('record.captionsOnly')
   const visibleRecent = recentLectures.slice(0, 3)
-  const courseName = course.trim() || t('record.unfiled')
+  // An empty `course` here means the account genuinely has zero Courses yet
+  // (see reconcileCourseSelection's 'clear' action) — never a real lecture
+  // deliberately left unfiled. Every lecture belongs to a real Course, so
+  // this must read as "none yet", not as a fake "Unfiled" category.
+  const courseName = course.trim() || t('record.noCoursesYet')
 
   return (
     <>

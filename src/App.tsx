@@ -229,6 +229,7 @@ import {
   lectureIdentity,
   lecturesInCourse,
   reconcileCourseSelection,
+  type Course,
 } from './lib/courses/courseModel'
 import {
   courseToRestoreWithLecture,
@@ -1651,6 +1652,17 @@ function RecordingWorkspace({
   const [recoveredSessions, setRecoveredSessions] = useState<RecordingSessionMeta[]>([])
   const [selectedRecoverySessionId, setSelectedRecoverySessionId] = useState<string | null>(null)
   const [recoveryBusyId, setRecoveryBusyId] = useState<string | null>(null)
+  /**
+   * The recovery item's own Course, captured the instant `handleRecoverSave`
+   * commits to it — held for the full duration of that save (through
+   * `uploading`/`processing_*`, whatever `recordingStage` those map to), not
+   * just while `recordingStage === 'recovery_required'`. Once the flow moves
+   * past `recovery_required`, `recoveredSessions` may already have filtered
+   * this item out and `recordingStage` no longer signals "this is a
+   * recovery" at all — without this, the header silently fell back to the
+   * unrelated current Record-page Course for the rest of the save.
+   */
+  const [recoveryUploadCourse, setRecoveryUploadCourse] = useState<Course | null>(null)
   const [recoveryDeleteConfirmId, setRecoveryDeleteConfirmId] = useState<string | null>(null)
 
   /** In-flight capture only; terminal outcomes use `recentCapture` / `recentAi`. */
@@ -2768,7 +2780,10 @@ function RecordingWorkspace({
      component never touches Supabase for courses directly. */
   const [openCourseId, setOpenCourseId] = useState<string | null>(null)
   const [courseDialog, setCourseDialog] = useState<
-    { kind: 'create' } | { kind: 'rename'; courseId: string } | { kind: 'delete'; courseId: string } | null
+    | { kind: 'create'; thenStartRecording?: boolean }
+    | { kind: 'rename'; courseId: string }
+    | { kind: 'delete'; courseId: string }
+    | null
   >(null)
   /** Recently Deleted V2. Distinct from the legacy sidebar's `recentlyDeletedOpen`. */
   const [coursesV2DeletedOpen, setCoursesV2DeletedOpen] = useState(false)
@@ -3277,11 +3292,20 @@ const [editLectureModal, setEditLectureModal] = useState<{
     [selectedRecoverySession, coursesState.courses],
   )
   const recoveryNeedsCourseChoice = Boolean(selectedRecoverySession && !selectedRecoverySession.courseId)
-  const recordingHeaderCourseName = recordingStage === 'recovery_required'
-    ? (selectedRecoveryCourse?.name ?? (recoveryNeedsCourseChoice ? 'Choose course' : (selectedRecoverySession?.course?.trim() || 'Course unavailable')))
+  // `recordingStage === 'recovery_required'` is only true while the decision
+  // is still pending. The instant Recover is clicked the flow moves through
+  // `uploading` (and possibly `processing_*`) toward the final lecture, and
+  // `recoveredSessions` may already have dropped this item — so the save in
+  // flight is identified by `recoveryUploadCourse` instead, captured once at
+  // the moment `handleRecoverSave` commits and held for that save's duration.
+  const showingRecoveryCourse = recordingStage === 'recovery_required' || Boolean(recoveryUploadCourse)
+  const recordingHeaderCourseName = showingRecoveryCourse
+    ? recordingStage === 'recovery_required'
+      ? (selectedRecoveryCourse?.name ?? (recoveryNeedsCourseChoice ? 'Choose course' : (selectedRecoverySession?.course?.trim() || 'Course unavailable')))
+      : (recoveryUploadCourse?.name ?? 'Course unavailable')
     : (course.trim() || tDesktop('record.unfiled'))
-  const recordingHeaderCourseIdentity = recordingStage === 'recovery_required'
-    ? courseIdentity(selectedRecoveryCourse)
+  const recordingHeaderCourseIdentity = showingRecoveryCourse
+    ? courseIdentity(recordingStage === 'recovery_required' ? selectedRecoveryCourse : recoveryUploadCourse)
     : activeCourseIdentity
 
   /**
@@ -3651,6 +3675,10 @@ const [editLectureModal, setEditLectureModal] = useState<{
         return
       }
       setRecoveryBusyId(fresh.id)
+      // Freeze this save's own Course for display now, before recordingStage
+      // moves past 'recovery_required' and the header would otherwise fall
+      // back to whatever Course happens to be selected on Record Home.
+      setRecoveryUploadCourse(coursesState.courses.find((c) => c.id === fresh.courseId) ?? null)
       saveInFlightRef.current = true
       dispatchFlow({ type: 'CAPTURE_BEGIN', recordingId: fresh.id })
       try {
@@ -3828,12 +3856,14 @@ const [editLectureModal, setEditLectureModal] = useState<{
       } finally {
         saveInFlightRef.current = false
         setRecoveryBusyId(null)
+        setRecoveryUploadCourse(null)
         dispatchFlow({ type: 'CAPTURE_FINISHED' })
       }
     },
     [
       recoveryBusyId,
       recorder.status,
+      coursesState.courses,
       localOnly,
       supabase,
       userId,
@@ -5701,7 +5731,17 @@ useEffect(() => {
                     : ('Processing' as const),
             }))}
           onTitleChange={setTitle}
-          onStartRecording={startRecording}
+          onStartRecording={() => {
+            // Every lecture must belong to a real Course. A still-loading
+            // list is not evidence of zero Courses (same discipline as the
+            // Record Home reconciliation effect above) — only gate once
+            // loading has actually settled.
+            if (!coursesState.loading && coursesState.courses.length === 0) {
+              setCourseDialog({ kind: 'create', thenStartRecording: true })
+              return
+            }
+            startRecording()
+          }}
           onOpenSettings={() => {
             setSettingsSection('language')
             setWorkspaceView('settings')
@@ -6792,12 +6832,23 @@ useEffect(() => {
             setCourseDialog(null)
           }}
           onCreate={(name, preset) => {
+            const thenStartRecording = courseDialog?.kind === 'create' && courseDialog.thenStartRecording
             void coursesState.create({ name, preset }).then((created) => {
               if (!created) return
               setCourseDialog(null)
               // Creating a course selects it, matching the iPad store.
               setCourse(created.name)
               setRecordingCourseId(created.id)
+              if (thenStartRecording) {
+                // Zero-course Start Recording: pass the just-created course's
+                // canonical id straight into the Start call. The state
+                // setters above are correct too, but this callback (a
+                // `.then()`, not the same render as any pre-commit closure)
+                // must not depend on them landing first — the same
+                // stale-closure class of bug already found once for Course
+                // Detail's "Start New Lecture".
+                startRecording({ course: created.name, courseId: created.id, title: title.trim() })
+              }
             })
           }}
         />
@@ -7767,7 +7818,13 @@ useEffect(() => {
                 <button
                   type="button"
                   className="yl-btn-primary"
-                  onClick={() => startRecording()}
+                  onClick={() => {
+                    if (!coursesState.loading && coursesState.courses.length === 0) {
+                      setCourseDialog({ kind: 'create', thenStartRecording: true })
+                      return
+                    }
+                    startRecording()
+                  }}
                   disabled={saveOrFinishBusy}
                 >
                   {saveOrFinishBusy ? 'Please wait…' : 'Start'}
