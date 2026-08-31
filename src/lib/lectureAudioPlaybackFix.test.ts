@@ -55,6 +55,17 @@ describe('a freshly saved recording is read from the already-refreshed list firs
   })
 })
 
+describe('save-result to Lecture Detail owns one fresh loader lifecycle', () => {
+  it('does not preselect the saved id before the user presses View lecture', () => {
+    const saveTail = appSrc.slice(appSrc.lastIndexOf('lastFinalTimestampRef.current = 0'))
+    expect(saveTail).not.toContain('setSelectedId(recordingId)')
+  })
+
+  it('the View lecture action routes through the shared opener', () => {
+    expect(appSrc).toMatch(/const id = recentCapture\?\.recordingId[\s\S]*?if \(id\) openLectureDetail\(id\)/)
+  })
+})
+
 describe('the row-select fallback is bounded and a null result is a real, Retry-capable failure', () => {
   it('getRecordingDetail (fallback path) is still wrapped in the same withTimeout guard as getRecordingAudioUrl', () => {
     expect(appSrc).toMatch(/row = await withTimeout\(\s*getRecordingDetail\(supabase!, userId!, selectedId, \{ signAudio: false \}\),\s*SAVE_META_TIMEOUT_MS,/)

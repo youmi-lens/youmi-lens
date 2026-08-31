@@ -4227,7 +4227,12 @@ const [editLectureModal, setEditLectureModal] = useState<{
       lastFinalTimestampRef.current = 0
       setLiveCaptionChunkNotice(null)
       resetLiveCaptionSessionUi()
-      setSelectedId(recordingId)
+      // The saved-result screen owns the transition into Lecture Detail. Do
+      // not preselect this id here: doing so starts a hidden detail/audio load
+      // before the user presses “View lecture”. That loader can be cancelled
+      // by the save-result transition, while the later opener receives the
+      // same id and therefore has no dependency change with which to retry.
+      // `openLectureDetail` selects it at the point the detail actually opens.
       setTitle('')
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Could not save recording'
