@@ -104,6 +104,15 @@ describe('5 · a save that only reaches local pending-upload is a visible, recov
     expect(appSrc).toMatch(/savePendingUpload\(\{\s*id: recordingId,\s*userId: userId!,\s*course: courseVal,\s*courseId: recordingCourseId,/)
   })
 
+  it('a recovered crash recording enters the same canonical course-aware upload and insert path', () => {
+    const recovery = appSrc.slice(
+      appSrc.indexOf('const handleRecoverSave = useCallback('),
+      appSrc.indexOf('const handleRecoverKeep = useCallback('),
+    )
+    expect(recovery).toMatch(/uploadLectureAudioViaServer\(supabase, recordingId, blob, mime, durationSec, \{\s*course: courseVal,\s*[\s\S]*?courseId: recordingCourseId,/)
+    expect(recovery).toMatch(/insertLectureRecordingRow\(\{\s*[\s\S]*?course: courseVal,\s*courseId: recordingCourseId,/)
+  })
+
   it('retry reuses the exact same recording id — idempotent insert, never a duplicate lecture', () => {
     expect(appSrc).toContain('handleRetryPendingUpload')
     expect(appSrc).toMatch(/uploadLectureAudioViaServer\(supabase, id, rec\.audioBlob, rec\.mime, rec\.durationSec, \{\s*course: rec\.course,\s*courseId: rec\.courseId/)

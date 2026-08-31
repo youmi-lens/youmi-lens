@@ -3655,6 +3655,10 @@ const [editLectureModal, setEditLectureModal] = useState<{
               saveResult = await withTimeout(
                 uploadLectureAudioViaServer(supabase, recordingId, blob, mime, durationSec, {
                   course: courseVal,
+                  // Recovery is a normal lecture save. Keep the canonical id
+                  // alongside the legacy label so a recovered lecture cannot
+                  // be detached by a course rename or refresh.
+                  courseId: recordingCourseId,
                   title: titleVal,
                   liveTranscript: '',
                   liveTranscriptRaw: '',
@@ -3676,6 +3680,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 userId,
                 id: recordingId,
                 course: courseVal,
+                courseId: recordingCourseId,
                 title: titleVal,
                 durationSec,
                 mime,
