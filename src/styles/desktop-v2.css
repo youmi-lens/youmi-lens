@@ -610,7 +610,13 @@ label.settings-v2__row--radio-disabled { cursor: default; opacity: .6; }
   padding: 2px;
   gap: 2px;
 }
-.settings-v2__segmented-btn {
+/* `button.` (0,1,1), not a bare class (0,1,0) — same reason as
+   `button.settings-v2__row--nav` above: the `.desktop-v2 button { color:
+   inherit }` reset near the top of this file is (0,1,1), so a single-class
+   colour rule loses to it. That is exactly what happened in QA16: the
+   selected segment painted navy but inherited dark body ink, so "Bilingual"
+   rendered dark-on-dark and read as an empty pill. */
+button.settings-v2__segmented-btn {
   border: 0;
   background: transparent;
   padding: 6px 14px;
@@ -621,7 +627,7 @@ label.settings-v2__row--radio-disabled { cursor: default; opacity: .6; }
   color: var(--v2-muted);
   cursor: pointer;
 }
-.settings-v2__segmented-btn--selected { background: var(--v2-navy); color: var(--v2-navy-ink); }
+button.settings-v2__segmented-btn--selected { background: var(--v2-navy); color: var(--v2-navy-ink); }
 
 /* AI section — Youmi AI vs bring-your-own-key. Kept to a comfortable reading
    width so the copy doesn't stretch across the full Settings detail column. */

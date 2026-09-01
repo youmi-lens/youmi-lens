@@ -26,7 +26,14 @@ export function LanguageSelect({
 
   return (
     <label className="language-select">
-      <span className="sr-only">{label}</span>
+      {/* `v2-sr-only`, NOT `sr-only`: `.sr-only` is not defined in any
+          stylesheet this app loads, so this span rendered as ordinary visible
+          text and the row read "App language English" — the field name on the
+          left, then the name again next to the value. `.desktop-v2
+          .v2-sr-only` is the real visually-hidden helper, so the label stays
+          in the accessibility tree (alongside the select's own aria-label)
+          while showing only the value on screen. */}
+      <span className="v2-sr-only">{label}</span>
       <select aria-label={label} value={value} onChange={handleChange}>
         {options.map((option) => (
           <option

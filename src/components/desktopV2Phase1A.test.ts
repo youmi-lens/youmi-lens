@@ -24,6 +24,20 @@ import {
 import { DEFAULT_LANGUAGE_PREFERENCES } from '../lib/languagePreferences'
 import { translateDesktop } from '../lib/desktopI18n'
 
+/**
+ * What a sighted user actually reads: drops elements carrying the
+ * visually-hidden helper (`v2-sr-only`, which clips to a 1px box), then
+ * strips tags and collapses whitespace. Screen-reader-only labels stay in the
+ * DOM for accessibility but must not count as visible text.
+ */
+function visibleText(html: string): string {
+  return html
+    .replace(/<(\w+)[^>]*\bclass="[^"]*\bv2-sr-only\b[^"]*"[^>]*>.*?<\/\1>/g, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8')
 const v2Css = readFileSync(new URL('../styles/desktop-v2.css', import.meta.url), 'utf8')
 const v2Tokens = readFileSync(new URL('../styles/desktop-v2-tokens.css', import.meta.url), 'utf8')
@@ -305,6 +319,59 @@ describe('Settings', () => {
     expect(html).not.toContain('· Available')
   })
 
+  it('each language control shows ONLY its value — the field name lives on the left, once', () => {
+    const html = render(
+      createElement(SettingsLanguagePage, {
+        preferences: DEFAULT_LANGUAGE_PREFERENCES,
+        onPreferenceChange: () => undefined,
+      }),
+    )
+    // QA16 shipped `class="sr-only"` on the control's label span, but `.sr-only`
+    // is defined in NO stylesheet this app loads — so it rendered as ordinary
+    // text and the row read "App language English". Each trailing control must
+    // contribute no visible copy of its own field name.
+    const controls = [...html.matchAll(/<label class="language-select">([\s\S]*?)<\/label>/g)].map(
+      (m) => m[1],
+    )
+    expect(controls).toHaveLength(3)
+    for (const [i, name] of ['App language', 'Caption language', 'Translation language'].entries()) {
+      expect(visibleText(controls[i])).not.toContain(name)
+    }
+    // The values themselves are still shown by the select.
+    expect(visibleText(controls[0])).toContain('English')
+    expect(visibleText(controls[2])).toContain('简体中文')
+  })
+
+  it('keeps the field name available to screen readers (hidden, not deleted)', () => {
+    const html = render(
+      createElement(SettingsLanguagePage, {
+        preferences: DEFAULT_LANGUAGE_PREFERENCES,
+        onPreferenceChange: () => undefined,
+      }),
+    )
+    // Visually hidden via the real helper class...
+    expect(html).toContain('<span class="v2-sr-only">App language</span>')
+    // ...and the select still carries its own accessible name.
+    expect(html).toContain('aria-label="App language"')
+    expect(html).toContain('aria-label="Caption language"')
+    expect(html).toContain('aria-label="Translation language"')
+    // The undefined class must never come back.
+    expect(html).not.toContain('class="sr-only"')
+  })
+
+  it('the selected Language mode segment renders "Bilingual" as visible text', () => {
+    const html = render(
+      createElement(SettingsLanguagePage, {
+        preferences: { ...DEFAULT_LANGUAGE_PREFERENCES, languageMode: 'bilingual' },
+        onPreferenceChange: () => undefined,
+      }),
+    )
+    const selected = html.slice(html.indexOf('settings-v2__segmented-btn--selected'))
+    const label = selected.slice(selected.indexOf('>') + 1, selected.indexOf('</button>'))
+    expect(visibleText(label)).toBe('Bilingual')
+    expect(html).toContain('aria-pressed="true"')
+  })
+
   it('does not claim unsupported languages are live', () => {
     const html = render(
       createElement(SettingsLanguagePage, {
@@ -441,15 +508,19 @@ describe('AccountSettingsModal', () => {
     expect(footer.slice(0, trailingStart)).toContain('Sign out')
   })
 
-  it('QA15 root cause: every dialog rule is no longer scoped behind a non-matching ".desktop-v2 " ancestor prefix', () => {
-    // The overlay carries the `.desktop-v2` class on ITSELF, not as an
-    // ancestor of these rules — a descendant-combinator selector here can
-    // never match. This is why the dialog rendered as an unstyled, narrow,
-    // full-height block instead of a centered desktop dialog. (Comments in
-    // this file quote that old selector as prose, so strip comments first.)
+  it('keeps the two-form scoping contract: compound for the overlay, descendant for every child', () => {
+    // QA16 stripped `.desktop-v2 ` from EVERY selector here on the theory that
+    // it never matched. That was true only of the overlay (an element is not
+    // its own descendant); the child rules always matched, and their (0,2,0)
+    // specificity is what beats `.desktop-v2 button { color: inherit }` at
+    // (0,1,1). Losing it is what made "Save changes" render dark-on-dark.
+    // Full cascade + contrast proof: styles/desktopV2CascadeContrast.test.ts.
     const rulesOnly = accountModalCss.replace(/\/\*[\s\S]*?\*\//g, '')
-    expect(rulesOnly).not.toContain('.desktop-v2 .account-settings-modal__')
-    expect(rulesOnly).toContain('.account-settings-modal__dialog')
+    expect(rulesOnly).toContain('.desktop-v2.account-settings-modal__overlay')
+    expect(rulesOnly).toContain('.desktop-v2 .account-settings-modal__dialog')
+    expect(rulesOnly).toContain('.desktop-v2 .account-settings-modal__btn--primary')
+    // No child rule may sit at bare-class specificity again.
+    expect(rulesOnly).not.toMatch(/^\s*\.account-settings-modal__/m)
   })
 
   it('is sized and centered as a desktop dialog, not a narrow full-height drawer', () => {
@@ -457,6 +528,15 @@ describe('AccountSettingsModal', () => {
     expect(accountModalCss).toMatch(/\.account-settings-modal__overlay\s*{[^}]*justify-content:\s*center/)
     expect(accountModalCss).toMatch(/\.account-settings-modal__dialog\s*{[^}]*max-width:\s*min\(92vw,\s*680px\)/)
     expect(accountModalCss).toMatch(/\.account-settings-modal__dialog\s*{[^}]*max-height:\s*80vh/)
+  })
+
+  it('the primary action renders its "Save changes" label as real visible text', () => {
+    const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '2.3.1' }))
+    const primary = html.slice(html.indexOf('account-settings-modal__btn--primary'))
+    const label = primary.slice(primary.indexOf('>') + 1, primary.indexOf('</button>'))
+    expect(label).toContain('Save changes')
+    // and it is the button's own text, not an aria-label standing in for it
+    expect(visibleText(label)).toBe('Save changes')
   })
 
   it('Save/Sign out/Delete Account keep their exact protected implementations — only presentation moved', () => {
@@ -472,10 +552,12 @@ describe('AccountSettingsModal', () => {
 })
 
 describe('BillingPlanModal geometry — QA16', () => {
-  it('QA15 root cause: every dialog rule is no longer scoped behind a non-matching ".desktop-v2 " ancestor prefix', () => {
+  it('keeps the two-form scoping contract: compound for the overlay, descendant for every child', () => {
     const rulesOnly = billingModalCss.replace(/\/\*[\s\S]*?\*\//g, '')
-    expect(rulesOnly).not.toContain('.desktop-v2 .billing-plan-modal__')
-    expect(rulesOnly).toContain('.billing-plan-modal__dialog')
+    expect(rulesOnly).toContain('.desktop-v2.billing-plan-modal__overlay')
+    expect(rulesOnly).toContain('.desktop-v2 .billing-plan-modal__dialog')
+    expect(rulesOnly).toContain('.desktop-v2 .billing-plan-modal__btn--primary')
+    expect(rulesOnly).not.toMatch(/^\s*\.billing-plan-modal__/m)
   })
 
   it('is sized and centered as a desktop dialog from the same family as the Account modal', () => {

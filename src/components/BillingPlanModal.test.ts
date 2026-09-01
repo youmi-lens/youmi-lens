@@ -487,6 +487,106 @@ describe('useBilling upgrade foundation', () => {
   })
 })
 
+/** Visible copy only: drops `v2-sr-only` nodes, tags, and extra whitespace. */
+function visibleText(html: string): string {
+  return html
+    .replace(/<(\w+)[^>]*\bclass="[^"]*\bv2-sr-only\b[^"]*"[^>]*>.*?<\/\1>/g, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+describe('QA17 — the Upgrade CTA renders a visible label', () => {
+  it('the Free-state primary CTA has "Upgrade" as real button text, not only an aria-label', () => {
+    const html = renderContent({ status: 'free', quota: studentQuota }, { onUpgrade: () => {} })
+    const cta = html.slice(html.indexOf('billing-plan-modal__upgrade'))
+    const label = cta.slice(cta.indexOf('>') + 1, cta.indexOf('</button>'))
+    expect(visibleText(label)).toBe('Upgrade')
+  })
+
+  it('the CTA keeps its accessible name alongside the visible label', () => {
+    const html = renderContent({ status: 'free', quota: studentQuota }, { onUpgrade: () => {} })
+    expect(html).toContain('aria-label="Upgrade"')
+  })
+
+  it('the busy state swaps the visible label rather than blanking it', () => {
+    const html = renderContent(
+      { status: 'free', quota: studentQuota },
+      { onUpgrade: () => {}, checkoutBusy: true },
+    )
+    const cta = html.slice(html.indexOf('billing-plan-modal__upgrade'))
+    const label = cta.slice(cta.indexOf('>') + 1, cta.indexOf('</button>'))
+    expect(visibleText(label)).toBe('Opening Checkout…')
+  })
+})
+
+describe('QA17 — billing contract is untouched by the label fix', () => {
+  it('Free may start Desktop checkout; an active plan may not', () => {
+    expect(canStartCheckout('free')).toBe(true)
+    expect(canStartCheckout('active')).toBe(false)
+    expect(canStartCheckout('canceling')).toBe(false)
+  })
+
+  it('Stripe-manageable states expose Manage; non-manageable ones never do', () => {
+    const base = {
+      status: 'active' as const,
+      planCode: 'student_basic_monthly' as const,
+      interval: 'monthly' as const,
+      currentPeriodEnd: null,
+      quota: studentQuota,
+    }
+    expect(renderContent({ ...base, manageable: true }, { onManage: () => {} })).toContain(
+      'Manage subscription',
+    )
+    expect(renderContent({ ...base, manageable: false }, { onManage: () => {} })).not.toContain(
+      'Manage subscription',
+    )
+  })
+
+  it('Apple/legacy active (entitled but not Desktop-manageable) shows the plan with NO purchase or manage CTA', () => {
+    const html = renderContent(
+      {
+        status: 'active',
+        planCode: null,
+        interval: null,
+        currentPeriodEnd: null,
+        manageable: false,
+        quota: studentQuota,
+      },
+      { onManage: () => {}, onUpgrade: () => {} },
+    )
+    expect(html).toContain('Student Basic')
+    expect(html).toContain('Usage')
+    expect(html).not.toContain('Manage subscription')
+    expect(html).not.toContain('billing-plan-modal__upgrade')
+  })
+
+  it('Desktop is Stripe-only: no Restore Purchases anywhere, in any state', () => {
+    const states: BillingState[] = [
+      { status: 'free', quota: studentQuota },
+      { status: 'active', planCode: 'student_basic_monthly', interval: 'monthly', currentPeriodEnd: null, manageable: true, quota: studentQuota },
+      { status: 'canceling', planCode: 'student_basic_monthly', interval: 'monthly', accessThrough: null, manageable: true, quota: studentQuota },
+      { status: 'past_due', planCode: 'student_basic_monthly', interval: 'monthly', currentPeriodEnd: null, graceUntil: null, accessActive: true, manageable: false, quota: studentQuota },
+      { status: 'expired', planCode: null, interval: null, currentPeriodEnd: null, manageable: false, quota: studentQuota },
+    ]
+    for (const state of states) {
+      const html = renderContent(state, { onUpgrade: () => {}, onManage: () => {} })
+      expect(html.toLowerCase()).not.toContain('restore purchase')
+      expect(html.toLowerCase()).not.toContain('restore purchases')
+    }
+    expect(billingPlanModalSrc.toLowerCase()).not.toContain('restore')
+  })
+
+  it('checkout still routes through the existing upgrade/manage actions — no new payment path', () => {
+    expect(billingPlanModalSrc).toContain('await billing.actions.upgrade(selectedPlan)')
+    expect(billingPlanModalSrc).toContain('await billing.actions.manage()')
+    expect(billingPlanModalSrc).toContain("markExternalBillingAction('checkout')")
+    expect(billingPlanModalSrc).toContain("markExternalBillingAction('portal')")
+    // Prices come from the shared contract module, never re-declared here.
+    expect(billingPlanModalSrc).not.toMatch(/4\.99|49\.99/)
+  })
+})
+
 describe('BillingPlanContent usage', () => {
   it('maps 600 / 6 / 10 and omits fabricated Study Tasks usage', () => {
     const html = renderContent({ status: 'free', quota: studentQuota })

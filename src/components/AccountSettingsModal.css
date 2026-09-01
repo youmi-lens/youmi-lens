@@ -1,6 +1,6 @@
 /* Account settings modal — Desktop V2 surface, reusing desktop-v2-tokens.css. */
 
-.account-settings-modal__overlay {
+.desktop-v2.account-settings-modal__overlay {
   position: fixed;
   inset: 0;
   z-index: 2000;
@@ -14,18 +14,26 @@
   overscroll-behavior: contain;
 }
 
-/* Centered desktop dialog. QA15's 420px cap never actually mattered: every
-   rule in this file was written as `.desktop-v2 .account-settings-modal__*`,
-   a descendant selector that can only match when `.desktop-v2` is an
-   ANCESTOR — but this dialog's own overlay carries `.desktop-v2` as a
-   co-class on itself, not as a wrapping ancestor, so none of these rules
-   ever matched. The dialog rendered with zero applied CSS: an unstyled,
-   naturally-narrow, naturally-tall block sitting in normal document flow
-   instead of a centered, sized overlay — exactly the "narrow full-height
-   drawer with empty space to its right" the owner saw. The fix is dropping
-   that stray ancestor prefix (done for every selector in this file); the
-   width/height values below are the actual, now-effective, desktop sizing. */
-.account-settings-modal__dialog {
+/* Centered desktop dialog.
+
+   SCOPING (QA17 — corrects the QA16 diagnosis). The overlay element carries
+   BOTH classes: `class="desktop-v2 account-settings-modal__overlay"`. So:
+
+     - the OVERLAY rule must be COMPOUND (`.desktop-v2.…__overlay`, no space).
+       Written as a descendant it can never match, because the overlay is not
+       a descendant of itself — that is the real reason QA15's dialog had no
+       centering/sizing and rendered as a narrow, full-height block.
+     - every CHILD rule must stay a DESCENDANT (`.desktop-v2 .…__x`). Those
+       always did match, and their (0,2,0) specificity is load-bearing: it is
+       what beats the `.desktop-v2 button/input/select { color: inherit }`
+       reset at (0,1,1). QA16 stripped the prefix from every selector here,
+       which dropped the child rules to (0,1,0) and let that reset win — so
+       the dark navy primary button inherited dark body ink and rendered its
+       "Save changes" label invisibly, dark-on-dark.
+
+   Keep both forms exactly as they are. The width/height values below are
+   QA16's accepted geometry and are unchanged. */
+.desktop-v2 .account-settings-modal__dialog {
   width: 100%;
   max-width: min(92vw, 680px);
   border: 1px solid var(--v2-rule);
@@ -38,25 +46,25 @@
   overflow: hidden;
 }
 
-.account-settings-modal__header {
+.desktop-v2 .account-settings-modal__header {
   padding: 24px 24px 12px;
   border-bottom: 1px solid var(--v2-rule);
 }
 
-.account-settings-modal__title {
+.desktop-v2 .account-settings-modal__title {
   margin: 0 0 4px;
   font-size: var(--v2-text-base);
   font-weight: 700;
   color: var(--v2-navy);
 }
 
-.account-settings-modal__lead {
+.desktop-v2 .account-settings-modal__lead {
   margin: 0;
   font-size: var(--v2-text-sm);
   color: var(--v2-muted);
 }
 
-.account-settings-modal__body {
+.desktop-v2 .account-settings-modal__body {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
@@ -66,23 +74,23 @@
 /* A balanced form width inside the wider dialog — inputs stop stretching
    the full 680px so the dialog reads as a desktop form, not one giant
    full-bleed text field. */
-.account-settings-modal__form {
+.desktop-v2 .account-settings-modal__form {
   max-width: 440px;
 }
 
-.account-settings-modal__field {
+.desktop-v2 .account-settings-modal__field {
   display: block;
   margin-bottom: 14px;
 }
 
-.account-settings-modal__field-label {
+.desktop-v2 .account-settings-modal__field-label {
   font-size: var(--v2-text-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--v2-faint);
 }
 
-.account-settings-modal__input {
+.desktop-v2 .account-settings-modal__input {
   width: 100%;
   box-sizing: border-box;
   margin-top: 6px;
@@ -95,38 +103,38 @@
   background: var(--v2-paper);
 }
 
-.account-settings-modal__input:read-only {
+.desktop-v2 .account-settings-modal__input:read-only {
   background: var(--v2-paper-2);
   color: var(--v2-muted);
 }
 
-.account-settings-modal__message {
+.desktop-v2 .account-settings-modal__message {
   margin: 12px 0 0;
   font-size: var(--v2-text-sm);
 }
 
-.account-settings-modal__message--ok {
+.desktop-v2 .account-settings-modal__message--ok {
   color: var(--v2-success-ink);
 }
 
-.account-settings-modal__message--error {
+.desktop-v2 .account-settings-modal__message--error {
   color: var(--v2-danger-ink);
 }
 
-.account-settings-modal__meta {
+.desktop-v2 .account-settings-modal__meta {
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid var(--v2-rule);
 }
 
-.account-settings-modal__meta-title {
+.desktop-v2 .account-settings-modal__meta-title {
   margin: 0 0 6px;
   font-size: var(--v2-text-sm);
   font-weight: 700;
   color: var(--v2-ink-2);
 }
 
-.account-settings-modal__meta-note {
+.desktop-v2 .account-settings-modal__meta-note {
   margin: 0;
   font-size: var(--v2-text-sm);
   color: var(--v2-muted);
@@ -138,13 +146,13 @@
    a hairline border and a quiet label, not a bright full-bleed red/pink card
    dominating the dialog. Only the action button itself carries the danger
    tint, so the destructive affordance still reads clearly at a glance. */
-.account-settings-modal__danger-section {
+.desktop-v2 .account-settings-modal__danger-section {
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid var(--v2-rule);
 }
 
-.account-settings-modal__danger-title {
+.desktop-v2 .account-settings-modal__danger-title {
   margin: 0 0 10px;
   font-size: var(--v2-text-xs);
   font-weight: 700;
@@ -153,28 +161,28 @@
   color: var(--v2-danger-ink);
 }
 
-.account-settings-modal__danger-row {
+.desktop-v2 .account-settings-modal__danger-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
 }
 
-.account-settings-modal__danger-name {
+.desktop-v2 .account-settings-modal__danger-name {
   margin: 0;
   font-size: var(--v2-text-sm);
   font-weight: 600;
   color: var(--v2-ink-2);
 }
 
-.account-settings-modal__danger-note {
+.desktop-v2 .account-settings-modal__danger-note {
   margin: 2px 0 0;
   font-size: var(--v2-text-xs);
   color: var(--v2-muted);
   line-height: 1.5;
 }
 
-.account-settings-modal__danger-row .account-settings-modal__btn {
+.desktop-v2 .account-settings-modal__danger-row .account-settings-modal__btn {
   flex: 0 0 auto;
   width: auto;
   padding: 0 18px;
@@ -182,7 +190,7 @@
 
 /* Desktop footer: Sign out sits apart on the left; Cancel/Save changes group
    on the right, buttons sized to their label rather than stretched full-width. */
-.account-settings-modal__footer {
+.desktop-v2 .account-settings-modal__footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -192,12 +200,12 @@
   background: var(--v2-paper);
 }
 
-.account-settings-modal__footer-trailing {
+.desktop-v2 .account-settings-modal__footer-trailing {
   display: flex;
   gap: 10px;
 }
 
-.account-settings-modal__btn {
+.desktop-v2 .account-settings-modal__btn {
   width: auto;
   display: inline-flex;
   align-items: center;
@@ -212,52 +220,52 @@
   font-family: inherit;
 }
 
-.account-settings-modal__btn:disabled {
+.desktop-v2 .account-settings-modal__btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.account-settings-modal__btn--primary {
+.desktop-v2 .account-settings-modal__btn--primary {
   background: var(--v2-navy);
   color: var(--v2-navy-ink);
   border-color: var(--v2-navy);
 }
 
-.account-settings-modal__btn--primary:hover:not(:disabled) {
+.desktop-v2 .account-settings-modal__btn--primary:hover:not(:disabled) {
   background: var(--v2-navy-deep);
 }
 
-.account-settings-modal__btn--secondary {
+.desktop-v2 .account-settings-modal__btn--secondary {
   background: var(--v2-paper);
   color: var(--v2-ink-2);
   border-color: var(--v2-rule);
 }
 
-.account-settings-modal__btn--secondary:hover:not(:disabled) {
+.desktop-v2 .account-settings-modal__btn--secondary:hover:not(:disabled) {
   background: var(--v2-paper-2);
 }
 
-.account-settings-modal__btn--danger {
+.desktop-v2 .account-settings-modal__btn--danger {
   background: var(--v2-record-soft);
   color: var(--v2-danger-ink);
   border-color: rgba(214, 59, 69, 0.28);
 }
 
-.account-settings-modal__btn--danger:hover:not(:disabled) {
+.desktop-v2 .account-settings-modal__btn--danger:hover:not(:disabled) {
   background: #ffe4e6;
 }
 
 @media (max-width: 520px) {
-  .account-settings-modal__footer {
+  .desktop-v2 .account-settings-modal__footer {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .account-settings-modal__footer-trailing {
+  .desktop-v2 .account-settings-modal__footer-trailing {
     justify-content: flex-end;
   }
 
-  .account-settings-modal__danger-row {
+  .desktop-v2 .account-settings-modal__danger-row {
     flex-direction: column;
     align-items: flex-start;
   }
