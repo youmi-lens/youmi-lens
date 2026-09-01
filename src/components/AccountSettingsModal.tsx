@@ -14,7 +14,7 @@ import {
   type UserProfileRow,
 } from '../lib/userProfile'
 import { deleteAccount } from '../lib/account'
-import { INTERNAL_BETA_NOTE, PRODUCT_VERSION_LABEL } from '../lib/productMeta'
+import { INTERNAL_BETA_NOTE } from '../lib/productMeta'
 import './AccountSettingsModal.css'
 
 type Props = {
@@ -28,6 +28,12 @@ type Props = {
   onSignOut: () => void
   /** Called after the account is permanently deleted server-side; caller must sign out / clear local state. */
   onAccountDeleted: () => void
+  /**
+   * The same canonical version Settings → Updates shows (Tauri's own
+   * `getVersion()`, via `useAppVersion`). Empty string on web/dev. Never a
+   * second, independently-tracked version string.
+   */
+  appVersion: string
 }
 
 export function AccountSettingsModal({
@@ -40,6 +46,7 @@ export function AccountSettingsModal({
   onSaved,
   onSignOut,
   onAccountDeleted,
+  appVersion,
 }: Props) {
   const [displayName, setDisplayName] = useState('')
   const [phone, setPhone] = useState('')
@@ -200,7 +207,9 @@ export function AccountSettingsModal({
           {err ? <p className="account-settings-modal__message account-settings-modal__message--error">{err}</p> : null}
 
           <div className="account-settings-modal__meta">
-            <h3 className="account-settings-modal__meta-title">{PRODUCT_VERSION_LABEL}</h3>
+            <h3 className="account-settings-modal__meta-title">
+              {appVersion ? `Youmi Lens v${appVersion}` : 'Youmi Lens'}
+            </h3>
             <p className="account-settings-modal__meta-note">{INTERNAL_BETA_NOTE}</p>
           </div>
 

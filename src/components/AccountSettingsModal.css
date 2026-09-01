@@ -115,17 +115,22 @@
   line-height: 1.5;
 }
 
+/* Physically separated (its own tinted, bordered zone — not just another
+   section under the same top-border rhythm as ordinary profile fields) and
+   visually distinct (the same danger tokens used elsewhere in the app). */
 .desktop-v2 .account-settings-modal__danger-section {
   margin-top: 22px;
-  padding-top: 18px;
-  border-top: 1px solid var(--v2-rule);
+  padding: 16px;
+  border: 1px solid var(--v2-danger-ink);
+  border-radius: var(--v2-radius-md);
+  background: var(--v2-record-soft);
 }
 
 .desktop-v2 .account-settings-modal__danger-title {
   margin: 0 0 4px;
   font-size: var(--v2-text-sm);
   font-weight: 700;
-  color: var(--v2-ink-2);
+  color: var(--v2-danger-ink);
 }
 
 .desktop-v2 .account-settings-modal__danger-note {

@@ -41,9 +41,13 @@ import { USERNAME_MAX_LENGTH, USERNAME_MIN_LENGTH, validateUsername } from './au
 /** Same client-side email shape the Website uses (landing/app/auth-ui.js EMAIL_RE). */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-/** Website Terms / Privacy targets. Opened in the system browser from the desktop app. */
-const TERMS_URL = 'https://youmilens.com/#support'
-const PRIVACY_URL = 'https://youmilens.com/#privacy'
+/**
+ * Website Terms / Privacy targets. Opened in the system browser from the
+ * desktop app. Exported so Settings → Support & About can link to the exact
+ * same URLs instead of hardcoding a second copy.
+ */
+export const TERMS_URL = 'https://youmilens.com/#support'
+export const PRIVACY_URL = 'https://youmilens.com/#privacy'
 
 /**
  * `compact` mirrors the Website's own `@media (max-width: 900px)` rules by applying

@@ -4,20 +4,9 @@
  * These live outside SettingsLayout.tsx so that file only exports components —
  * react-refresh cannot hot-reload a module that mixes components and constants.
  */
-export const SETTINGS_SECTIONS = [
-  'appearance',
-  'capture',
-  'language',
-  'liveCaptions',
-  'dataBackup',
-  'autoUpdate',
-  'account',
-  'planUsage',
-  'advancedAi',
-  'support',
-] as const
+export const SETTINGS_SECTIONS = ['account', 'recording', 'ai', 'updates', 'support'] as const
 
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number]
 
-/** Opening Settings lands on the Settings page itself, not on Language. */
-export const DEFAULT_SETTINGS_SECTION: SettingsSection = 'appearance'
+/** Opening Settings lands on Account — the most immediately useful section. */
+export const DEFAULT_SETTINGS_SECTION: SettingsSection = 'account'

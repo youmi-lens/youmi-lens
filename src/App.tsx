@@ -71,7 +71,7 @@ import { buildLocalBackupZip, importLocalBackupZip } from './lib/localBackup'
 import { getSupabase, isSupabaseConfigured } from './lib/supabase'
 import { summarizeRecording, transcribeRecording, translateLiveCaption } from './lib/aiClient'
 import { getAiApiBase } from './lib/ai/apiBase'
-import { openExternalContact } from './lib/openExternalContact'
+import { openExternalContact, openExternalUrl } from './lib/openExternalContact'
 import { computeUploadRetryPlan, isTransientUploadError } from './lib/uploadRetry'
 import {
   hostedRecordingAiStatusLabel,
@@ -108,10 +108,14 @@ import {
 } from './lib/userProfile'
 import { AccountSettingsModal } from './components/AccountSettingsModal'
 import { UpdaterEntry } from './components/UpdaterEntry'
+import { UpdatesSettingsPage } from './components/UpdatesSettingsPage'
 import { AiPreferencesSection } from './components/AiPreferencesSection'
 import { AccessUsageModal } from './components/AccessUsageModal'
 import { BillingPlanModal } from './components/BillingPlanModal'
-import { AuthScreens } from './components/AuthScreens'
+import { billingSummaryLabel } from './components/billingCheckoutCopy'
+import { useBilling } from './hooks/useBilling'
+import { useAppVersion } from './lib/updater/useAppVersion'
+import { AuthScreens, TERMS_URL, PRIVACY_URL } from './components/AuthScreens'
 import { authTrace } from './lib/authTrace'
 import { RecordingAudioPlayer } from './components/RecordingAudioPlayer'
 import { OnboardingUsername } from './components/OnboardingUsername'
@@ -195,19 +199,6 @@ import {
 } from './lib/lectureLibraryScope'
 import { YoumiLensShell } from './components/YoumiLensShell'
 
-/** Settings sections that Phase 1A has not migrated yet map to their own label. */
-const SETTINGS_PLACEHOLDER_TITLE = {
-  appearance: 'settings.appearance',
-  capture: 'settings.capture',
-  language: 'settings.language',
-  liveCaptions: 'settings.liveCaptions',
-  dataBackup: 'settings.dataBackup',
-  autoUpdate: 'settings.autoUpdate',
-  account: 'settings.account',
-  planUsage: 'settings.planUsage',
-  advancedAi: 'settings.advancedAi',
-  support: 'settings.support',
-} as const
 import { CourseDetailPage } from './components/CourseDetailPage'
 import { CoursesPage, type LectureStatus } from './components/CoursesPage'
 import {
@@ -244,7 +235,7 @@ import { useCloudLibraryRealtime } from './hooks/useCloudLibraryRealtime'
 import { isTerminalRecordingStage, ownsRecordingScreen, resolveRecordingV2Stage } from './lib/recordingV2Stage'
 import { RecordHome } from './components/RecordHome'
 import { SettingsLanguagePage } from './components/SettingsLanguagePage'
-import { SettingsLayout, SettingsPlaceholder, SettingsRow } from './components/SettingsLayout'
+import { SettingsLayout, SettingsRow, SettingsNavRow, SettingsActionRow } from './components/SettingsLayout'
 import { DEFAULT_SETTINGS_SECTION, type SettingsSection } from './lib/settingsSections'
 import { useLanguagePreferences } from './languagePreferencesContext'
 import { YoumiLensMonogramY } from './branding/YoumiLensMonogramY'
@@ -1663,6 +1654,14 @@ function RecordingWorkspace({
    * unrelated current Record-page Course for the rest of the save.
    */
   const [recoveryUploadCourse, setRecoveryUploadCourse] = useState<Course | null>(null)
+  // Settings' Account row reads the SAME billing state machine the Billing
+  // Plan modal already renders in full — presentation only, never a second
+  // interpretation of entitlement/status.
+  const billing = useBilling()
+  // The one canonical app-version source (Tauri's getVersion(), the same
+  // value useUpdater exposes) — shared by Support & About and the Account
+  // modal so neither can show a different, stale number.
+  const appVersion = useAppVersion()
   const [recoveryDeleteConfirmId, setRecoveryDeleteConfirmId] = useState<string | null>(null)
 
   /** In-flight capture only; terminal outcomes use `recentCapture` / `recentAi`. */
@@ -5447,14 +5446,52 @@ useEffect(() => {
             : 'record'
 
   const settingsDetail =
-    settingsSection === 'language' ? (
-      <SettingsLanguagePage
-        preferences={languagePreferences}
-        onPreferenceChange={setLanguagePreference}
-      />
-    ) : settingsSection === 'capture' ? (
+    settingsSection === 'account' ? (
       <>
-        <h2>{tDesktop('settings.capture')}</h2>
+        <h2>{tDesktop('settings.account')}</h2>
+        <div className="settings-v2__group">
+          <SettingsNavRow
+            name={tDesktop('settings.signedInAs')}
+            value={userEmail ?? undefined}
+            disabled={!showAccountPanel}
+            onClick={() => setAccountSettingsOpen(true)}
+          />
+          <SettingsNavRow
+            name={tDesktop('settings.plan')}
+            value={billingSummaryLabel(billing.state, tDesktop)}
+            disabled={!showAccountPanel}
+            onClick={() => setBillingPlanOpen(true)}
+          />
+        </div>
+
+        {showAccountPanel ? (
+          <div className="settings-v2__danger-zone">
+            <h3 className="settings-v2__group-title">{tDesktop('settings.accountActions')}</h3>
+            <div className="settings-v2__group">
+              <SettingsActionRow
+                name={signOutBusy ? 'Signing out…' : tDesktop('settings.signOut')}
+                busy={signOutBusy}
+                onClick={() => {
+                  if (signOutBusy) return
+                  setSignOutBusy(true)
+                  void Promise.resolve(onSignOut?.()).finally(() => setSignOutBusy(false))
+                }}
+              />
+            </div>
+            <div className="settings-v2__group settings-v2__group--danger">
+              <SettingsActionRow
+                name={tDesktop('settings.deleteAccount')}
+                tone="danger"
+                onClick={() => setAccountSettingsOpen(true)}
+              />
+            </div>
+          </div>
+        ) : null}
+      </>
+    ) : settingsSection === 'recording' ? (
+      <>
+        <h2>{tDesktop('settings.recording')}</h2>
+        <h3 className="settings-v2__group-title">{tDesktop('settings.audioSource')}</h3>
         <p className="settings-v2__lead">{tDesktop('capture.audioSourceHelp')}</p>
         <div className="settings-v2__group">
           <SettingsRow
@@ -5497,109 +5534,43 @@ useEffect(() => {
             />
           )}
         </div>
-      </>
-    ) : settingsSection === 'appearance' ? (
-      <>
-        <h2>{tDesktop('settings.appearance')}</h2>
-        <p className="settings-v2__lead">{tDesktop('settings.languageLead')}</p>
-        <div className="settings-v2__group">
-          <SettingsRow name="Theme" help="Desktop V2 uses the light appearance." />
-          <SettingsRow name="Text size" help="Applies to captions and reading views." />
-        </div>
-      </>
-    ) : settingsSection === 'account' ? (
-      <>
-        <SettingsPlaceholder
-          title={tDesktop('settings.account')}
-          note="Profile, sign-in methods and sign out."
+
+        <h3 className="settings-v2__group-title">{tDesktop('settings.languageAndCaptions')}</h3>
+        <SettingsLanguagePage
+          preferences={languagePreferences}
+          onPreferenceChange={setLanguagePreference}
+          showHeading={false}
         />
-        <div className="settings-v2__group">
-          <SettingsRow
-            name={tDesktop('settings.account')}
-            help={userEmail ?? undefined}
-            control={
-              showAccountPanel ? (
-                <button type="button" className="v2-btn" onClick={() => setAccountSettingsOpen(true)}>
-                  Open
-                </button>
-              ) : undefined
-            }
-          />
-        </div>
       </>
-    ) : settingsSection === 'planUsage' ? (
+    ) : settingsSection === 'ai' ? (
       <>
-        <SettingsPlaceholder
-          title={tDesktop('settings.planUsage')}
-          note="Your Student Basic plan, usage, and billing."
-        />
-        <div className="settings-v2__group">
-          <SettingsRow
-            name={tDesktop('settings.planUsage')}
-            help="View your plan, usage, and manage billing."
-            control={
-              showAccountPanel ? (
-                <button type="button" className="v2-btn" onClick={() => setBillingPlanOpen(true)}>
-                  Open
-                </button>
-              ) : undefined
-            }
-          />
-        </div>
+        <h2>{tDesktop('settings.ai')}</h2>
+        <AiPreferencesSection allowByok />
       </>
-    ) : settingsSection === 'advancedAi' ? (
-      <>
-        <SettingsPlaceholder
-          title={tDesktop(SETTINGS_PLACEHOLDER_TITLE.advancedAi)}
-          note="Bring your own API key for AI processing, or use the hosted default."
-        />
-        <div className="settings-v2__group">
-          <AiPreferencesSection allowByok />
-        </div>
-      </>
-    ) : settingsSection === 'autoUpdate' ? (
-      <>
-        <SettingsPlaceholder
-          title={tDesktop(SETTINGS_PLACEHOLDER_TITLE.autoUpdate)}
-          note="Youmi Lens checks for updates automatically and never interrupts an active recording."
-        />
-        <div className="settings-v2__group">
-          <UpdaterEntry
-            recordingSafety={{
-              recorderStatus: recorder.status as 'idle' | 'recording' | 'paused',
-              saveInFlight: saveOrFinishBusy,
-              recoveringSession: Boolean(recoveryBusyId),
-            }}
-          />
-        </div>
-      </>
-    ) : settingsSection === 'support' ? (
-      <>
-        <SettingsPlaceholder
-          title={tDesktop(SETTINGS_PLACEHOLDER_TITLE.support)}
-          note="Youmi Lens is available as a free educational tool. Please report issues with recording, live captions, translation, or summaries."
-        />
-        <div className="settings-v2__group">
-          <SettingsRow
-            name="Email support"
-            help="youmilens@gmail.com"
-            control={
-              <button
-                type="button"
-                className="v2-btn"
-                onClick={() => void openExternalContact(SUPPORT_CONTACT_URL)}
-              >
-                Email support
-              </button>
-            }
-          />
-        </div>
-      </>
-    ) : (
-      <SettingsPlaceholder
-        title={tDesktop(SETTINGS_PLACEHOLDER_TITLE[settingsSection])}
-        note="Not migrated to Desktop V2 yet — these controls still live in the previous interface."
+    ) : settingsSection === 'updates' ? (
+      <UpdatesSettingsPage
+        recordingSafety={{
+          recorderStatus: recorder.status as 'idle' | 'recording' | 'paused',
+          saveInFlight: saveOrFinishBusy,
+          recoveringSession: Boolean(recoveryBusyId),
+        }}
       />
+    ) : (
+      <>
+        <h2>{tDesktop('settings.support')}</h2>
+        <div className="settings-v2__group">
+          <SettingsNavRow
+            name={tDesktop('settings.emailSupport')}
+            value="youmilens@gmail.com"
+            onClick={() => void openExternalContact(SUPPORT_CONTACT_URL)}
+          />
+          <SettingsNavRow name={tDesktop('settings.privacyPolicy')} onClick={() => void openExternalUrl(PRIVACY_URL)} />
+          <SettingsNavRow name={tDesktop('settings.termsOfService')} onClick={() => void openExternalUrl(TERMS_URL)} />
+        </div>
+        <div className="settings-v2__group">
+          <SettingsRow name={tDesktop('settings.version')} help={appVersion ? `v${appVersion}` : '—'} />
+        </div>
+      </>
     )
 
   // The recording screen is shared by two branches: the ACTIVE flow
@@ -5759,7 +5730,8 @@ useEffect(() => {
             startRecording()
           }}
           onOpenSettings={() => {
-            setSettingsSection('language')
+            // Language & Captions now lives inside the Recording section.
+            setSettingsSection('recording')
             setWorkspaceView('settings')
           }}
           onChangeCourse={() => setWorkspaceView('courses')}
@@ -6514,6 +6486,7 @@ useEffect(() => {
             setAccountSettingsOpen(false)
             onSignOut?.()
           }}
+          appVersion={appVersion}
         />
       ) : null}
       {showAccountPanel && supabase ? (

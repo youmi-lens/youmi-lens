@@ -37,12 +37,15 @@ const TRANSLATION_OPTIONS: LanguageSelectOption[] = CONTENT_LANGUAGES.map((langu
 export function SettingsLanguagePage({
   preferences,
   onPreferenceChange,
+  showHeading = true,
 }: {
   preferences: LanguagePreferences
   onPreferenceChange: <K extends keyof LanguagePreferences>(
     name: K,
     value: LanguagePreferences[K],
   ) => void
+  /** False when embedded under a section that already has its own heading (Recording). */
+  showHeading?: boolean
 }) {
   const { t } = useLanguagePreferences()
   const statusLabel = (availability: LanguageAvailability) => {
@@ -53,8 +56,12 @@ export function SettingsLanguagePage({
 
   return (
     <>
-      <h2 id="settings-language-title">{t('settings.language')}</h2>
-      <p className="settings-v2__lead">{t('settings.languageLead')}</p>
+      {showHeading ? (
+        <>
+          <h2 id="settings-language-title">{t('settings.language')}</h2>
+          <p className="settings-v2__lead">{t('settings.languageLead')}</p>
+        </>
+      ) : null}
 
       <div className="settings-v2__group">
         <SettingsRow

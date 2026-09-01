@@ -5,6 +5,7 @@
 import type { BillingPlanCode } from '../lib/billing/billingClient'
 import type { BillingHookError } from '../hooks/useBilling'
 import type { BillingState } from '../lib/billing/billingState'
+import type { DesktopI18nKey } from '../lib/desktopI18n'
 
 export const STUDENT_BASIC_MONTHLY_USD = 4.99
 export const STUDENT_BASIC_ANNUAL_USD = 49.99
@@ -101,4 +102,34 @@ export function portalActionLabel(status: BillingState['status'] | string): stri
   if (status === 'past_due') return 'Resolve billing issue'
   if (status === 'expired') return 'Manage billing'
   return 'Manage subscription'
+}
+
+/**
+ * One-line plan summary for a Settings row — presentation only, derived
+ * from the SAME `BillingState` the Billing Plan modal already renders in
+ * full. Never re-derives status/entitlement; only formats it.
+ *
+ * "Student Basic" is the product's plan name and is intentionally never
+ * translated (matches `planLabel` in BillingPlanModal); the trailing status
+ * word is the only part the caller's `t()` translates.
+ */
+export function billingSummaryLabel(state: BillingState, t: (key: DesktopI18nKey) => string): string {
+  switch (state.status) {
+    case 'signed_out':
+      return t('settings.statusSignedOut')
+    case 'loading':
+      return t('settings.statusLoading')
+    case 'unavailable':
+      return t('settings.statusUnavailable')
+    case 'free':
+      return t('settings.statusFree')
+    case 'active':
+      return `Student Basic · ${t('settings.statusActive')}`
+    case 'canceling':
+      return `Student Basic · ${t('settings.statusCanceling')}`
+    case 'past_due':
+      return `Student Basic · ${t('settings.statusPastDue')}`
+    case 'expired':
+      return `Student Basic · ${t('settings.statusExpired')}`
+  }
 }

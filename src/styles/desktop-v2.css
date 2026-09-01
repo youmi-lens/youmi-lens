@@ -480,8 +480,12 @@
 .settings-v2__list h1 { margin-bottom: 16px; font-size: var(--v2-text-lg); }
 .settings-v2__list nav { display: grid; gap: 2px; }
 .settings-v2__list button {
-  min-height: 35px;
-  padding: 7px 10px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  gap: 10px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--v2-radius-xs);
   background: transparent;
@@ -489,15 +493,37 @@
   font-size: var(--v2-text-sm);
   text-align: left;
   cursor: pointer;
+  transition: background var(--v2-dur-micro), color var(--v2-dur-micro);
 }
+.settings-v2__list button svg { width: 16px; height: 16px; flex: 0 0 auto; }
 .settings-v2__list button:hover { background: var(--v2-paper-3); }
+/* Same quiet-tint-plus-edge-marker language as the primary sidebar, one size
+   down — recognizably the same family without competing with it. */
 .settings-v2__list button[aria-current='page'] {
   background: var(--v2-paper-3);
   color: var(--v2-navy);
   font-weight: 650;
 }
+.settings-v2__list button[aria-current='page']::before {
+  position: absolute;
+  inset-block: 7px;
+  inset-inline-start: -10px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--v2-navy);
+  content: '';
+}
 .settings-v2__detail h2 { margin-bottom: 4px; font-size: var(--v2-text-lg); }
 .settings-v2__lead { color: var(--v2-muted); font-size: var(--v2-text-sm); }
+/* A subheading above one group within a section (Recording's "Audio Source" /
+   "Language & Captions") — one step down from the page's own h2. */
+.settings-v2__group-title {
+  margin: 24px 0 8px;
+  color: var(--v2-ink-2);
+  font-size: var(--v2-text-sm);
+  font-weight: 650;
+}
+.settings-v2__group-title:first-of-type { margin-top: 16px; }
 
 .settings-v2__group {
   margin-top: 20px;
@@ -506,6 +532,7 @@
   border-radius: var(--v2-radius-md);
   background: var(--v2-paper);
 }
+.settings-v2__group--padded { padding: 16px; }
 .settings-v2__row {
   display: flex;
   min-height: 67px;             /* 4.2rem */
@@ -521,6 +548,102 @@
 .settings-v2__help { margin-top: 2px; color: var(--v2-faint); font-size: var(--v2-text-xs); }
 .settings-v2__control { flex: 0 0 auto; }
 .settings-v2__note { margin-top: 12px; color: var(--v2-faint); font-size: var(--v2-text-xs); }
+
+/* Whole-row navigation control (the entire row is the click target — no
+   separate "Open" button competing with the row's own name/value). */
+button.settings-v2__row--nav {
+  width: 100%;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+button.settings-v2__row--nav:hover { background: var(--v2-paper-3); }
+button.settings-v2__row--nav:disabled { cursor: default; opacity: .6; }
+.settings-v2__row-trailing { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.settings-v2__chevron { color: var(--v2-faint); font-size: var(--v2-text-lg); line-height: 1; }
+
+/* A plain full-width action row (Sign Out) — same row rhythm, no chevron. */
+button.settings-v2__row--action {
+  width: 100%;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+button.settings-v2__row--action:hover { background: var(--v2-paper-3); }
+button.settings-v2__row--action:disabled { cursor: default; opacity: .6; }
+
+/* Destructive rows/groups (Delete Account) — physically separated (its own
+   group, extra top margin) and visually distinct (existing danger tokens,
+   the same ones the Ready/Failed badges already use). */
+.settings-v2__danger-zone { margin-top: 32px; }
+.settings-v2__group--danger {
+  margin-top: 8px;
+  border-color: var(--v2-danger-ink);
+  background: var(--v2-record-soft);
+}
+.settings-v2__row--danger .settings-v2__name,
+button.settings-v2__row--danger { color: var(--v2-danger-ink); }
+
+/* AI section — Youmi AI vs bring-your-own-key. */
+.settings-v2__ai-option {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+.settings-v2__ai-option + .settings-v2__ai-option { margin-top: 16px; }
+.settings-v2__ai-option-copy { display: block; flex: 1; min-width: 0; }
+.settings-v2__ai-byok-fields { display: grid; gap: 12px; margin-top: 10px; }
+.settings-v2__ai-field { display: block; }
+.settings-v2__ai-field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.settings-v2__ai-field .v2-select { width: 100%; justify-content: flex-start; }
+.settings-v2__ai-key-input { cursor: text; font-family: ui-monospace, monospace; }
+
+/* Updates section. */
+.settings-v2__update-status { display: flex; align-items: center; gap: 8px; }
+.settings-v2__update-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--v2-faint);
+  flex: 0 0 auto;
+}
+.settings-v2__update-dot--actionable { background: var(--v2-navy); }
+.settings-v2__update-dot--error { background: var(--v2-danger-ink); }
+.settings-v2__update-progress {
+  margin-top: 12px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--v2-rule-2);
+  overflow: hidden;
+}
+.settings-v2__update-progress-fill { height: 100%; background: var(--v2-navy); transition: width .2s; }
+.settings-v2__update-error { margin-top: 8px; color: var(--v2-danger-ink); font-size: var(--v2-text-xs); }
+.settings-v2__update-blocked { margin-top: 8px; color: var(--v2-muted); font-size: var(--v2-text-xs); }
+.settings-v2__update-notes {
+  margin-top: 12px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--v2-rule-2);
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-paper-2);
+  color: var(--v2-ink-2);
+  font-size: var(--v2-text-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
 
 /* ── Narrow window: 72px icon rail ───────────────────────────────────────── */
 

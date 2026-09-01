@@ -1,19 +1,64 @@
-import type { ReactNode } from 'react'
+import type { ReactNode, SVGProps } from 'react'
 import { useLanguagePreferences } from '../languagePreferencesContext'
 import type { DesktopI18nKey } from '../lib/desktopI18n'
 import { SETTINGS_SECTIONS, type SettingsSection } from '../lib/settingsSections'
 
 const SECTION_LABEL_KEY: Record<SettingsSection, DesktopI18nKey> = {
-  appearance: 'settings.appearance',
-  capture: 'settings.capture',
-  language: 'settings.language',
-  liveCaptions: 'settings.liveCaptions',
-  dataBackup: 'settings.dataBackup',
-  autoUpdate: 'settings.autoUpdate',
   account: 'settings.account',
-  planUsage: 'settings.planUsage',
-  advancedAi: 'settings.advancedAi',
+  recording: 'settings.recording',
+  ai: 'settings.ai',
+  updates: 'settings.updates',
   support: 'settings.support',
+}
+
+/**
+ * Section icons — same stroke language as `DesktopSidebar`'s `SidebarIcon`
+ * (24x24 viewBox, 1.8 stroke, round caps, currentColor, no fill): a
+ * recognizably related family for the list one level down, not a new
+ * illustration style.
+ */
+function SectionIcon({ name, ...props }: SVGProps<SVGSVGElement> & { name: SettingsSection }) {
+  if (name === 'account') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" {...props}>
+        <circle cx="12" cy="8" r="3.4" />
+        <path d="M5 20c1.2-3.6 4-5.4 7-5.4s5.8 1.8 7 5.4" />
+      </svg>
+    )
+  }
+  if (name === 'recording') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" {...props}>
+        <rect x="9" y="3" width="6" height="11" rx="3" />
+        <path d="M5 12a7 7 0 0 0 14 0M12 19v3" />
+      </svg>
+    )
+  }
+  if (name === 'ai') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" {...props}>
+        <path d="M12 3.5l1.7 4.6 4.6 1.7-4.6 1.7-1.7 4.6-1.7-4.6-4.6-1.7 4.6-1.7z" />
+        <path d="M18.5 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z" />
+      </svg>
+    )
+  }
+  if (name === 'updates') {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" {...props}>
+        <path d="M4 12a8 8 0 0 1 13.66-5.66L20 8" />
+        <path d="M20 4v4h-4" />
+        <path d="M20 12a8 8 0 0 1-13.66 5.66L4 16" />
+        <path d="M4 20v-4h4" />
+      </svg>
+    )
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.2 9.4a2.8 2.8 0 0 1 5.4.9c0 1.8-2.6 2-2.6 3.7" />
+      <path d="M12 17.3v.1" />
+    </svg>
+  )
 }
 
 /**
@@ -48,7 +93,8 @@ export function SettingsLayout({
               aria-current={section === key ? 'page' : undefined}
               onClick={() => onSectionChange(key)}
             >
-              {t(SECTION_LABEL_KEY[key])}
+              <SectionIcon name={key} aria-hidden="true" />
+              <span>{t(SECTION_LABEL_KEY[key])}</span>
             </button>
           ))}
         </nav>
@@ -80,15 +126,64 @@ export function SettingsRow({
 }
 
 /**
- * Placeholder detail for sections whose controls have not been migrated yet.
- * States plainly that the feature still lives in the legacy UI rather than
- * implying it has been rebuilt.
+ * A whole-row navigation control: name on the left, an optional trailing
+ * value + chevron on the right, and the ENTIRE row is the click target —
+ * replaces a generic "Open" button competing with the row's own content.
  */
-export function SettingsPlaceholder({ title, note }: { title: string; note: string }) {
+export function SettingsNavRow({
+  name,
+  value,
+  onClick,
+  disabled,
+  tone = 'default',
+}: {
+  name: string
+  value?: string
+  onClick: () => void
+  disabled?: boolean
+  tone?: 'default' | 'danger'
+}) {
   return (
-    <>
-      <h2>{title}</h2>
-      <p className="settings-v2__lead">{note}</p>
-    </>
+    <button
+      type="button"
+      className={`settings-v2__row settings-v2__row--nav${tone === 'danger' ? ' settings-v2__row--danger' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <span className="settings-v2__name">{name}</span>
+      <span className="settings-v2__row-trailing">
+        {value ? <span className="settings-v2__help">{value}</span> : null}
+        <span className="settings-v2__chevron" aria-hidden="true">
+          ›
+        </span>
+      </span>
+    </button>
+  )
+}
+
+/** A plain full-row action button (Sign Out) — same row rhythm, no chevron/value. */
+export function SettingsActionRow({
+  name,
+  onClick,
+  disabled,
+  busy,
+  tone = 'default',
+}: {
+  name: string
+  onClick: () => void
+  disabled?: boolean
+  busy?: boolean
+  tone?: 'default' | 'danger'
+}) {
+  return (
+    <button
+      type="button"
+      className={`settings-v2__row settings-v2__row--action${tone === 'danger' ? ' settings-v2__row--danger' : ''}`}
+      onClick={onClick}
+      disabled={disabled || busy}
+      aria-busy={busy}
+    >
+      <span className="settings-v2__name">{name}</span>
+    </button>
   )
 }

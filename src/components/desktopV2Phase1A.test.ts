@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { DesktopSidebar, type DesktopPrimaryView } from './DesktopSidebar'
 import { DesktopV2Shell } from './DesktopV2Shell'
 import { RecordHome } from './RecordHome'
+import { AccountSettingsModal } from './AccountSettingsModal'
 import { SettingsLanguagePage } from './SettingsLanguagePage'
 import { SettingsLayout } from './SettingsLayout'
 import { DEFAULT_SETTINGS_SECTION, SETTINGS_SECTIONS } from '../lib/settingsSections'
@@ -253,21 +254,21 @@ describe('Record Home', () => {
 // ── 10 / 11 · Settings ─────────────────────────────────────────────────────
 
 describe('Settings', () => {
-  it('opens on the Settings page itself, not on Language', () => {
-    expect(DEFAULT_SETTINGS_SECTION).toBe('appearance')
-    expect(DEFAULT_SETTINGS_SECTION).not.toBe('language')
+  it('opens on Account — the most immediately useful section — not a section with no real controls', () => {
+    expect(DEFAULT_SETTINGS_SECTION).toBe('account')
+    expect(DEFAULT_SETTINGS_SECTION).not.toBe('appearance')
   })
 
   it('master list is real navigation and marks the open section', () => {
     const html = render(
       createElement(
         SettingsLayout,
-        { section: 'language', onSectionChange: () => undefined },
+        { section: 'recording', onSectionChange: () => undefined },
         null,
       ),
     )
     expect(html.match(/data-section=/g)).toHaveLength(SETTINGS_SECTIONS.length)
-    expect(html).toContain('data-section="language" aria-current="page"')
+    expect(html).toContain('data-section="recording" aria-current="page"')
   })
 
   it('keeps the four language preference fields independent', () => {
@@ -292,6 +293,112 @@ describe('Settings', () => {
     )
     // Unsupported caption/translation options must be disabled, not silently offered.
     expect(html).toContain('disabled')
+  })
+
+  it('renders exactly the 5 approved sections and nothing from the retired 10-section IA', () => {
+    for (const section of SETTINGS_SECTIONS) {
+      const html = render(createElement(SettingsLayout, { section, onSectionChange: () => undefined }, null))
+      expect(html.match(/data-section=/g)).toHaveLength(5)
+      for (const retired of ['appearance', 'capture', 'language', 'liveCaptions', 'dataBackup', 'autoUpdate', 'planUsage', 'advancedAi']) {
+        expect(html).not.toContain(`data-section="${retired}"`)
+      }
+    }
+    expect(SETTINGS_SECTIONS).toEqual(['account', 'recording', 'ai', 'updates', 'support'])
+  })
+
+  it('App.tsx never dispatches to a retired settings section (a stale deep-link would be a broken state)', () => {
+    const retired = ['appearance', 'capture', 'language', 'liveCaptions', 'dataBackup', 'autoUpdate', 'planUsage', 'advancedAi']
+    for (const section of retired) {
+      expect(appSource).not.toContain(`setSettingsSection('${section}')`)
+    }
+  })
+
+  it('App.tsx no longer uses SettingsPlaceholder anywhere (every approved section is fully implemented)', () => {
+    expect(appSource).not.toContain('SettingsPlaceholder')
+  })
+
+  it('Account section wires the identity row to the Account modal and the plan row to the Billing modal, reading real billing state', () => {
+    const accountBranch = appSource.slice(
+      appSource.indexOf("settingsSection === 'account'"),
+      appSource.indexOf("settingsSection === 'recording'"),
+    )
+    expect(accountBranch).toContain('onClick={() => setAccountSettingsOpen(true)}')
+    expect(accountBranch).toContain('onClick={() => setBillingPlanOpen(true)}')
+    expect(accountBranch).toContain('billingSummaryLabel(billing.state, tDesktop)')
+    expect(accountBranch).toContain("tone=\"danger\"")
+  })
+
+  it('Recording section keeps the real audio-source controls and embeds Language & Captions without a duplicate heading', () => {
+    const recordingBranch = appSource.slice(
+      appSource.indexOf("settingsSection === 'recording'"),
+      appSource.indexOf("settingsSection === 'ai'"),
+    )
+    expect(recordingBranch).toContain("setAudioSource('microphone')")
+    expect(recordingBranch).toContain("setAudioSource('system')")
+    expect(recordingBranch).toContain('<SettingsLanguagePage')
+    expect(recordingBranch).toContain('showHeading={false}')
+  })
+
+  it('AI section renders the real AiPreferencesSection with BYOK allowed, not a placeholder', () => {
+    const aiBranch = appSource.slice(
+      appSource.indexOf("settingsSection === 'ai'"),
+      appSource.indexOf("settingsSection === 'updates'"),
+    )
+    expect(aiBranch).toContain('<AiPreferencesSection allowByok />')
+  })
+
+  it('Updates section is driven by UpdatesSettingsPage, not a hardcoded version string', () => {
+    const updatesBranch = appSource.slice(
+      appSource.indexOf("settingsSection === 'updates'"),
+      appSource.indexOf('const recordingScreen ='),
+    )
+    expect(updatesBranch).toContain('<UpdatesSettingsPage')
+    expect(appSource).not.toMatch(/Youmi Lens v0\.1/)
+  })
+
+  it('Support & About exposes Email, Privacy, and Terms via the shared URL constants, plus the canonical app version', () => {
+    const supportBranch = appSource.slice(
+      appSource.indexOf("tDesktop('settings.emailSupport')") - 200,
+      appSource.indexOf('const recordingScreen ='),
+    )
+    expect(supportBranch).toContain('openExternalContact(SUPPORT_CONTACT_URL)')
+    expect(supportBranch).toContain('openExternalUrl(PRIVACY_URL)')
+    expect(supportBranch).toContain('openExternalUrl(TERMS_URL)')
+    expect(supportBranch).toContain("appVersion ? `v${appVersion}` : '—'")
+  })
+})
+
+describe('AccountSettingsModal', () => {
+  const baseProps = {
+    open: true,
+    onClose: () => undefined,
+    supabase: {} as never,
+    userId: 'user-1',
+    accountEmail: 'ayden@example.com',
+    profile: null,
+    onSaved: () => undefined,
+    onSignOut: () => undefined,
+    onAccountDeleted: () => undefined,
+  }
+
+  it('shows the real signed-in email and the canonical runtime version, never the retired hardcoded label', () => {
+    const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '2.3.1' }))
+    expect(html).toContain('ayden@example.com')
+    expect(html).toContain('Youmi Lens v2.3.1')
+    expect(html).not.toMatch(/Youmi Lens v0\.1/)
+  })
+
+  it('falls back to a plain product name when no runtime version is available yet (web/dev)', () => {
+    const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '' }))
+    expect(html).toContain('>Youmi Lens<')
+  })
+
+  it('keeps Delete Account physically separated in its own danger zone and Sign Out available', () => {
+    const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '2.3.1' }))
+    expect(html).toContain('account-settings-modal__danger-section')
+    expect(html).toContain('account-settings-modal__btn--danger')
+    expect(html).toContain('Delete account')
+    expect(html).toContain('Sign out')
   })
 })
 

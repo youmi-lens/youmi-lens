@@ -5,6 +5,7 @@ import {
   canInstallUpdate,
   sanitizeUpdaterError,
 } from './updaterCore'
+import { useAppVersion } from './useAppVersion'
 
 /**
  * In-app updater hook (Phase 2E). Wraps the official Tauri v2
@@ -56,7 +57,7 @@ export interface UseUpdaterResult {
 
 export function useUpdater(recordingSafety: RecordingSafetyState): UseUpdaterResult {
   const [status, setStatus] = useState<UpdaterStatus>('idle')
-  const [currentVersion, setCurrentVersion] = useState('')
+  const currentVersion = useAppVersion()
   const [newVersion, setNewVersion] = useState<string | null>(null)
   const [releaseNotes, setReleaseNotes] = useState<string | null>(null)
   const [progress, setProgress] = useState<number | null>(null)
@@ -73,23 +74,6 @@ export function useUpdater(recordingSafety: RecordingSafetyState): UseUpdaterRes
     mountedRef.current = true
     return () => {
       mountedRef.current = false
-    }
-  }, [])
-
-  // Current version (best-effort) — shown in Settings/About even on web.
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      try {
-        const { getVersion } = await import('@tauri-apps/api/app')
-        const v = await getVersion()
-        if (!cancelled) setCurrentVersion(v)
-      } catch {
-        /* web/dev: version comes from the build; leave empty */
-      }
-    })()
-    return () => {
-      cancelled = true
     }
   }, [])
 

@@ -1,17 +1,21 @@
 import { describe, expect, it } from 'vitest'
 import type { BillingState } from '../lib/billing/billingState'
+import { translateDesktop } from '../lib/desktopI18n'
 import {
   ANNUAL_SAVINGS_COPY,
   STUDENT_BASIC_ANNUAL_SAVINGS_USD,
   STUDENT_BASIC_ANNUAL_USD,
   STUDENT_BASIC_MONTHLY_USD,
   STUDENT_BASIC_TWELVE_MONTHLY_USD,
+  billingSummaryLabel,
   canOpenPortal,
   canStartCheckout,
   formatCheckoutError,
   formatPortalError,
   portalActionLabel,
 } from './billingCheckoutCopy'
+
+const t = (key: Parameters<typeof translateDesktop>[1]) => translateDesktop('en', key)
 
 const emptyQuota = {
   monthlyMinutesLimit: null,
@@ -138,5 +142,73 @@ describe('billingCheckoutCopy', () => {
     expect(portalActionLabel('canceling')).toBe('Manage subscription')
     expect(portalActionLabel('past_due')).toBe('Resolve billing issue')
     expect(portalActionLabel('expired')).toBe('Manage billing')
+  })
+})
+
+/**
+ * Settings' Account row shows a one-line plan summary. This is presentation
+ * ONLY over the exact same `BillingState` the Billing Plan modal already
+ * renders in full — these tests exercise the real function against every
+ * status the state machine can produce, proving the Settings row can never
+ * show a status the modal disagrees with.
+ */
+describe('billingSummaryLabel — Settings Account row plan summary', () => {
+  it('Free shows just "Free", no product name prefix', () => {
+    expect(billingSummaryLabel({ status: 'free', quota: emptyQuota }, t)).toBe('Free')
+  })
+
+  it('Active shows "Student Basic · Active"', () => {
+    expect(
+      billingSummaryLabel(
+        { status: 'active', planCode: 'student_basic_monthly', interval: 'monthly', currentPeriodEnd: null, manageable: true, quota: emptyQuota },
+        t,
+      ),
+    ).toBe('Student Basic · Active')
+  })
+
+  it('Canceling shows "Student Basic · Canceling"', () => {
+    expect(
+      billingSummaryLabel(
+        { status: 'canceling', planCode: 'student_basic_monthly', interval: 'monthly', accessThrough: null, manageable: true, quota: emptyQuota },
+        t,
+      ),
+    ).toBe('Student Basic · Canceling')
+  })
+
+  it('past_due shows "Student Basic · Payment issue" — this is the Apple/legacy-active-but-unmanageable case too', () => {
+    expect(
+      billingSummaryLabel(
+        {
+          status: 'past_due',
+          planCode: 'student_basic_monthly',
+          interval: 'monthly',
+          currentPeriodEnd: null,
+          graceUntil: null,
+          accessActive: true,
+          manageable: false,
+          quota: emptyQuota,
+        },
+        t,
+      ),
+    ).toBe('Student Basic · Payment issue')
+  })
+
+  it('expired shows "Student Basic · Inactive"', () => {
+    expect(
+      billingSummaryLabel(
+        { status: 'expired', planCode: null, interval: null, currentPeriodEnd: null, manageable: false, quota: emptyQuota },
+        t,
+      ),
+    ).toBe('Student Basic · Inactive')
+  })
+
+  it('loading and unavailable never claim a plan they have not confirmed', () => {
+    expect(billingSummaryLabel({ status: 'loading' }, t)).toBe('Loading…')
+    expect(billingSummaryLabel({ status: 'unavailable', reason: 'x', retryable: true }, t)).toBe('Unavailable')
+  })
+
+  it('never invents "Student Basic" for a Free or unresolved state', () => {
+    expect(billingSummaryLabel({ status: 'free', quota: emptyQuota }, t)).not.toContain('Student Basic')
+    expect(billingSummaryLabel({ status: 'loading' }, t)).not.toContain('Student Basic')
   })
 })
