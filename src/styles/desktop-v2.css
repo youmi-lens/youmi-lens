@@ -535,11 +535,11 @@
 .settings-v2__group--padded { padding: 16px; }
 .settings-v2__row {
   display: flex;
-  min-height: 67px;             /* 4.2rem */
+  min-height: 56px;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 13px 16px;
+  padding: 11px 16px;
   border-bottom: 1px solid var(--v2-rule-2);
 }
 .settings-v2__row:last-child { border-bottom: 0; }
@@ -588,16 +588,83 @@ button.settings-v2__row--action:disabled { cursor: default; opacity: .6; }
 .settings-v2__row--danger .settings-v2__name,
 button.settings-v2__row--danger { color: var(--v2-danger-ink); }
 
-/* AI section — Youmi AI vs bring-your-own-key. */
+/* Whole-row radio control (Recording's Audio Source) — a real <input
+   type="radio"> so the control communicates mutual exclusivity natively. */
+label.settings-v2__row--radio { cursor: pointer; }
+label.settings-v2__row--radio-disabled { cursor: default; opacity: .6; }
+.settings-v2__row--radio input[type='radio'] {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  accent-color: var(--v2-navy);
+  cursor: pointer;
+}
+.settings-v2__row--radio-disabled input[type='radio'] { cursor: default; }
+
+/* Compact two-way segmented control (Language mode) — replaces a dropdown for
+   a binary choice, matching the row's trailing-control column. */
+.settings-v2__segmented {
+  display: inline-flex;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-pill);
+  padding: 2px;
+  gap: 2px;
+}
+.settings-v2__segmented-btn {
+  border: 0;
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: var(--v2-radius-pill);
+  font: inherit;
+  font-size: var(--v2-text-sm);
+  font-weight: 600;
+  color: var(--v2-muted);
+  cursor: pointer;
+}
+.settings-v2__segmented-btn--selected { background: var(--v2-navy); color: var(--v2-navy-ink); }
+
+/* AI section — Youmi AI vs bring-your-own-key. Kept to a comfortable reading
+   width so the copy doesn't stretch across the full Settings detail column. */
+.settings-v2__ai-content { max-width: 480px; }
 .settings-v2__ai-option {
   display: flex;
   gap: 12px;
   align-items: flex-start;
   cursor: pointer;
 }
-.settings-v2__ai-option + .settings-v2__ai-option { margin-top: 16px; }
+.settings-v2__ai-option + .settings-v2__ai-option {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--v2-rule-2);
+}
 .settings-v2__ai-option-copy { display: block; flex: 1; min-width: 0; }
-.settings-v2__ai-byok-fields { display: grid; gap: 12px; margin-top: 10px; }
+/* Each piece of an option's copy is its own line — QA15 rendered the title
+   and description as adjacent inline elements (a <strong> next to a <span>),
+   which is what let them visually run together / collide with the radio at
+   narrower widths. Block display gives each its own line unconditionally. */
+.settings-v2__ai-option-title {
+  display: block;
+  font-size: var(--v2-text-sm);
+  font-weight: 650;
+  color: var(--v2-ink-2);
+}
+.settings-v2__ai-option-badge {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--v2-text-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--v2-navy);
+}
+.settings-v2__ai-option-desc {
+  display: block;
+  margin-top: 4px;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+  line-height: 1.5;
+}
+.settings-v2__ai-byok-fields { display: grid; gap: 12px; margin-top: 12px; }
 .settings-v2__ai-field { display: block; }
 .settings-v2__ai-field-label {
   display: block;

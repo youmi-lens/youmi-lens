@@ -1,10 +1,17 @@
-import { createElement } from 'react'
+import { readFileSync } from 'node:fs'
+import { createElement, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BillingApiError } from '../lib/billing/billingClient'
 import type { UseBillingResult } from '../hooks/useBilling'
 import { createBillingController } from '../hooks/useBilling'
 import type { BillingState, NormalizedQuota } from '../lib/billing/billingState'
+import {
+  LanguagePreferencesContext,
+  type LanguagePreferencesContextValue,
+} from '../languagePreferencesContext'
+import { DEFAULT_LANGUAGE_PREFERENCES } from '../lib/languagePreferences'
+import { translateDesktop } from '../lib/desktopI18n'
 import {
   ANNUAL_SAVINGS_COPY,
   STUDENT_BASIC_ANNUAL_SAVINGS_USD,
@@ -22,6 +29,8 @@ import {
 } from './billingPlanModalChrome'
 
 vi.mock('./BillingPlanModal.css', () => ({}))
+
+const billingPlanModalSrc = readFileSync(new URL('./BillingPlanModal.tsx', import.meta.url), 'utf8')
 
 const emptyQuota: NormalizedQuota = {
   monthlyMinutesLimit: null,
@@ -63,15 +72,28 @@ function mockBilling(state: BillingState, over: Partial<UseBillingResult> = {}):
   }
 }
 
+const languageContextValue: LanguagePreferencesContextValue = {
+  preferences: DEFAULT_LANGUAGE_PREFERENCES,
+  setPreference: () => undefined,
+  t: (key, vars) => translateDesktop('en', key, vars),
+}
+
+/** The usage section (QA16) reads Desktop i18n, so every render needs the provider. */
+function withLanguageContext(node: ReactNode): ReactNode {
+  return createElement(LanguagePreferencesContext.Provider, { value: languageContextValue }, node)
+}
+
 function renderContent(
   state: BillingState,
   extra: Partial<Parameters<typeof BillingPlanContent>[0]> = {},
 ): string {
-  return renderToStaticMarkup(createElement(BillingPlanContent, { state, ...extra }))
+  return renderToStaticMarkup(withLanguageContext(createElement(BillingPlanContent, { state, ...extra })))
 }
 
 function renderModal(billing: UseBillingResult, onClose = vi.fn()): string {
-  return renderToStaticMarkup(createElement(BillingPlanModal, { open: true, onClose, billing }))
+  return renderToStaticMarkup(
+    withLanguageContext(createElement(BillingPlanModal, { open: true, onClose, billing })),
+  )
 }
 
 afterEach(() => {
@@ -472,6 +494,51 @@ describe('BillingPlanContent usage', () => {
     expect(html).toContain('6')
     expect(html).toContain('10 per day')
     expect(html).not.toContain('0 used today · 10 / day')
+  })
+
+  it('renders used / total / remaining for Study Minutes and Recordings from real quota fields', () => {
+    const html = renderContent({
+      status: 'free',
+      quota: {
+        monthlyMinutesLimit: 300,
+        minutesUsed: 240,
+        minutesRemaining: 60,
+        maxRecordingsPerDay: 2,
+        recordingsUsedToday: 1,
+        recordingsRemainingToday: 1,
+        maxStudyTasksPerDay: 2,
+        studyTasksUsedToday: 1,
+        studyTasksRemainingToday: 1,
+      },
+    })
+    expect(html).toContain('240 / 300 min')
+    expect(html).toContain('60 min remaining')
+    expect(html).toContain('1 / 2 today')
+    expect(html).toContain('1 remaining')
+  })
+
+  it('shows a neutral tone well under the limit, a warning tone near it, and an exhausted tone at/over it', () => {
+    const normal = renderContent({ status: 'free', quota: { ...emptyQuota, monthlyMinutesLimit: 300, minutesUsed: 100 } })
+    const warning = renderContent({ status: 'free', quota: { ...emptyQuota, monthlyMinutesLimit: 300, minutesUsed: 250 } })
+    const exhausted = renderContent({ status: 'free', quota: { ...emptyQuota, monthlyMinutesLimit: 300, minutesUsed: 300 } })
+    expect(normal).not.toContain('billing-plan-modal__usage-bar--warning')
+    expect(normal).not.toContain('billing-plan-modal__usage-bar--exhausted')
+    expect(warning).toContain('billing-plan-modal__usage-bar--warning')
+    expect(exhausted).toContain('billing-plan-modal__usage-bar--exhausted')
+  })
+
+  it('never derives a quota number from the Student Basic upgrade benefits copy', () => {
+    // The 600/6/10 benefits list and the usage numbers happen to match today
+    // because the fixture's real quota values equal the plan's real limits —
+    // proving there is no separate, hardcoded path is a source-level check.
+    const usageSectionSrc = billingPlanModalSrc.slice(
+      billingPlanModalSrc.indexOf('function QuotaUsageRows'),
+      billingPlanModalSrc.indexOf('function StatusPill'),
+    )
+    expect(usageSectionSrc).not.toContain('STUDENT_BASIC_BENEFITS')
+    expect(usageSectionSrc).toContain('quota.monthlyMinutesLimit')
+    expect(usageSectionSrc).toContain('quota.maxRecordingsPerDay')
+    expect(usageSectionSrc).toContain('quota.maxStudyTasksPerDay')
   })
 })
 

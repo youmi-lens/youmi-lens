@@ -69,6 +69,8 @@ export function useUpdater(recordingSafety: RecordingSafetyState): UseUpdaterRes
   const mountedRef = useRef(true)
   const safetyRef = useRef(recordingSafety)
   safetyRef.current = recordingSafety
+  const statusRef = useRef(status)
+  statusRef.current = status
 
   useEffect(() => {
     mountedRef.current = true
@@ -176,10 +178,18 @@ export function useUpdater(recordingSafety: RecordingSafetyState): UseUpdaterRes
     setStatus(updateRef.current ? 'available' : 'idle')
   }, [])
 
-  // One bounded, non-blocking check shortly after startup (Tauri only).
+  // One bounded, non-blocking check shortly after startup (Tauri only). Guarded
+  // on the CURRENT status so this silent, failure-swallowing check can never
+  // clobber a definitive result some other caller (e.g. the Settings page,
+  // which always runs its own real check on open) already reached — without
+  // this guard, a silent check that fires after that real check already
+  // resolved could reset a shown 'up-to-date'/'available' state back to
+  // 'idle' on any transient hiccup, flickering the UI backwards.
   useEffect(() => {
     if (!isTauriShell()) return
-    const t = window.setTimeout(() => void check({ silent: true }), 2500)
+    const t = window.setTimeout(() => {
+      if (statusRef.current === 'idle') void check({ silent: true })
+    }, 2500)
     return () => window.clearTimeout(t)
   }, [check])
 

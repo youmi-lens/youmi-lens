@@ -1,6 +1,6 @@
 /* Billing / Plan modal — Desktop V2 surface, reusing desktop-v2-tokens.css. */
 
-.desktop-v2 .billing-plan-modal__overlay {
+.billing-plan-modal__overlay {
   position: fixed;
   inset: 0;
   z-index: 2000;
@@ -14,20 +14,26 @@
   overscroll-behavior: contain;
 }
 
-.desktop-v2 .billing-plan-modal__dialog {
+/* Centered desktop dialog — same family as the Account modal, wider because
+   Billing needs room for the usage rows and the plan/interval picker to sit
+   side by side without cramping. QA15's dialog never actually rendered these
+   rules (see the removed `.desktop-v2 ` ancestor prefix above the Settings
+   section of this file's history) — that, not the max-width value itself,
+   was why it looked like a narrow full-height mobile sheet. */
+.billing-plan-modal__dialog {
   width: 100%;
-  max-width: 480px;
+  max-width: min(92vw, 760px);
   border: 1px solid var(--v2-rule);
   background: var(--v2-paper);
   border-radius: var(--v2-radius-lg);
   box-shadow: 0 18px 48px rgba(6, 27, 52, 0.18);
-  max-height: 90vh;
+  max-height: 83vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
-.desktop-v2 .billing-plan-modal__titlebar {
+.billing-plan-modal__titlebar {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -36,14 +42,14 @@
   border-bottom: 1px solid var(--v2-rule);
 }
 
-.desktop-v2 .billing-plan-modal__title {
+.billing-plan-modal__title {
   margin: 0;
   font-size: 1rem;
   font-weight: 700;
   color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__close {
+.billing-plan-modal__close {
   flex-shrink: 0;
   background: transparent;
   border: none;
@@ -55,12 +61,12 @@
   border-radius: var(--v2-radius-xs);
 }
 
-.desktop-v2 .billing-plan-modal__close:focus-visible {
+.billing-plan-modal__close:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--v2-paper), 0 0 0 4px var(--v2-focus);
 }
 
-.desktop-v2 .billing-plan-modal__btn {
+.billing-plan-modal__btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -74,45 +80,45 @@
   border: 1px solid transparent;
 }
 
-.desktop-v2 .billing-plan-modal__btn:disabled {
+.billing-plan-modal__btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.desktop-v2 .billing-plan-modal__btn--primary {
+.billing-plan-modal__btn--primary {
   background: var(--v2-navy);
   color: var(--v2-navy-ink);
   border-color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__btn--primary:hover:not(:disabled) {
+.billing-plan-modal__btn--primary:hover:not(:disabled) {
   background: var(--v2-navy-deep);
 }
 
-.desktop-v2 .billing-plan-modal__btn--secondary {
+.billing-plan-modal__btn--secondary {
   background: var(--v2-paper);
   color: var(--v2-ink-2);
   border-color: var(--v2-rule);
 }
 
-.desktop-v2 .billing-plan-modal__btn--secondary:hover:not(:disabled) {
+.billing-plan-modal__btn--secondary:hover:not(:disabled) {
   background: var(--v2-paper-2);
 }
 
-.desktop-v2 .billing-plan-modal__body {
+.billing-plan-modal__body {
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 20px 24px 24px;
 }
 
-.desktop-v2 .billing-plan-modal__panel {
+.billing-plan-modal__panel {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.desktop-v2 .billing-plan-modal__eyebrow {
+.billing-plan-modal__eyebrow {
   margin: 0 0 4px;
   font-size: var(--v2-text-xs);
   letter-spacing: 0.06em;
@@ -120,28 +126,28 @@
   color: var(--v2-muted);
 }
 
-.desktop-v2 .billing-plan-modal__headline {
+.billing-plan-modal__headline {
   margin: 0;
   font-size: 1.125rem;
   font-weight: 700;
   color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__copy {
+.billing-plan-modal__copy {
   margin: 0;
   font-size: var(--v2-text-sm);
   line-height: 1.55;
   color: var(--v2-muted);
 }
 
-.desktop-v2 .billing-plan-modal__header-row {
+.billing-plan-modal__header-row {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.desktop-v2 .billing-plan-modal__pill {
+.billing-plan-modal__pill {
   display: inline-flex;
   align-items: center;
   padding: 0.18rem 0.6rem;
@@ -154,36 +160,35 @@
   white-space: nowrap;
 }
 
-.desktop-v2 .billing-plan-modal__pill--ok {
+.billing-plan-modal__pill--ok {
   background: var(--v2-success-soft);
   border-color: transparent;
   color: var(--v2-success-ink);
 }
 
-.desktop-v2 .billing-plan-modal__pill--warn {
+.billing-plan-modal__pill--warn {
   background: var(--v2-warning-soft);
   border-color: transparent;
   color: var(--v2-warning-ink);
 }
 
-.desktop-v2 .billing-plan-modal__pill--danger {
+.billing-plan-modal__pill--danger {
   background: var(--v2-record-soft);
   border-color: transparent;
   color: var(--v2-danger-ink);
 }
 
-.desktop-v2 .billing-plan-modal__pill-text::before {
+.billing-plan-modal__pill-text::before {
   /* Status also conveyed by text label; color is secondary. */
   content: none;
 }
 
-.desktop-v2 .billing-plan-modal__meta {
+.billing-plan-modal__meta {
   display: grid;
   gap: 8px;
 }
 
-.desktop-v2 .billing-plan-modal__meta-row,
-.desktop-v2 .billing-plan-modal__usage-row {
+.billing-plan-modal__meta-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
@@ -192,26 +197,24 @@
   line-height: 1.55;
 }
 
-.desktop-v2 .billing-plan-modal__meta-label,
-.desktop-v2 .billing-plan-modal__usage-label {
+.billing-plan-modal__meta-label {
   color: var(--v2-muted);
 }
 
-.desktop-v2 .billing-plan-modal__meta-value,
-.desktop-v2 .billing-plan-modal__usage-value {
+.billing-plan-modal__meta-value {
   color: var(--v2-ink-2);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.desktop-v2 .billing-plan-modal__section-title {
+.billing-plan-modal__section-title {
   margin: 0;
   font-size: var(--v2-text-sm);
   font-weight: 700;
   color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__preview {
+.billing-plan-modal__preview {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -221,13 +224,13 @@
   background: var(--v2-paper-2);
 }
 
-.desktop-v2 .billing-plan-modal__interval-toggle {
+.billing-plan-modal__interval-toggle {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
 
-.desktop-v2 .billing-plan-modal__interval-btn {
+.billing-plan-modal__interval-btn {
   appearance: none;
   border: 1px solid var(--v2-rule);
   background: var(--v2-paper);
@@ -246,60 +249,60 @@
   text-align: left;
 }
 
-.desktop-v2 .billing-plan-modal__interval-btn:disabled {
+.billing-plan-modal__interval-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
-.desktop-v2 .billing-plan-modal__interval-name {
+.billing-plan-modal__interval-name {
   font-weight: 650;
   color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__interval-price {
+.billing-plan-modal__interval-price {
   font-weight: 500;
   color: var(--v2-muted);
   font-variant-numeric: tabular-nums;
 }
 
-.desktop-v2 .billing-plan-modal__interval-btn:focus-visible {
+.billing-plan-modal__interval-btn:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--v2-paper), 0 0 0 4px var(--v2-focus);
 }
 
-.desktop-v2 .billing-plan-modal__interval-btn--selected {
+.billing-plan-modal__interval-btn--selected {
   border-color: var(--v2-navy);
   background: rgba(11, 31, 59, 0.06);
   color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__savings {
+.billing-plan-modal__savings {
   margin: 0;
   font-size: var(--v2-text-sm);
   line-height: 1.55;
   color: var(--v2-navy);
 }
 
-.desktop-v2 .billing-plan-modal__upgrade {
+.billing-plan-modal__upgrade {
   width: 100%;
 }
 
-.desktop-v2 .billing-plan-modal__manage {
+.billing-plan-modal__manage {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding-top: 4px;
 }
 
-.desktop-v2 .billing-plan-modal__manage-btn {
+.billing-plan-modal__manage-btn {
   width: 100%;
 }
 
-.desktop-v2 .billing-plan-modal__checkout-note {
+.billing-plan-modal__checkout-note {
   padding-top: 2px;
 }
 
-.desktop-v2 .billing-plan-modal__benefits {
+.billing-plan-modal__benefits {
   margin: 0;
   padding-left: 1.1rem;
   color: var(--v2-ink-2);
@@ -307,55 +310,103 @@
   line-height: 1.55;
 }
 
-.desktop-v2 .billing-plan-modal__footnote {
+.billing-plan-modal__footnote {
   margin: 0;
   font-size: var(--v2-text-xs);
   color: var(--v2-muted);
   line-height: 1.5;
 }
 
-.desktop-v2 .billing-plan-modal__usage {
+.billing-plan-modal__usage {
   display: grid;
-  gap: 10px;
+  gap: 16px;
   padding-top: 4px;
   border-top: 1px solid var(--v2-rule);
 }
 
-.desktop-v2 .billing-plan-modal__skeleton {
+.billing-plan-modal__usage-metric {
+  display: grid;
+  gap: 2px;
+}
+
+.billing-plan-modal__usage-label {
+  font-size: var(--v2-text-sm);
+  font-weight: 600;
+  color: var(--v2-ink-2);
+}
+
+.billing-plan-modal__usage-summary {
+  font-size: var(--v2-text-sm);
+  color: var(--v2-ink-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.billing-plan-modal__usage-remaining {
+  font-size: var(--v2-text-xs);
+  color: var(--v2-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.billing-plan-modal__usage-bar {
+  margin-top: 4px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--v2-rule-2);
+  overflow: hidden;
+}
+
+.billing-plan-modal__usage-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.2s;
+  background: var(--v2-navy);
+}
+
+.billing-plan-modal__usage-bar--warning .billing-plan-modal__usage-bar-fill {
+  background: var(--v2-warning-ink);
+}
+
+.billing-plan-modal__usage-bar--exhausted {
+  background: var(--v2-record-soft);
+}
+
+.billing-plan-modal__usage-bar--exhausted .billing-plan-modal__usage-bar-fill {
+  background: var(--v2-danger-ink);
+}
+
+.billing-plan-modal__skeleton {
   display: grid;
   gap: 10px;
 }
 
-.desktop-v2 .billing-plan-modal__skeleton-line {
+.billing-plan-modal__skeleton-line {
   height: 12px;
   border-radius: var(--v2-radius-xs);
   background: linear-gradient(90deg, var(--v2-rule) 0%, var(--v2-paper-2) 50%, var(--v2-rule) 100%);
   background-size: 200% 100%;
 }
 
-.desktop-v2 .billing-plan-modal__skeleton-line--short {
+.billing-plan-modal__skeleton-line--short {
   width: 55%;
 }
 
-.desktop-v2 .billing-plan-modal__action-error {
+.billing-plan-modal__action-error {
   margin: 12px 0 0;
   color: var(--v2-danger-ink);
   font-size: var(--v2-text-sm);
 }
 
 @media (max-width: 520px) {
-  .desktop-v2 .billing-plan-modal__interval-toggle {
+  .billing-plan-modal__interval-toggle {
     grid-template-columns: 1fr;
   }
 
-  .desktop-v2 .billing-plan-modal__usage-row,
-  .desktop-v2 .billing-plan-modal__meta-row {
+  .billing-plan-modal__meta-row {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  .desktop-v2 .billing-plan-modal__meta-value,
-  .desktop-v2 .billing-plan-modal__usage-value {
+  .billing-plan-modal__meta-value {
     text-align: left;
   }
 }

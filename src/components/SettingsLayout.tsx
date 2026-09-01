@@ -161,6 +161,47 @@ export function SettingsNavRow({
   )
 }
 
+/**
+ * A whole-row radio control for a small set of MUTUALLY EXCLUSIVE choices
+ * (e.g. Recording's Audio Source). Renders a real `<input type="radio">` so
+ * the control communicates its own semantics natively, rather than a plain
+ * button standing in for one.
+ */
+export function SettingsRadioRow({
+  name,
+  help,
+  checked,
+  onSelect,
+  disabled,
+  groupName,
+}: {
+  name: string
+  help?: string
+  checked: boolean
+  onSelect: () => void
+  disabled?: boolean
+  /** `name` attribute shared by every radio in the group. */
+  groupName: string
+}) {
+  return (
+    <label className={`settings-v2__row settings-v2__row--radio${disabled ? ' settings-v2__row--radio-disabled' : ''}`}>
+      <span className="settings-v2__row-copy">
+        <span className="settings-v2__name">{name}</span>
+        {help ? <span className="settings-v2__help">{help}</span> : null}
+      </span>
+      <input
+        type="radio"
+        name={groupName}
+        checked={checked}
+        disabled={disabled}
+        onChange={() => {
+          if (!disabled) onSelect()
+        }}
+      />
+    </label>
+  )
+}
+
 /** A plain full-row action button (Sign Out) — same row rhythm, no chevron/value. */
 export function SettingsActionRow({
   name,

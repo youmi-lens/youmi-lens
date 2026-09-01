@@ -27,6 +27,9 @@ import { translateDesktop } from '../lib/desktopI18n'
 const appSource = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8')
 const v2Css = readFileSync(new URL('../styles/desktop-v2.css', import.meta.url), 'utf8')
 const v2Tokens = readFileSync(new URL('../styles/desktop-v2-tokens.css', import.meta.url), 'utf8')
+const accountModalCss = readFileSync(new URL('./AccountSettingsModal.css', import.meta.url), 'utf8')
+const billingModalCss = readFileSync(new URL('./BillingPlanModal.css', import.meta.url), 'utf8')
+const accountModalSrc = readFileSync(new URL('./AccountSettingsModal.tsx', import.meta.url), 'utf8')
 
 const contextValue: LanguagePreferencesContextValue = {
   preferences: DEFAULT_LANGUAGE_PREFERENCES,
@@ -281,7 +284,25 @@ describe('Settings', () => {
     for (const label of ['App language', 'Caption language', 'Translation language', 'Language mode']) {
       expect(html).toContain(label)
     }
-    expect(html.match(/<select/g)).toHaveLength(4)
+    // App/Caption/Translation stay real <select> dropdowns; Language mode
+    // (QA16) is a two-way segmented control instead of a third-option-less
+    // dropdown, so it is no longer one of the <select> elements.
+    expect(html.match(/<select/g)).toHaveLength(3)
+    expect(html).toContain('settings-v2__segmented')
+    expect(html).toContain('Captions only')
+    expect(html).toContain('Bilingual')
+  })
+
+  it('language row values are not doubly labelled ("App language English · Available")', () => {
+    const html = render(
+      createElement(SettingsLanguagePage, {
+        preferences: DEFAULT_LANGUAGE_PREFERENCES,
+        onPreferenceChange: () => undefined,
+      }),
+    )
+    // The selected/available option's closed-control text must not repeat
+    // "· Available" — that was QA15's redundant selected-value formatting.
+    expect(html).not.toContain('· Available')
   })
 
   it('does not claim unsupported languages are live', () => {
@@ -384,8 +405,12 @@ describe('AccountSettingsModal', () => {
   it('shows the real signed-in email and the canonical runtime version, never the retired hardcoded label', () => {
     const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '2.3.1' }))
     expect(html).toContain('ayden@example.com')
-    expect(html).toContain('Youmi Lens v2.3.1')
+    // QA16: a quiet "About" line, "Youmi Lens {version}" — no "v" prefix
+    // (matches Support & About's own "v{version}" convention being dropped
+    // here deliberately per the approved copy).
+    expect(html).toContain('Youmi Lens 2.3.1')
     expect(html).not.toMatch(/Youmi Lens v0\.1/)
+    expect(html).not.toContain('Youmi Lens v2.3.1')
   })
 
   it('falls back to a plain product name when no runtime version is available yet (web/dev)', () => {
@@ -399,6 +424,70 @@ describe('AccountSettingsModal', () => {
     expect(html).toContain('account-settings-modal__btn--danger')
     expect(html).toContain('Delete account')
     expect(html).toContain('Sign out')
+  })
+
+  it('no longer shows the long early-build/beta explanation — Support & About owns that copy now', () => {
+    const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '2.3.1' }))
+    expect(html).not.toContain('This is an early Youmi Lens build')
+    expect(html).toContain('About')
+  })
+
+  it('the desktop footer separates Sign out from Cancel/Save changes (never three stacked full-width buttons)', () => {
+    const html = render(createElement(AccountSettingsModal, { ...baseProps, appVersion: '2.3.1' }))
+    expect(html).toContain('account-settings-modal__footer-trailing')
+    // Sign out is a footer child but NOT inside the trailing (Cancel/Save) group.
+    const footer = html.slice(html.indexOf('account-settings-modal__footer"'))
+    const trailingStart = footer.indexOf('account-settings-modal__footer-trailing')
+    expect(footer.slice(0, trailingStart)).toContain('Sign out')
+  })
+
+  it('QA15 root cause: every dialog rule is no longer scoped behind a non-matching ".desktop-v2 " ancestor prefix', () => {
+    // The overlay carries the `.desktop-v2` class on ITSELF, not as an
+    // ancestor of these rules — a descendant-combinator selector here can
+    // never match. This is why the dialog rendered as an unstyled, narrow,
+    // full-height block instead of a centered desktop dialog. (Comments in
+    // this file quote that old selector as prose, so strip comments first.)
+    const rulesOnly = accountModalCss.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(rulesOnly).not.toContain('.desktop-v2 .account-settings-modal__')
+    expect(rulesOnly).toContain('.account-settings-modal__dialog')
+  })
+
+  it('is sized and centered as a desktop dialog, not a narrow full-height drawer', () => {
+    expect(accountModalCss).toMatch(/\.account-settings-modal__overlay\s*{[^}]*align-items:\s*center/)
+    expect(accountModalCss).toMatch(/\.account-settings-modal__overlay\s*{[^}]*justify-content:\s*center/)
+    expect(accountModalCss).toMatch(/\.account-settings-modal__dialog\s*{[^}]*max-width:\s*min\(92vw,\s*680px\)/)
+    expect(accountModalCss).toMatch(/\.account-settings-modal__dialog\s*{[^}]*max-height:\s*80vh/)
+  })
+
+  it('Save/Sign out/Delete Account keep their exact protected implementations — only presentation moved', () => {
+    expect(accountModalSrc).toContain('upsertProfileUsername(supabase, userId')
+    expect(accountModalSrc).toContain('fetchProfile(supabase, userId)')
+    expect(accountModalSrc).toContain('onSaved(row)')
+    expect(accountModalSrc).toContain('Promise.resolve(onSignOut())')
+    expect(accountModalSrc).toContain("window.confirm(")
+    expect(accountModalSrc.match(/window\.confirm\(/g)?.length).toBe(2) // double confirmation, unchanged
+    expect(accountModalSrc).toContain('await deleteAccount()')
+    expect(accountModalSrc).toContain('onAccountDeleted()')
+  })
+})
+
+describe('BillingPlanModal geometry — QA16', () => {
+  it('QA15 root cause: every dialog rule is no longer scoped behind a non-matching ".desktop-v2 " ancestor prefix', () => {
+    const rulesOnly = billingModalCss.replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(rulesOnly).not.toContain('.desktop-v2 .billing-plan-modal__')
+    expect(rulesOnly).toContain('.billing-plan-modal__dialog')
+  })
+
+  it('is sized and centered as a desktop dialog from the same family as the Account modal', () => {
+    expect(billingModalCss).toMatch(/\.billing-plan-modal__overlay\s*{[^}]*align-items:\s*center/)
+    expect(billingModalCss).toMatch(/\.billing-plan-modal__overlay\s*{[^}]*justify-content:\s*center/)
+    expect(billingModalCss).toMatch(/\.billing-plan-modal__dialog\s*{[^}]*max-width:\s*min\(92vw,\s*760px\)/)
+    expect(billingModalCss).toMatch(/\.billing-plan-modal__dialog\s*{[^}]*max-height:\s*83vh/)
+  })
+
+  it('has a semantic near-limit/exhausted progress-bar tone class for each state', () => {
+    expect(billingModalCss).toContain('billing-plan-modal__usage-bar--warning')
+    expect(billingModalCss).toContain('billing-plan-modal__usage-bar--exhausted')
   })
 })
 

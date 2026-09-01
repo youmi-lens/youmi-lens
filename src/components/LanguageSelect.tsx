@@ -34,7 +34,12 @@ export function LanguageSelect({
             value={option.value}
             disabled={option.availability !== 'available'}
           >
-            {option.label} · {statusLabel(option.availability)}
+            {/* Only a DISABLED option needs its status spelled out (it explains why
+                the option can't be picked). The closed control can only ever show
+                the selected — necessarily available — option's text, so appending
+                "· Available" there is pure noise: it repeats the fact that this
+                choice is active without adding information. */}
+            {option.availability === 'available' ? option.label : `${option.label} · ${statusLabel(option.availability)}`}
           </option>
         ))}
       </select>

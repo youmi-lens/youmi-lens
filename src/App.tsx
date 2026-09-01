@@ -235,7 +235,7 @@ import { useCloudLibraryRealtime } from './hooks/useCloudLibraryRealtime'
 import { isTerminalRecordingStage, ownsRecordingScreen, resolveRecordingV2Stage } from './lib/recordingV2Stage'
 import { RecordHome } from './components/RecordHome'
 import { SettingsLanguagePage } from './components/SettingsLanguagePage'
-import { SettingsLayout, SettingsRow, SettingsNavRow, SettingsActionRow } from './components/SettingsLayout'
+import { SettingsLayout, SettingsRow, SettingsNavRow, SettingsActionRow, SettingsRadioRow } from './components/SettingsLayout'
 import { DEFAULT_SETTINGS_SECTION, type SettingsSection } from './lib/settingsSections'
 import { useLanguagePreferences } from './languagePreferencesContext'
 import { YoumiLensMonogramY } from './branding/YoumiLensMonogramY'
@@ -5494,38 +5494,24 @@ useEffect(() => {
         <h3 className="settings-v2__group-title">{tDesktop('settings.audioSource')}</h3>
         <p className="settings-v2__lead">{tDesktop('capture.audioSourceHelp')}</p>
         <div className="settings-v2__group">
-          <SettingsRow
+          <SettingsRadioRow
+            groupName="audio-source"
             name={tDesktop('capture.sourceMicrophone')}
             help={tDesktop('capture.sourceMicrophoneHelp')}
-            control={
-              <button
-                type="button"
-                className="v2-btn"
-                aria-pressed={audioSource === 'microphone'}
-                disabled={recorder.status !== 'idle'}
-                onClick={() => setAudioSource('microphone')}
-              >
-                {audioSource === 'microphone' ? '✓' : ''}
-              </button>
-            }
+            checked={audioSource === 'microphone'}
+            disabled={recorder.status !== 'idle'}
+            onSelect={() => setAudioSource('microphone')}
           />
           {/* Hidden, not disabled, when the WebView has no getDisplayMedia:
               an option that cannot work should not be offered at all. */}
           {systemAudioSupported() ? (
-            <SettingsRow
+            <SettingsRadioRow
+              groupName="audio-source"
               name={tDesktop('capture.sourceSystem')}
-              help={`${tDesktop('capture.sourceSystemHelp')} ${tDesktop('capture.systemPickerNote')}`}
-              control={
-                <button
-                  type="button"
-                  className="v2-btn"
-                  aria-pressed={audioSource === 'system'}
-                  disabled={recorder.status !== 'idle'}
-                  onClick={() => setAudioSource('system')}
-                >
-                  {audioSource === 'system' ? '✓' : ''}
-                </button>
-              }
+              help={tDesktop('capture.sourceSystemHelp')}
+              checked={audioSource === 'system'}
+              disabled={recorder.status !== 'idle'}
+              onSelect={() => setAudioSource('system')}
             />
           ) : (
             <SettingsRow
@@ -5534,6 +5520,9 @@ useEffect(() => {
             />
           )}
         </div>
+        {systemAudioSupported() ? (
+          <p className="settings-v2__note">{tDesktop('capture.systemPickerNote')}</p>
+        ) : null}
 
         <h3 className="settings-v2__group-title">{tDesktop('settings.languageAndCaptions')}</h3>
         <SettingsLanguagePage

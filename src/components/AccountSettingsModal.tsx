@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { useLanguagePreferences } from '../languagePreferencesContext'
 import {
   DISPLAY_NAME_MAX_LENGTH,
   DISPLAY_NAME_TAKEN_MESSAGE,
@@ -14,7 +15,6 @@ import {
   type UserProfileRow,
 } from '../lib/userProfile'
 import { deleteAccount } from '../lib/account'
-import { INTERNAL_BETA_NOTE } from '../lib/productMeta'
 import './AccountSettingsModal.css'
 
 type Props = {
@@ -48,6 +48,7 @@ export function AccountSettingsModal({
   onAccountDeleted,
   appVersion,
 }: Props) {
+  const { t } = useLanguagePreferences()
   const [displayName, setDisplayName] = useState('')
   const [phone, setPhone] = useState('')
   const [busy, setBusy] = useState(false)
@@ -163,86 +164,82 @@ export function AccountSettingsModal({
           <h2 id="account-settings-title" className="account-settings-modal__title">
             Account
           </h2>
-          <p className="account-settings-modal__lead">
-            Update how Youmi Lens greets you and your optional phone number.
-          </p>
+          <p className="account-settings-modal__lead">{t('settings.accountModalLead')}</p>
         </div>
 
         <div className="account-settings-modal__body">
-          <label className="account-settings-modal__field">
-            <span className="account-settings-modal__field-label">Email</span>
-            <input
-              className="login-screen__email-input account-settings-modal__input"
-              type="text"
-              readOnly
-              value={accountEmail || 'Not available for this sign-in method'}
-            />
-          </label>
+          <div className="account-settings-modal__form">
+            <label className="account-settings-modal__field">
+              <span className="account-settings-modal__field-label">Email</span>
+              <input
+                className="login-screen__email-input account-settings-modal__input"
+                type="text"
+                readOnly
+                value={accountEmail || 'Not available for this sign-in method'}
+              />
+            </label>
 
-          <label className="account-settings-modal__field">
-            <span className="account-settings-modal__field-label">Display name</span>
-            <input
-              className="login-screen__email-input account-settings-modal__input"
-              type="text"
-              maxLength={DISPLAY_NAME_MAX_LENGTH}
-              autoComplete="nickname"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-            />
-          </label>
+            <label className="account-settings-modal__field">
+              <span className="account-settings-modal__field-label">Display name</span>
+              <input
+                className="login-screen__email-input account-settings-modal__input"
+                type="text"
+                maxLength={DISPLAY_NAME_MAX_LENGTH}
+                autoComplete="nickname"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+              />
+            </label>
 
-          <label className="account-settings-modal__field">
-            <span className="account-settings-modal__field-label">Phone (optional)</span>
-            <input
-              className="login-screen__email-input account-settings-modal__input"
-              type="tel"
-              autoComplete="tel"
-              placeholder=""
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-            />
-          </label>
+            <label className="account-settings-modal__field">
+              <span className="account-settings-modal__field-label">Phone (optional)</span>
+              <input
+                className="login-screen__email-input account-settings-modal__input"
+                type="tel"
+                autoComplete="tel"
+                placeholder=""
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+              />
+            </label>
 
-          {okMsg ? <p className="account-settings-modal__message account-settings-modal__message--ok">{okMsg}</p> : null}
-          {err ? <p className="account-settings-modal__message account-settings-modal__message--error">{err}</p> : null}
+            {okMsg ? <p className="account-settings-modal__message account-settings-modal__message--ok">{okMsg}</p> : null}
+            {err ? <p className="account-settings-modal__message account-settings-modal__message--error">{err}</p> : null}
+          </div>
 
           <div className="account-settings-modal__meta">
-            <h3 className="account-settings-modal__meta-title">
-              {appVersion ? `Youmi Lens v${appVersion}` : 'Youmi Lens'}
-            </h3>
-            <p className="account-settings-modal__meta-note">{INTERNAL_BETA_NOTE}</p>
+            <h3 className="account-settings-modal__meta-title">{t('settings.accountAbout')}</h3>
+            <p className="account-settings-modal__meta-note">
+              {appVersion ? `Youmi Lens ${appVersion}` : 'Youmi Lens'}
+            </p>
           </div>
 
           <div className="account-settings-modal__danger-section">
-            <h3 className="account-settings-modal__danger-title">Delete account</h3>
-            <p className="account-settings-modal__danger-note">
-              Permanently removes your account, recordings, and course data. This cannot be undone.
-            </p>
+            <h3 className="account-settings-modal__danger-title">{t('settings.accountDangerZone')}</h3>
+            <div className="account-settings-modal__danger-row">
+              <div className="account-settings-modal__danger-copy">
+                <p className="account-settings-modal__danger-name">Delete account</p>
+                <p className="account-settings-modal__danger-note">
+                  Permanently removes your account, recordings, and course data.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="account-settings-modal__btn account-settings-modal__btn--danger"
+                disabled={deleteBusy}
+                aria-busy={deleteBusy}
+                onClick={() => void handleDeleteAccount()}
+              >
+                {deleteBusy ? 'Deleting…' : 'Delete Account'}
+              </button>
+            </div>
             {deleteErr ? (
               <p className="account-settings-modal__message account-settings-modal__message--error">{deleteErr}</p>
             ) : null}
-            <button
-              type="button"
-              className="account-settings-modal__btn account-settings-modal__btn--danger"
-              disabled={deleteBusy}
-              aria-busy={deleteBusy}
-              onClick={() => void handleDeleteAccount()}
-            >
-              {deleteBusy ? 'Deleting…' : 'Delete account'}
-            </button>
           </div>
         </div>
 
         <div className="account-settings-modal__footer">
-          <button
-            type="button"
-            className="account-settings-modal__btn account-settings-modal__btn--primary"
-            disabled={busy || !displayName.trim()}
-            aria-busy={busy}
-            onClick={() => void handleSave()}
-          >
-            {busy ? 'Saving…' : 'Save changes'}
-          </button>
           <button
             type="button"
             className="account-settings-modal__btn account-settings-modal__btn--secondary"
@@ -256,9 +253,20 @@ export function AccountSettingsModal({
           >
             {signOutBusy ? 'Signing out…' : 'Sign out'}
           </button>
-          <button type="button" className="account-settings-modal__btn account-settings-modal__btn--secondary" onClick={onClose}>
-            Close
-          </button>
+          <div className="account-settings-modal__footer-trailing">
+            <button type="button" className="account-settings-modal__btn account-settings-modal__btn--secondary" onClick={onClose}>
+              {t('common.cancel')}
+            </button>
+            <button
+              type="button"
+              className="account-settings-modal__btn account-settings-modal__btn--primary"
+              disabled={busy || !displayName.trim()}
+              aria-busy={busy}
+              onClick={() => void handleSave()}
+            >
+              {busy ? 'Saving…' : 'Save changes'}
+            </button>
+          </div>
         </div>
       </div>
     </div>

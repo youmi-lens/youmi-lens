@@ -7,6 +7,7 @@
  */
 import { useEffect, useId, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useAuth } from '../useAuth'
+import { useLanguagePreferences } from '../languagePreferencesContext'
 import { useBilling, type BillingHookError, type UseBillingResult } from '../hooks/useBilling'
 import {
   useBillingReturnRefresh,
@@ -15,6 +16,7 @@ import {
 import type { BillingPlanCode } from '../lib/billing/billingClient'
 import type { BillingState, NormalizedBillingInterval, NormalizedQuota } from '../lib/billing/billingState'
 import { markExternalBillingAction } from '../lib/billing/billingReturnCoordinator'
+import { quotaTone, quotaUsedPercent } from '../lib/billing/quotaTone'
 import {
   ANNUAL_SAVINGS_COPY,
   STUDENT_BASIC_ANNUAL_USD,
@@ -73,47 +75,117 @@ function intervalLabel(interval: NormalizedBillingInterval | null | undefined): 
   return null
 }
 
+/** Restrained progress bar — color communicates how close the user is to the limit. */
+function UsageBar({ used, limit }: { used: number | null; limit: number | null }) {
+  const percent = quotaUsedPercent(used, limit)
+  if (percent == null) return null
+  const tone = quotaTone(used, limit)
+  return (
+    <div
+      className={`billing-plan-modal__usage-bar billing-plan-modal__usage-bar--${tone}`}
+      role="progressbar"
+      aria-valuenow={Math.round(percent)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+    >
+      <div className="billing-plan-modal__usage-bar-fill" style={{ width: `${percent}%` }} />
+    </div>
+  )
+}
+
+function UsageMetricRow({
+  label,
+  used,
+  limit,
+  summary,
+  remainingText,
+}: {
+  label: string
+  used: number | null
+  limit: number | null
+  /** e.g. "240 / 300 min" or "300 min / month" (limit-only fallback). */
+  summary: string
+  remainingText: string | null
+}) {
+  return (
+    <div className="billing-plan-modal__usage-metric">
+      <div className="billing-plan-modal__usage-label">{label}</div>
+      <div className="billing-plan-modal__usage-summary">{summary}</div>
+      {remainingText ? <div className="billing-plan-modal__usage-remaining">{remainingText}</div> : null}
+      <UsageBar used={used} limit={limit} />
+    </div>
+  )
+}
+
+/**
+ * The three real usage metrics the existing quota state carries. Values are
+ * read verbatim from `NormalizedQuota` — never derived from the Student Basic
+ * marketing copy below (`STUDENT_BASIC_BENEFITS`), and never fabricated when
+ * the backend hasn't returned a number yet (Study Tasks usage/remaining are
+ * `null` today; only its daily limit is known, so it renders limit-only with
+ * no progress bar rather than implying 0 used).
+ */
 function QuotaUsageRows({ quota }: { quota: NormalizedQuota }) {
+  const { t } = useLanguagePreferences()
+
   const minutesLimit = quota.monthlyMinutesLimit
+  const minutesSummary =
+    minutesLimit == null
+      ? t('settings.usageLimitUnavailable')
+      : quota.minutesUsed == null
+        ? t('settings.usageMinPerMonth', { count: formatCount(minutesLimit) })
+        : t('settings.usageUsedOfMin', { used: formatCount(quota.minutesUsed), limit: formatCount(minutesLimit) })
+  const minutesRemaining =
+    quota.minutesRemaining != null ? t('settings.usageMinRemaining', { count: formatCount(quota.minutesRemaining) }) : null
+
   const recordingsLimit = quota.maxRecordingsPerDay
+  const recordingsSummary =
+    recordingsLimit == null
+      ? t('settings.usageLimitUnavailable')
+      : quota.recordingsUsedToday == null
+        ? t('settings.usagePerDay', { count: formatCount(recordingsLimit) })
+        : t('settings.usageUsedOfToday', { used: formatCount(quota.recordingsUsedToday), limit: formatCount(recordingsLimit) })
+  const recordingsRemaining =
+    quota.recordingsRemainingToday != null
+      ? t('settings.usageRemaining', { count: formatCount(quota.recordingsRemainingToday) })
+      : null
+
   const tasksLimit = quota.maxStudyTasksPerDay
+  const tasksSummary =
+    tasksLimit == null
+      ? t('settings.usageLimitUnavailable')
+      : quota.studyTasksUsedToday == null
+        ? t('settings.usagePerDay', { count: formatCount(tasksLimit) })
+        : t('settings.usageUsedOfToday', { used: formatCount(quota.studyTasksUsedToday), limit: formatCount(tasksLimit) })
+  const tasksRemaining =
+    quota.studyTasksRemainingToday != null
+      ? t('settings.usageRemaining', { count: formatCount(quota.studyTasksRemainingToday) })
+      : null
 
   return (
-    <div className="billing-plan-modal__usage" aria-label="Usage">
-      <h3 className="billing-plan-modal__section-title">Usage</h3>
-      <div className="billing-plan-modal__usage-row">
-        <div className="billing-plan-modal__usage-label">Study Minutes</div>
-        <div className="billing-plan-modal__usage-value">
-          {minutesLimit == null
-            ? 'Limit unavailable'
-            : `${formatCount(quota.minutesUsed)} used · ${formatCount(minutesLimit)} / month`}
-          {quota.minutesRemaining != null ? ` · ${formatCount(quota.minutesRemaining)} remaining` : null}
-        </div>
-      </div>
-      <div className="billing-plan-modal__usage-row">
-        <div className="billing-plan-modal__usage-label">Recordings</div>
-        <div className="billing-plan-modal__usage-value">
-          {recordingsLimit == null
-            ? 'Limit unavailable'
-            : `${formatCount(quota.recordingsUsedToday)} used today · ${formatCount(recordingsLimit)} / day`}
-          {quota.recordingsRemainingToday != null
-            ? ` · ${formatCount(quota.recordingsRemainingToday)} remaining`
-            : null}
-        </div>
-      </div>
-      <div className="billing-plan-modal__usage-row">
-        <div className="billing-plan-modal__usage-label">Study Tasks</div>
-        <div className="billing-plan-modal__usage-value">
-          {tasksLimit == null
-            ? 'Limit unavailable'
-            : quota.studyTasksUsedToday != null
-              ? `${formatCount(quota.studyTasksUsedToday)} used today · ${formatCount(tasksLimit)} / day`
-              : `${formatCount(tasksLimit)} per day`}
-          {quota.studyTasksRemainingToday != null
-            ? ` · ${formatCount(quota.studyTasksRemainingToday)} remaining`
-            : null}
-        </div>
-      </div>
+    <div className="billing-plan-modal__usage" aria-label={t('settings.usageTitle')}>
+      <h3 className="billing-plan-modal__section-title">{t('settings.usageTitle')}</h3>
+      <UsageMetricRow
+        label={t('settings.usageStudyMinutes')}
+        used={quota.minutesUsed}
+        limit={minutesLimit}
+        summary={minutesSummary}
+        remainingText={minutesRemaining}
+      />
+      <UsageMetricRow
+        label={t('settings.usageRecordings')}
+        used={quota.recordingsUsedToday}
+        limit={recordingsLimit}
+        summary={recordingsSummary}
+        remainingText={recordingsRemaining}
+      />
+      <UsageMetricRow
+        label={t('settings.usageStudyTasks')}
+        used={quota.studyTasksUsedToday}
+        limit={tasksLimit}
+        summary={tasksSummary}
+        remainingText={tasksRemaining}
+      />
     </div>
   )
 }
@@ -409,6 +481,8 @@ export function BillingPlanContent({
           <StatusPill label="Free access" tone="neutral" />
         </div>
 
+        <QuotaUsageRows quota={state.quota} />
+
         <PlanCheckoutPanel
           selectedPlan={selectedPlan}
           onSelectedPlanChange={(plan) => onSelectedPlanChange?.(plan)}
@@ -425,7 +499,6 @@ export function BillingPlanContent({
         ) : null}
         <ReturnRefreshFeedback feedback={returnFeedback} />
         <RefreshPlanButton onRefreshPlan={showRefresh ? onRefreshPlan : undefined} disabled={actionBusy} />
-        <QuotaUsageRows quota={state.quota} />
       </div>
     )
   }
@@ -567,6 +640,7 @@ export function BillingPlanContent({
         You still have Free access with the quotas below. Choose a new plan if you want Student Basic
         again.
       </p>
+      <QuotaUsageRows quota={state.quota} />
       {showPortal ? (
         <ManagePortalPanel
           label={portalActionLabel('expired')}
@@ -597,7 +671,6 @@ export function BillingPlanContent({
       ) : null}
       <ReturnRefreshFeedback feedback={returnFeedback} />
       <RefreshPlanButton onRefreshPlan={showRefresh ? onRefreshPlan : undefined} disabled={actionBusy} />
-      <QuotaUsageRows quota={state.quota} />
     </div>
   )
 }

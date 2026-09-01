@@ -1,5 +1,6 @@
 import { CONTENT_LANGUAGES, type LanguageAvailability } from '../lib/contentLanguages'
-import type { LanguageMode, LanguagePreferences } from '../lib/languagePreferences'
+import { hasLanguageLimitation } from '../lib/languageLimitation'
+import type { LanguagePreferences } from '../lib/languagePreferences'
 import { useLanguagePreferences } from '../languagePreferencesContext'
 import { LanguageSelect, type LanguageSelectOption } from './LanguageSelect'
 import { SettingsRow } from './SettingsLayout'
@@ -31,8 +32,10 @@ const TRANSLATION_OPTIONS: LanguageSelectOption[] = CONTENT_LANGUAGES.map((langu
  * translation is Simplified-Chinese-only today; everything else is disabled and
  * labelled, so nothing here claims six-language live captions already work.
  *
- * The previous version ended in a tall shaded callout repeating the summary.
- * It is replaced by one line of note text, per the approved mockup.
+ * QA16: rows carry only the value in their trailing control (no repeated field
+ * name / "· Available" — see LanguageSelect), helper copy is a single short
+ * line, and the internal "verified live path" wording is not shown at all
+ * unless the current selection actually has a limitation.
  */
 export function SettingsLanguagePage({
   preferences,
@@ -105,29 +108,36 @@ export function SettingsLanguagePage({
         />
         <SettingsRow
           name={t('settings.languageMode')}
-          help={t('settings.languageModeHelp')}
           control={
-            <label className="language-select">
-              <span className="v2-sr-only">{t('settings.languageMode')}</span>
-              <select
-                className="v2-select"
-                aria-label={t('settings.languageMode')}
-                value={preferences.languageMode}
-                onChange={(event) =>
-                  onPreferenceChange('languageMode', event.target.value as LanguageMode)
-                }
+            <div className="settings-v2__segmented" role="group" aria-label={t('settings.languageMode')}>
+              <button
+                type="button"
+                className={`settings-v2__segmented-btn${
+                  preferences.languageMode === 'captions-only' ? ' settings-v2__segmented-btn--selected' : ''
+                }`}
+                aria-pressed={preferences.languageMode === 'captions-only'}
+                onClick={() => onPreferenceChange('languageMode', 'captions-only')}
               >
-                <option value="bilingual">{t('record.bilingual')}</option>
-                <option value="captions-only">{t('record.captionsOnly')}</option>
-              </select>
-            </label>
+                {t('record.captionsOnly')}
+              </button>
+              <button
+                type="button"
+                className={`settings-v2__segmented-btn${
+                  preferences.languageMode === 'bilingual' ? ' settings-v2__segmented-btn--selected' : ''
+                }`}
+                aria-pressed={preferences.languageMode === 'bilingual'}
+                onClick={() => onPreferenceChange('languageMode', 'bilingual')}
+              >
+                {t('record.bilingual')}
+              </button>
+            </div>
           }
         />
       </div>
 
-      <p className="settings-v2__note">
-        {t('settings.runtimeNote')} {t('settings.preferenceNote')}
-      </p>
+      {hasLanguageLimitation(preferences) ? (
+        <p className="settings-v2__note">{t('settings.languageLimitationNote')}</p>
+      ) : null}
     </>
   )
 }
