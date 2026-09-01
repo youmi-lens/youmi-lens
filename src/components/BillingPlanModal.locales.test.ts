@@ -144,6 +144,45 @@ describe('QA18 regression — billing modal renders in every state and locale', 
     expect(html).toContain('升级至 Student Basic')
   })
 
+  it('QA21 — the annual value badge and derived savings localize, including long Latin locales', () => {
+    // fr's "Meilleur rapport qualité-prix" is the longest of the six; the badge
+    // must render it in full (the CSS lets it wrap rather than fixing a width).
+    for (const locale of ['en', 'zh-Hans', 'fr', 'es'] as const) {
+      const html = renderContent(locale, { status: 'free', quota: studentQuota })
+      expect(html).toContain(translateDesktop(locale, 'billing.bestValue'))
+      // Savings stays derived from monthly x 12 - annual, never hardcoded.
+      expect(html).toContain(translateDesktop(locale, 'billing.saveAmount', { amount: '$9.89' }))
+      // Product names are never translated.
+      expect(html).toContain('Student Basic')
+    }
+  })
+
+  it('QA21 — the annual advantage is visible even while Monthly is the selected interval', () => {
+    const html = renderToStaticMarkup(
+      withLocale(
+        'en',
+        createElement(BillingPlanContent, {
+          state: { status: 'free', quota: studentQuota },
+          selectedPlan: 'student_basic_monthly',
+        }),
+      ),
+    )
+    expect(html).toContain('Best value')
+    expect(html).toContain('Save $9.89')
+  })
+
+  it('QA21 — Free access reads as a positive status, and upgraded values carry the emphasis class', () => {
+    const html = renderContent('en', { status: 'free', quota: studentQuota })
+    // Positive tone, not the neutral gray pill.
+    expect(html).toContain('billing-plan-modal__pill--ok')
+    expect(html).not.toContain('billing-plan-modal__pill--neutral')
+    // Status is still carried by text, so colour is never the only signal.
+    expect(html).toContain('Free access')
+    // Only the upgraded number is emphasised; the current value recedes.
+    expect(html).toContain('billing-plan-modal__comparison-to')
+    expect(html).toContain('billing-plan-modal__comparison-from')
+  })
+
   it('renders the unavailable state (missing Stripe/staging config) without blanking', () => {
     // A staging backend without checkout/Stripe wiring must surface the panel,
     // never throw and unmount the tree.

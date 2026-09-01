@@ -165,10 +165,23 @@
   white-space: nowrap;
 }
 
+/* Positive/available status (Free access, Active). The dot is decorative only —
+   the pill always carries its localized text, so state is never colour-only. */
 .desktop-v2 .billing-plan-modal__pill--ok {
   background: var(--v2-success-soft);
-  border-color: transparent;
+  border-color: var(--v2-success-border);
   color: var(--v2-success-ink);
+}
+
+.desktop-v2 .billing-plan-modal__pill--ok .billing-plan-modal__pill-text::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--v2-success);
+  vertical-align: 1px;
 }
 
 .desktop-v2 .billing-plan-modal__pill--warn {
@@ -223,10 +236,13 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  padding: 14px;
-  border: 1px solid rgba(63, 115, 176, .28);
+  padding: 16px;
+  /* The upgrade destination: a cool accent-tinted plane that separates it from
+     the neutral Usage block above. Tokens only — QA18's raw hexes here are
+     replaced so this surface tracks the accent family like everything else. */
+  border: 1px solid var(--v2-accent-border);
   border-radius: var(--v2-radius-md);
-  background: linear-gradient(145deg, #f8fbff 0%, var(--v2-paper-2) 68%, #f1f7f4 100%);
+  background: linear-gradient(165deg, var(--v2-accent-soft-2) 0%, var(--v2-accent-soft) 46%, var(--v2-paper) 100%);
 }
 .desktop-v2 .billing-plan-modal__upgrade-lead { margin: -6px 0 2px; color: var(--v2-muted); font-size: var(--v2-text-sm); line-height: 1.45; }
 
@@ -276,24 +292,59 @@
   box-shadow: 0 0 0 2px var(--v2-paper), 0 0 0 4px var(--v2-focus);
 }
 
+/* Selection is carried by border colour + tint + price weight together, so it
+   stays identifiable without relying on hue alone (and aria-pressed is set). */
 .desktop-v2 .billing-plan-modal__interval-btn--selected {
-  border-color: var(--v2-navy);
-  background: rgba(11, 31, 59, 0.06);
-  color: var(--v2-navy);
+  border-color: var(--v2-accent);
+  background: var(--v2-accent-soft-2);
+  color: var(--v2-accent-ink);
+  box-shadow: 0 1px 3px rgba(23, 105, 224, 0.14);
 }
-.desktop-v2 .billing-plan-modal__interval-btn--selected .billing-plan-modal__interval-price { color: var(--v2-navy); font-weight: 700; }
+.desktop-v2 .billing-plan-modal__interval-btn--selected .billing-plan-modal__interval-name { color: var(--v2-accent-ink); }
+.desktop-v2 .billing-plan-modal__interval-btn--selected .billing-plan-modal__interval-price { color: var(--v2-accent-ink); font-weight: 700; }
 
-.desktop-v2 .billing-plan-modal__savings {
-  margin: 0;
-  font-size: var(--v2-text-sm);
-  line-height: 1.55;
-  color: var(--v2-navy);
+/* Annual: title and its value badge share a row. Nothing here has a fixed
+   width and the badge may wrap, so a long locale (fr "Meilleur rapport
+   qualité-prix") reflows instead of clipping. */
+.desktop-v2 .billing-plan-modal__interval-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
 }
+
+.desktop-v2 .billing-plan-modal__interval-badge {
+  padding: 1px 7px;
+  border-radius: var(--v2-radius-pill);
+  background: var(--v2-success-soft);
+  border: 1px solid var(--v2-success-border);
+  color: var(--v2-success-ink);
+  font-size: var(--v2-text-xs);
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.desktop-v2 .billing-plan-modal__interval-save {
+  color: var(--v2-success-ink);
+  font-size: var(--v2-text-xs);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
 .desktop-v2 .billing-plan-modal__comparison { display: grid; gap: 0; border: 1px solid var(--v2-rule); border-radius: var(--v2-radius-sm); background: rgba(255,255,255,.7); overflow: hidden; }
 .desktop-v2 .billing-plan-modal__comparison-row { display: flex; justify-content: space-between; gap: 16px; padding: 10px 12px; color: var(--v2-ink-2); font-size: var(--v2-text-sm); }
 .desktop-v2 .billing-plan-modal__comparison-row + .billing-plan-modal__comparison-row { border-top: 1px solid var(--v2-rule-2); }
 .desktop-v2 .billing-plan-modal__comparison-values { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.desktop-v2 .billing-plan-modal__comparison-values strong { color: var(--v2-navy); }
+/* The upgraded number is the point of this row, so only it gets accent + weight.
+   The current value and the arrow recede; the unit stays muted. */
+.desktop-v2 .billing-plan-modal__comparison-from { color: var(--v2-faint); }
+.desktop-v2 .billing-plan-modal__comparison-arrow { color: var(--v2-faint); }
+.desktop-v2 .billing-plan-modal__comparison-values strong,
+.desktop-v2 .billing-plan-modal__comparison-to {
+  color: var(--v2-accent-ink);
+  font-weight: 700;
+}
 .desktop-v2 .billing-plan-modal__comparison-values small { color: var(--v2-muted); font-size: var(--v2-text-xs); }
 
 .desktop-v2 .billing-plan-modal__upgrade {
@@ -368,11 +419,15 @@
   overflow: hidden;
 }
 
+/* Normal usage reads as live accent rather than the same navy as body ink —
+   that flat navy-on-gray is what made the whole section look inert. The
+   warning/exhausted fills below are unchanged and still come from the existing
+   quota-state logic, so colour continues to mean state, not decoration. */
 .desktop-v2 .billing-plan-modal__usage-bar-fill {
   height: 100%;
   border-radius: 999px;
   transition: width 0.2s;
-  background: var(--v2-navy);
+  background: var(--v2-accent);
 }
 
 .desktop-v2 .billing-plan-modal__usage-bar--warning .billing-plan-modal__usage-bar-fill {

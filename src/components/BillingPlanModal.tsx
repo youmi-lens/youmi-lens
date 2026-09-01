@@ -316,21 +316,28 @@ export function PlanCheckoutPanel({
           disabled={controlsDisabled}
           onClick={() => onSelectedPlanChange(planCodeFromInterval('annual'))}
         >
-          <span className="billing-plan-modal__interval-name">{t('billing.annual')}</span>
+          <span className="billing-plan-modal__interval-head">
+            <span className="billing-plan-modal__interval-name">{t('billing.annual')}</span>
+            {/* Always visible, not only when annual is selected: the value
+                advantage is the reason to look at annual in the first place. */}
+            <span className="billing-plan-modal__interval-badge">{t('billing.bestValue')}</span>
+          </span>
           <span className="billing-plan-modal__interval-price">
             ${STUDENT_BASIC_ANNUAL_USD.toFixed(2)} / {t('billing.year')}
           </span>
+          <span className="billing-plan-modal__interval-save">
+            {t('billing.saveAmount', { amount: `$${STUDENT_BASIC_ANNUAL_SAVINGS_USD.toFixed(2)}` })}
+          </span>
         </button>
       </div>
-      {selectedInterval === 'annual' ? (
-        <p className="billing-plan-modal__savings"><strong>{t('billing.bestValue')}</strong> · {t('billing.annualSavings', { amount: `$${STUDENT_BASIC_ANNUAL_SAVINGS_USD.toFixed(2)}` })}</p>
-      ) : null}
       <div className="billing-plan-modal__comparison" aria-label={t('billing.comparisonLabel')}>
         {STUDENT_BASIC_COMPARISON.map((item) => (
           <div className="billing-plan-modal__comparison-row" key={item.metric}>
             <span>{t(`billing.${item.metric}` as 'billing.minutes' | 'billing.recordings' | 'billing.tasks')}</span>
             <span className="billing-plan-modal__comparison-values">
-              <span>{item.free}</span><span aria-hidden="true"> → </span><strong>{item.studentBasic}</strong>
+              <span className="billing-plan-modal__comparison-from">{item.free}</span>
+              <span className="billing-plan-modal__comparison-arrow" aria-hidden="true"> → </span>
+              <strong className="billing-plan-modal__comparison-to">{item.studentBasic}</strong>
               <small> / {t(item.cadence === 'month' ? 'billing.month' : 'billing.day')}</small>
             </span>
           </div>
@@ -490,7 +497,8 @@ export function BillingPlanContent({
             <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
             <h3 className="billing-plan-modal__headline">Free</h3>
           </div>
-          <StatusPill label={t('billing.freeAccess')} tone="neutral" />
+          {/* Free access is a healthy, available state — not a neutral one. */}
+          <StatusPill label={t('billing.freeAccess')} tone="ok" />
         </div>
 
         <QuotaUsageRows quota={state.quota} />

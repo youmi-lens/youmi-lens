@@ -48,6 +48,22 @@
   --v2-warning-soft: #fff6e8;
   --v2-warning-ink: #844309;
 
+  /* Positive + upgrade-accent surfaces. Deliberately small: a soft surface, a
+     border and a readable ink per family, reusing the existing success/accent
+     hues rather than introducing new ones.
+     Contrast checked (WCAG AA, normal text):
+       success-ink on success-soft   6.9:1
+       accent-ink  on accent-soft-2  6.7:1
+       accent-ink  on paper          7.6:1
+     `--v2-accent` itself is only 4.5:1 on the tinted surface, so it is used for
+     fills, borders and focus — never for text on a tint. That is accent-ink's
+     job, and why this pair exists as two separate tokens. */
+  --v2-success-border: #bfe3d0;
+  --v2-accent-ink: #12539f;
+  --v2-accent-soft: #f2f7fe;
+  --v2-accent-soft-2: #e8f1fd;
+  --v2-accent-border: #b6d2f4;
+
   /* Course identity is NOT a token. A course's icon, tint and accent live on
      its own row and are applied inline by CourseIconTile, so no stylesheet can
      offer a page a second palette to reach for. */
