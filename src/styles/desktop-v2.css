@@ -543,12 +543,24 @@
   border-bottom: 1px solid var(--v2-rule-2);
 }
 .settings-v2__row:last-child { border-bottom: 0; }
-.settings-v2__row-copy { min-width: 0; }
-.settings-v2__name { color: var(--v2-ink-2); font-size: var(--v2-text-sm); font-weight: 600; line-height: 1.35; }
+/* Owns the title/helper vertical rhythm for EVERY settings row.
+   `gap` rather than a margin on the helper, because `.settings-v2__help` does
+   two different jobs: the helper line here, and the trailing VALUE of a nav
+   row (which lives in `.settings-v2__row-trailing`, where a top margin only
+   pushed it off-centre against the chevron).
+   Flex also blockifies the children, which is the part that was actually
+   broken: `SettingsRow` builds them as <div> but `SettingsRadioRow` builds
+   them as <span>, and a vertical margin does nothing on a non-replaced
+   inline box — so Recording's Microphone / System Audio rows silently got no
+   gap at all, whatever value was set here. Same span-vs-block trap already
+   documented on `.settings-v2__ai-option-*` below. */
+.settings-v2__row-copy { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.settings-v2__name { display: block; color: var(--v2-ink-2); font-size: var(--v2-text-sm); font-weight: 600; line-height: 1.35; }
 /* Supporting copy is deliberately its own, quieter rhythm — not a suffix to
    the row title. This shared rule covers Recording, AI, Account, Updates and
-   Support without making any one settings section artificially tall. */
-.settings-v2__help { margin-top: 5px; color: var(--v2-faint); font-size: var(--v2-text-xs); line-height: 1.45; }
+   Support without making any one settings section artificially tall.
+   1.5 matches `.settings-v2__ai-option-desc`, so every surface reads alike. */
+.settings-v2__help { display: block; color: var(--v2-faint); font-size: var(--v2-text-xs); line-height: 1.5; }
 .settings-v2__control { flex: 0 0 auto; }
 .settings-v2__note { margin-top: 12px; color: var(--v2-faint); font-size: var(--v2-text-xs); }
 

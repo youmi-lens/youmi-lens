@@ -359,6 +359,23 @@ describe('Settings', () => {
     expect(html).not.toContain('class="sr-only"')
   })
 
+  it('title/helper spacing is owned by the row-copy container, so span- and div-built rows match', () => {
+    // SettingsRow builds these as <div>, SettingsRadioRow as <span>. A vertical
+    // margin does nothing on a non-replaced inline box, so Recording's audio
+    // rows silently got no gap. The gap must live on the flex container, and
+    // both children must be blockified, or the two row types drift apart again.
+    const rowCopy = v2Css.match(/\.settings-v2__row-copy \{([^}]*)\}/)?.[1] ?? ''
+    expect(rowCopy).toContain('display: flex')
+    expect(rowCopy).toContain('flex-direction: column')
+    expect(rowCopy).toMatch(/gap:\s*6px/)
+    for (const cls of ['name', 'help']) {
+      expect(v2Css.match(new RegExp(`\\.settings-v2__${cls} \\{([^}]*)\\}`))?.[1]).toContain('display: block')
+    }
+    // The helper must not re-introduce a margin: `.settings-v2__help` is also
+    // the nav row's trailing value, where a top margin pushes it off-centre.
+    expect(v2Css.match(/\.settings-v2__help \{([^}]*)\}/)?.[1]).not.toContain('margin-top')
+  })
+
   it('the selected Language mode segment renders "Bilingual" as visible text', () => {
     const html = render(
       createElement(SettingsLanguagePage, {
