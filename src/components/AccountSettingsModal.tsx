@@ -60,6 +60,7 @@ export function AccountSettingsModal({
 
   useEffect(() => {
     if (!open) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- opening a modal starts a fresh, local edit session.
     setErr(null)
     setOkMsg(null)
     setDeleteErr(null)
@@ -117,7 +118,7 @@ export function AccountSettingsModal({
       }
       const row = await fetchProfile(supabase, userId)
       onSaved(row)
-      setOkMsg('Your profile was updated.')
+      setOkMsg(t('account.updated'))
     } finally {
       setBusy(false)
     }
@@ -126,10 +127,10 @@ export function AccountSettingsModal({
   const handleDeleteAccount = async () => {
     if (deleteBusy) return
     const firstConfirm = window.confirm(
-      'Delete your Youmi Lens account? This permanently removes your recordings, courses, and account data. This cannot be undone.',
+      t('account.deleteConfirm'),
     )
     if (!firstConfirm) return
-    const secondConfirm = window.confirm('Are you absolutely sure? This is your last chance to cancel.')
+    const secondConfirm = window.confirm(t('account.deleteFinalConfirm'))
     if (!secondConfirm) return
 
     setDeleteErr(null)
@@ -162,7 +163,7 @@ export function AccountSettingsModal({
       >
         <div className="account-settings-modal__header">
           <h2 id="account-settings-title" className="account-settings-modal__title">
-            Account
+            {t('account.title')}
           </h2>
           <p className="account-settings-modal__lead">{t('settings.accountModalLead')}</p>
         </div>
@@ -170,17 +171,17 @@ export function AccountSettingsModal({
         <div className="account-settings-modal__body">
           <div className="account-settings-modal__form">
             <label className="account-settings-modal__field">
-              <span className="account-settings-modal__field-label">Email</span>
+              <span className="account-settings-modal__field-label">{t('account.email')}</span>
               <input
                 className="login-screen__email-input account-settings-modal__input"
                 type="text"
                 readOnly
-                value={accountEmail || 'Not available for this sign-in method'}
+                value={accountEmail || t('account.emailUnavailable')}
               />
             </label>
 
             <label className="account-settings-modal__field">
-              <span className="account-settings-modal__field-label">Display name</span>
+              <span className="account-settings-modal__field-label">{t('account.displayName')}</span>
               <input
                 className="login-screen__email-input account-settings-modal__input"
                 type="text"
@@ -192,7 +193,7 @@ export function AccountSettingsModal({
             </label>
 
             <label className="account-settings-modal__field">
-              <span className="account-settings-modal__field-label">Phone (optional)</span>
+              <span className="account-settings-modal__field-label">{t('account.phoneOptional')}</span>
               <input
                 className="login-screen__email-input account-settings-modal__input"
                 type="tel"
@@ -218,9 +219,9 @@ export function AccountSettingsModal({
             <h3 className="account-settings-modal__danger-title">{t('settings.accountDangerZone')}</h3>
             <div className="account-settings-modal__danger-row">
               <div className="account-settings-modal__danger-copy">
-                <p className="account-settings-modal__danger-name">Delete account</p>
+                <p className="account-settings-modal__danger-name">{t('account.deleteName')}</p>
                 <p className="account-settings-modal__danger-note">
-                  Permanently removes your account, recordings, and course data.
+                  {t('account.deleteDescription')}
                 </p>
               </div>
               <button
@@ -230,7 +231,7 @@ export function AccountSettingsModal({
                 aria-busy={deleteBusy}
                 onClick={() => void handleDeleteAccount()}
               >
-                {deleteBusy ? 'Deleting…' : 'Delete Account'}
+                {deleteBusy ? t('account.deleting') : t('account.delete')}
               </button>
             </div>
             {deleteErr ? (
@@ -251,7 +252,7 @@ export function AccountSettingsModal({
               void Promise.resolve(onSignOut()).finally(() => setSignOutBusy(false))
             }}
           >
-            {signOutBusy ? 'Signing out…' : 'Sign out'}
+            {signOutBusy ? t('account.signingOut') : t('account.signOut')}
           </button>
           <div className="account-settings-modal__footer-trailing">
             <button type="button" className="account-settings-modal__btn account-settings-modal__btn--secondary" onClick={onClose}>
@@ -264,7 +265,7 @@ export function AccountSettingsModal({
               aria-busy={busy}
               onClick={() => void handleSave()}
             >
-              {busy ? 'Saving…' : 'Save changes'}
+              {busy ? t('account.saving') : t('account.saveChanges')}
             </button>
           </div>
         </div>

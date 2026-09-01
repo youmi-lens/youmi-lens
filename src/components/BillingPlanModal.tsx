@@ -8,6 +8,7 @@
 import { useEffect, useId, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { useAuth } from '../useAuth'
 import { useLanguagePreferences } from '../languagePreferencesContext'
+import { translateDesktop, type DesktopI18nKey, type DesktopI18nVars } from '../lib/desktopI18n'
 import { useBilling, type BillingHookError, type UseBillingResult } from '../hooks/useBilling'
 import {
   useBillingReturnRefresh,
@@ -17,8 +18,9 @@ import type { BillingPlanCode } from '../lib/billing/billingClient'
 import type { BillingState, NormalizedBillingInterval, NormalizedQuota } from '../lib/billing/billingState'
 import { markExternalBillingAction } from '../lib/billing/billingReturnCoordinator'
 import { quotaTone, quotaUsedPercent } from '../lib/billing/quotaTone'
+import { STUDENT_BASIC_COMPARISON } from '../lib/billing/planPresentation'
 import {
-  ANNUAL_SAVINGS_COPY,
+  STUDENT_BASIC_ANNUAL_SAVINGS_USD,
   STUDENT_BASIC_ANNUAL_USD,
   STUDENT_BASIC_MONTHLY_USD,
   canOpenPortal,
@@ -42,13 +44,8 @@ export type BillingPlanModalProps = {
   billing?: UseBillingResult
 }
 
-const STUDENT_BASIC_BENEFITS = [
-  '600 Study Minutes per month',
-  '6 Recordings per day',
-  '10 Study Tasks per day',
-] as const
-
 const DEFAULT_PLAN: BillingPlanCode = 'student_basic_monthly'
+const defaultT = (key: DesktopI18nKey, vars?: DesktopI18nVars) => translateDesktop('en', key, vars)
 
 function formatDate(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -69,9 +66,12 @@ function planLabel(planCode: string | null | undefined): string {
   return 'Student Basic'
 }
 
-function intervalLabel(interval: NormalizedBillingInterval | null | undefined): string | null {
-  if (interval === 'monthly') return 'Monthly'
-  if (interval === 'annual') return 'Annual'
+function intervalLabel(
+  interval: NormalizedBillingInterval | null | undefined,
+  t: ReturnType<typeof useLanguagePreferences>['t'],
+): string | null {
+  if (interval === 'monthly') return t('billing.monthly')
+  if (interval === 'annual') return t('billing.annual')
   return null
 }
 
@@ -120,7 +120,7 @@ function UsageMetricRow({
 /**
  * The three real usage metrics the existing quota state carries. Values are
  * read verbatim from `NormalizedQuota` — never derived from the Student Basic
- * marketing copy below (`STUDENT_BASIC_BENEFITS`), and never fabricated when
+ * presentation data, and never fabricated when
  * the backend hasn't returned a number yet (Study Tasks usage/remaining are
  * `null` today; only its daily limit is known, so it renders limit-only with
  * no progress bar rather than implying 0 used).
@@ -214,6 +214,7 @@ function RefreshPlanButton({
   onRefreshPlan?: () => void
   disabled?: boolean
 }) {
+  const { t } = useLanguagePreferences()
   if (!onRefreshPlan) return null
   return (
     <button
@@ -222,31 +223,32 @@ function RefreshPlanButton({
       onClick={onRefreshPlan}
       disabled={disabled}
     >
-      Refresh plan status
+      {t('billing.refreshPlan')}
     </button>
   )
 }
 
 function ReturnRefreshFeedback({ feedback }: { feedback: BillingReturnRefreshFeedback }) {
+  const { t } = useLanguagePreferences()
   if (feedback.status === 'idle') return null
   if (feedback.status === 'refreshing') {
     return (
       <p className="billing-plan-modal__copy" role="status" aria-live="polite">
-        Refreshing plan status…
+        {t('billing.refreshing')}
       </p>
     )
   }
   if (feedback.status === 'updated') {
     return (
       <p className="billing-plan-modal__copy" role="status">
-        Plan status updated.
+        {t('billing.updated')}
       </p>
     )
   }
   if (feedback.status === 'unchanged') {
     return (
       <p className="billing-plan-modal__copy" role="status">
-        Plan status is up to date.
+        {t('billing.upToDate')}
       </p>
     )
   }
@@ -265,6 +267,7 @@ export type PlanCheckoutPanelProps = {
   checkoutOpened: boolean
   upgradeLabel: string
   disabled?: boolean
+  t?: typeof defaultT
 }
 
 /** Monthly/annual selector + Upgrade — free and expired purchase paths. */
@@ -276,6 +279,7 @@ export function PlanCheckoutPanel({
   checkoutOpened,
   upgradeLabel,
   disabled = false,
+  t = defaultT,
 }: PlanCheckoutPanelProps) {
   const selectedInterval = intervalFromPlanCode(selectedPlan)
   const controlsDisabled = disabled || checkoutBusy
@@ -283,7 +287,8 @@ export function PlanCheckoutPanel({
   return (
     <div className="billing-plan-modal__preview">
       <h3 className="billing-plan-modal__section-title">Student Basic</h3>
-      <div className="billing-plan-modal__interval-toggle" role="group" aria-label="Choose billing interval">
+      <p className="billing-plan-modal__upgrade-lead">{t('billing.moreCapacity')}</p>
+      <div className="billing-plan-modal__interval-toggle" role="group" aria-label={t('billing.chooseInterval')}>
         <button
           type="button"
           className={
@@ -295,9 +300,9 @@ export function PlanCheckoutPanel({
           disabled={controlsDisabled}
           onClick={() => onSelectedPlanChange(planCodeFromInterval('monthly'))}
         >
-          <span className="billing-plan-modal__interval-name">Student Basic Monthly</span>
+          <span className="billing-plan-modal__interval-name">{t('billing.monthly')}</span>
           <span className="billing-plan-modal__interval-price">
-            ${STUDENT_BASIC_MONTHLY_USD.toFixed(2)} / month
+            ${STUDENT_BASIC_MONTHLY_USD.toFixed(2)} / {t('billing.month')}
           </span>
         </button>
         <button
@@ -311,34 +316,40 @@ export function PlanCheckoutPanel({
           disabled={controlsDisabled}
           onClick={() => onSelectedPlanChange(planCodeFromInterval('annual'))}
         >
-          <span className="billing-plan-modal__interval-name">Student Basic Annual</span>
+          <span className="billing-plan-modal__interval-name">{t('billing.annual')}</span>
           <span className="billing-plan-modal__interval-price">
-            ${STUDENT_BASIC_ANNUAL_USD.toFixed(2)} / year
+            ${STUDENT_BASIC_ANNUAL_USD.toFixed(2)} / {t('billing.year')}
           </span>
         </button>
       </div>
       {selectedInterval === 'annual' ? (
-        <p className="billing-plan-modal__savings">{ANNUAL_SAVINGS_COPY}</p>
+        <p className="billing-plan-modal__savings"><strong>{t('billing.bestValue')}</strong> · {t('billing.annualSavings', { amount: `$${STUDENT_BASIC_ANNUAL_SAVINGS_USD.toFixed(2)}` })}</p>
       ) : null}
-      <ul className="billing-plan-modal__benefits">
-        {STUDENT_BASIC_BENEFITS.map((item) => (
-          <li key={item}>{item}</li>
+      <div className="billing-plan-modal__comparison" aria-label={t('billing.comparisonLabel')}>
+        {STUDENT_BASIC_COMPARISON.map((item) => (
+          <div className="billing-plan-modal__comparison-row" key={item.metric}>
+            <span>{t(`billing.${item.metric}` as 'billing.minutes' | 'billing.recordings' | 'billing.tasks')}</span>
+            <span className="billing-plan-modal__comparison-values">
+              <span>{item.free}</span><span aria-hidden="true"> → </span><strong>{item.studentBasic}</strong>
+              <small> / {t(item.cadence === 'month' ? 'billing.month' : 'billing.day')}</small>
+            </span>
+          </div>
         ))}
-      </ul>
+      </div>
       <button
         type="button"
         className="billing-plan-modal__btn billing-plan-modal__btn--primary billing-plan-modal__upgrade"
-        aria-label={checkoutBusy ? 'Opening Checkout' : upgradeLabel}
+        aria-label={checkoutBusy ? t('billing.openingCheckout') : upgradeLabel}
         aria-busy={checkoutBusy || undefined}
         disabled={controlsDisabled}
         onClick={onUpgrade}
       >
-        {checkoutBusy ? 'Opening Checkout…' : upgradeLabel}
+        {checkoutBusy ? t('billing.openingCheckout') : upgradeLabel}
       </button>
       {checkoutOpened ? (
         <div className="billing-plan-modal__checkout-note" role="status">
           <p className="billing-plan-modal__copy">
-            Checkout opened in your browser. Plan status updates after Stripe confirms payment.
+            {t('billing.checkoutOpened')}
           </p>
         </div>
       ) : null}
@@ -352,6 +363,7 @@ export type ManagePortalPanelProps = {
   portalBusy: boolean
   portalOpened: boolean
   disabled?: boolean
+  t?: typeof defaultT
 }
 
 export function ManagePortalPanel({
@@ -360,6 +372,7 @@ export function ManagePortalPanel({
   portalBusy,
   portalOpened,
   disabled = false,
+  t = defaultT,
 }: ManagePortalPanelProps) {
   const controlsDisabled = disabled || portalBusy
   return (
@@ -367,18 +380,17 @@ export function ManagePortalPanel({
       <button
         type="button"
         className="billing-plan-modal__btn billing-plan-modal__btn--secondary billing-plan-modal__manage-btn"
-        aria-label={portalBusy ? 'Opening subscription management' : label}
+        aria-label={portalBusy ? t('billing.openingManagement') : label}
         aria-busy={portalBusy || undefined}
         disabled={controlsDisabled}
         onClick={onManage}
       >
-        {portalBusy ? 'Opening subscription management…' : label}
+        {portalBusy ? t('billing.openingManagement') : label}
       </button>
       {portalOpened ? (
         <div className="billing-plan-modal__checkout-note" role="status">
           <p className="billing-plan-modal__copy">
-            Subscription management opened in your browser. After making changes, return here and
-            refresh your plan status.
+            {t('billing.managementOpened')}
           </p>
         </div>
       ) : null}
@@ -420,6 +432,7 @@ export function BillingPlanContent({
   actionErrorKind = null,
   returnFeedback = { status: 'idle' },
 }: BillingPlanContentProps) {
+  const { t } = useLanguagePreferences()
   const checkoutError =
     actionErrorKind === 'checkout' ? formatCheckoutError(actionError) : null
   const portalError = actionErrorKind === 'portal' ? formatPortalError(actionError) : null
@@ -430,10 +443,9 @@ export function BillingPlanContent({
   if (state.status === 'signed_out') {
     return (
       <div className="billing-plan-modal__panel" data-billing-status="signed_out">
-        <h3 className="billing-plan-modal__headline">Sign in to view your plan</h3>
+        <h3 className="billing-plan-modal__headline">{t('billing.signInTitle')}</h3>
         <p className="billing-plan-modal__copy">
-          Billing and usage are linked to your Youmi Lens account. Sign in to see your current plan
-          and quotas.
+          {t('billing.signInBody')}
         </p>
       </div>
     )
@@ -442,7 +454,7 @@ export function BillingPlanContent({
   if (state.status === 'loading') {
     return (
       <div className="billing-plan-modal__panel" data-billing-status="loading" aria-busy="true">
-        <p className="billing-plan-modal__copy">Loading plan information…</p>
+        <p className="billing-plan-modal__copy">{t('billing.loading')}</p>
         <div className="billing-plan-modal__skeleton" aria-hidden>
           <div className="billing-plan-modal__skeleton-line" />
           <div className="billing-plan-modal__skeleton-line billing-plan-modal__skeleton-line--short" />
@@ -455,7 +467,7 @@ export function BillingPlanContent({
   if (state.status === 'unavailable') {
     return (
       <div className="billing-plan-modal__panel" data-billing-status="unavailable">
-        <h3 className="billing-plan-modal__headline">Billing information is temporarily unavailable</h3>
+        <h3 className="billing-plan-modal__headline">{t('billing.unavailableTitle')}</h3>
         <p className="billing-plan-modal__copy">{state.reason}</p>
         {onRetry ? (
           <button
@@ -463,7 +475,7 @@ export function BillingPlanContent({
             className="billing-plan-modal__btn billing-plan-modal__btn--secondary"
             onClick={onRetry}
           >
-            Retry
+            {t('billing.retry')}
           </button>
         ) : null}
       </div>
@@ -475,10 +487,10 @@ export function BillingPlanContent({
       <div className="billing-plan-modal__panel" data-billing-status="free">
         <div className="billing-plan-modal__header-row">
           <div>
-            <p className="billing-plan-modal__eyebrow">Current plan</p>
+            <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
             <h3 className="billing-plan-modal__headline">Free</h3>
           </div>
-          <StatusPill label="Free access" tone="neutral" />
+          <StatusPill label={t('billing.freeAccess')} tone="neutral" />
         </div>
 
         <QuotaUsageRows quota={state.quota} />
@@ -489,8 +501,9 @@ export function BillingPlanContent({
           onUpgrade={() => onUpgrade?.()}
           checkoutBusy={checkoutBusy}
           checkoutOpened={checkoutOpened}
-          upgradeLabel="Upgrade"
+          upgradeLabel={t('billing.upgradeStudentBasic')}
           disabled={portalBusy}
+          t={t}
         />
         {checkoutError ? (
           <p className="billing-plan-modal__action-error" role="alert">
@@ -504,7 +517,7 @@ export function BillingPlanContent({
   }
 
   if (state.status === 'active') {
-    const billing = intervalLabel(state.interval)
+    const billing = intervalLabel(state.interval, t)
     const renews = formatDate(state.currentPeriodEnd)
     return (
       <div
@@ -514,14 +527,14 @@ export function BillingPlanContent({
       >
         <div className="billing-plan-modal__header-row">
           <div>
-            <p className="billing-plan-modal__eyebrow">Current plan</p>
+            <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
             <h3 className="billing-plan-modal__headline">{planLabel(state.planCode)}</h3>
           </div>
-          <StatusPill label="Active" tone="ok" />
+          <StatusPill label={t('settings.statusActive')} tone="ok" />
         </div>
         <div className="billing-plan-modal__meta">
-          {billing ? <MetaRow label="Billing" value={billing} /> : null}
-          {renews ? <MetaRow label="Renews" value={renews} /> : null}
+          {billing ? <MetaRow label={t('billing.billing')} value={billing} /> : null}
+          {renews ? <MetaRow label={t('billing.renews')} value={renews} /> : null}
         </div>
         <QuotaUsageRows quota={state.quota} />
         {showPortal ? (
@@ -531,6 +544,7 @@ export function BillingPlanContent({
             portalBusy={portalBusy}
             portalOpened={portalOpened}
             disabled={checkoutBusy}
+            t={t}
           />
         ) : null}
         {portalError ? (
@@ -550,15 +564,15 @@ export function BillingPlanContent({
       <div className="billing-plan-modal__panel" data-billing-status="canceling">
         <div className="billing-plan-modal__header-row">
           <div>
-            <p className="billing-plan-modal__eyebrow">Current plan</p>
+            <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
             <h3 className="billing-plan-modal__headline">{planLabel(state.planCode)}</h3>
           </div>
-          <StatusPill label="Cancellation scheduled" tone="warn" />
+          <StatusPill label={t('billing.cancellationScheduled')} tone="warn" />
         </div>
         <p className="billing-plan-modal__copy">
           {through
-            ? `Access remains available through ${through}.`
-            : 'Access remains available through the end of the current billing period.'}
+            ? t('billing.accessThrough', { date: through })
+            : t('billing.accessThroughPeriod')}
         </p>
         <QuotaUsageRows quota={state.quota} />
         {showPortal ? (
@@ -568,6 +582,7 @@ export function BillingPlanContent({
             portalBusy={portalBusy}
             portalOpened={portalOpened}
             disabled={checkoutBusy}
+            t={t}
           />
         ) : null}
         {portalError ? (
@@ -587,20 +602,20 @@ export function BillingPlanContent({
       <div className="billing-plan-modal__panel" data-billing-status="past_due">
         <div className="billing-plan-modal__header-row">
           <div>
-            <p className="billing-plan-modal__eyebrow">Current plan</p>
+            <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
             <h3 className="billing-plan-modal__headline">{planLabel(state.planCode)}</h3>
           </div>
-          <StatusPill label="Payment issue" tone="danger" />
+          <StatusPill label={t('settings.statusPastDue')} tone="danger" />
         </div>
         <p className="billing-plan-modal__copy">
           {state.accessActive
-            ? 'Your subscription has a payment issue, but access is still active.'
-            : 'Your subscription has a payment issue and access is currently limited.'}
-          {grace ? ` Grace period through ${grace}.` : null}
+            ? t('billing.paymentActive')
+            : t('billing.paymentLimited')}
+          {grace ? ` ${t('billing.graceUntil')} ${grace}.` : null}
         </p>
         <div className="billing-plan-modal__meta">
-          <MetaRow label="Access" value={state.accessActive ? 'Active' : 'Limited'} />
-          {grace ? <MetaRow label="Grace until" value={grace} /> : null}
+          <MetaRow label={t('billing.access')} value={state.accessActive ? t('settings.statusActive') : t('billing.limited')} />
+          {grace ? <MetaRow label={t('billing.graceUntil')} value={grace} /> : null}
         </div>
         <QuotaUsageRows quota={state.quota} />
         {showPortal ? (
@@ -610,6 +625,7 @@ export function BillingPlanContent({
             portalBusy={portalBusy}
             portalOpened={portalOpened}
             disabled={checkoutBusy}
+            t={t}
           />
         ) : null}
         {portalError ? (
@@ -628,17 +644,16 @@ export function BillingPlanContent({
     <div className="billing-plan-modal__panel" data-billing-status="expired">
       <div className="billing-plan-modal__header-row">
         <div>
-          <p className="billing-plan-modal__eyebrow">Subscription</p>
-          <h3 className="billing-plan-modal__headline">Inactive</h3>
+          <p className="billing-plan-modal__eyebrow">{t('billing.subscription')}</p>
+          <h3 className="billing-plan-modal__headline">{t('billing.inactive')}</h3>
         </div>
-        <StatusPill label="Ended" tone="neutral" />
+        <StatusPill label={t('billing.ended')} tone="neutral" />
       </div>
       <p className="billing-plan-modal__copy">
         {state.planCode
           ? `Your ${planLabel(state.planCode)} subscription is no longer active.`
-          : 'Your subscription is no longer active.'}{' '}
-        You still have Free access with the quotas below. Choose a new plan if you want Student Basic
-        again.
+          : `${t('billing.subscription')} ${t('billing.inactive')}.`}{' '}
+        {t('billing.expiredBody')}
       </p>
       <QuotaUsageRows quota={state.quota} />
       {showPortal ? (
@@ -648,6 +663,7 @@ export function BillingPlanContent({
           portalBusy={portalBusy}
           portalOpened={portalOpened}
           disabled={checkoutBusy}
+          t={t}
         />
       ) : null}
       {portalError ? (
@@ -661,8 +677,9 @@ export function BillingPlanContent({
         onUpgrade={() => onUpgrade?.()}
         checkoutBusy={checkoutBusy}
         checkoutOpened={checkoutOpened}
-        upgradeLabel="Choose a new plan"
+        upgradeLabel={t('billing.chooseNewPlan')}
         disabled={portalBusy}
+        t={t}
       />
       {checkoutError ? (
         <p className="billing-plan-modal__action-error" role="alert">
@@ -686,6 +703,7 @@ function BillingPlanModalFrame({
   billing: UseBillingResult
   returnFeedback: BillingReturnRefreshFeedback
 }) {
+  const { t } = useLanguagePreferences()
   const titleId = useId()
   const [selectedPlan, setSelectedPlan] = useState<BillingPlanCode>(DEFAULT_PLAN)
   const [checkoutBusy, setCheckoutBusy] = useState(false)
@@ -716,6 +734,7 @@ function BillingPlanModalFrame({
   const loadBilling = billing.actions.load
   useEffect(() => {
     if (!open) return
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- each modal opening starts a fresh billing-action session.
     setCheckoutOpened(false)
     setCheckoutBusy(false)
     setPortalOpened(false)
@@ -795,9 +814,9 @@ function BillingPlanModalFrame({
       >
         <div className="billing-plan-modal__titlebar">
           <h2 id={titleId} className="billing-plan-modal__title">
-            Plan &amp; billing
+            {t('billing.title')}
           </h2>
-          <button type="button" className="billing-plan-modal__close" aria-label="Close" onClick={onClose}>
+          <button type="button" className="billing-plan-modal__close" aria-label={t('billing.close')} onClick={onClose}>
             ×
           </button>
         </div>

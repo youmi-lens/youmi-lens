@@ -12,6 +12,7 @@ import {
 } from '../languagePreferencesContext'
 import { DEFAULT_LANGUAGE_PREFERENCES } from '../lib/languagePreferences'
 import { translateDesktop } from '../lib/desktopI18n'
+import { STUDENT_BASIC_COMPARISON } from '../lib/billing/planPresentation'
 import {
   ANNUAL_SAVINGS_COPY,
   STUDENT_BASIC_ANNUAL_SAVINGS_USD,
@@ -116,20 +117,30 @@ describe('BillingPlanContent states', () => {
     expect(html).not.toContain('Upgrade')
   })
 
-  it('free shows prices, savings math copy, and Upgrade', () => {
+  it('free shows real prices, derived savings, and the entitlement comparison', () => {
     const html = renderContent(
       { status: 'free', quota: studentQuota },
       { selectedPlan: 'student_basic_annual', onUpgrade: () => {} },
     )
     expect(html).toContain('data-billing-status="free"')
-    expect(html).toContain('Student Basic Monthly')
+    expect(html).toContain('Monthly')
     expect(html).toContain(`$${STUDENT_BASIC_MONTHLY_USD.toFixed(2)} / month`)
-    expect(html).toContain('Student Basic Annual')
+    expect(html).toContain('Annual')
     expect(html).toContain(`$${STUDENT_BASIC_ANNUAL_USD.toFixed(2)} / year`)
-    expect(html).toContain(ANNUAL_SAVINGS_COPY)
-    expect(html).toContain('Upgrade')
-    expect(html).toContain('600 Study Minutes per month')
+    expect(html).toContain(`Save $${STUDENT_BASIC_ANNUAL_SAVINGS_USD.toFixed(2)}`)
+    expect(html).toContain('Upgrade to Student Basic')
+    expect(html).toContain('300')
+    expect(html).toContain('600')
     expect(html).not.toContain('Payment successful')
+  })
+
+  it('renders comparison values from the shared product-plan presentation model', () => {
+    const html = renderContent({ status: 'free', quota: emptyQuota }, { onUpgrade: () => {} })
+    for (const item of STUDENT_BASIC_COMPARISON) {
+      expect(html).toContain(String(item.free))
+      expect(html).toContain(String(item.studentBasic))
+    }
+    expect(billingPlanModalSrc).not.toContain('STUDENT_BASIC_BENEFITS')
   })
 
   it('active monthly has no Checkout purchase; Manage when manageable', () => {
@@ -496,17 +507,17 @@ function visibleText(html: string): string {
     .trim()
 }
 
-describe('QA17 — the Upgrade CTA renders a visible label', () => {
-  it('the Free-state primary CTA has "Upgrade" as real button text, not only an aria-label', () => {
+describe('QA18 — the Upgrade CTA renders a visible label', () => {
+  it('the Free-state primary CTA names Student Basic as real button text, not only an aria-label', () => {
     const html = renderContent({ status: 'free', quota: studentQuota }, { onUpgrade: () => {} })
-    const cta = html.slice(html.indexOf('billing-plan-modal__upgrade'))
+    const cta = html.slice(html.lastIndexOf('billing-plan-modal__upgrade'))
     const label = cta.slice(cta.indexOf('>') + 1, cta.indexOf('</button>'))
-    expect(visibleText(label)).toBe('Upgrade')
+    expect(visibleText(label)).toBe('Upgrade to Student Basic')
   })
 
   it('the CTA keeps its accessible name alongside the visible label', () => {
     const html = renderContent({ status: 'free', quota: studentQuota }, { onUpgrade: () => {} })
-    expect(html).toContain('aria-label="Upgrade"')
+    expect(html).toContain('aria-label="Upgrade to Student Basic"')
   })
 
   it('the busy state swaps the visible label rather than blanking it', () => {
@@ -514,7 +525,7 @@ describe('QA17 — the Upgrade CTA renders a visible label', () => {
       { status: 'free', quota: studentQuota },
       { onUpgrade: () => {}, checkoutBusy: true },
     )
-    const cta = html.slice(html.indexOf('billing-plan-modal__upgrade'))
+    const cta = html.slice(html.lastIndexOf('billing-plan-modal__upgrade'))
     const label = cta.slice(cta.indexOf('>') + 1, cta.indexOf('</button>'))
     expect(visibleText(label)).toBe('Opening Checkout…')
   })

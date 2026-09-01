@@ -544,8 +544,11 @@
 }
 .settings-v2__row:last-child { border-bottom: 0; }
 .settings-v2__row-copy { min-width: 0; }
-.settings-v2__name { color: var(--v2-ink-2); font-size: var(--v2-text-sm); font-weight: 600; }
-.settings-v2__help { margin-top: 2px; color: var(--v2-faint); font-size: var(--v2-text-xs); }
+.settings-v2__name { color: var(--v2-ink-2); font-size: var(--v2-text-sm); font-weight: 600; line-height: 1.35; }
+/* Supporting copy is deliberately its own, quieter rhythm — not a suffix to
+   the row title. This shared rule covers Recording, AI, Account, Updates and
+   Support without making any one settings section artificially tall. */
+.settings-v2__help { margin-top: 5px; color: var(--v2-faint); font-size: var(--v2-text-xs); line-height: 1.45; }
 .settings-v2__control { flex: 0 0 auto; }
 .settings-v2__note { margin-top: 12px; color: var(--v2-faint); font-size: var(--v2-text-xs); }
 
