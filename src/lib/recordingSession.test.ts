@@ -259,7 +259,6 @@ describe('recordingSession wiring regressions (App + recorder)', () => {
       expect(recovery.indexOf('setRecoveryUploadCourse(coursesState.courses.find')).toBeLessThan(
         recovery.indexOf("dispatchFlow({ type: 'CAPTURE_BEGIN'"),
       )
-      expect(recovery).toContain('setRecoveryUploadCourse(null)')
     })
 
     it('the header derives Course from the frozen recovery Course whenever one is in flight, never only from recordingStage', () => {
@@ -275,9 +274,58 @@ describe('recordingSession wiring regressions (App + recorder)', () => {
       )
     })
 
-    it('once the save finishes (success or failure), the frozen Course is released so the next recovery starts clean', () => {
+    /**
+     * Round 2 of this exact bug: clearing `recoveryUploadCourse` in
+     * `finally` cleared it in the SAME render pass that the "Lecture
+     * saved" success screen (recordingStage now 'ready'/'partial_ready',
+     * not 'recovery_required') needs it to still show the recovered
+     * Course — so the header fell back to the current Record-page
+     * selection the instant the save finished, even though the DB row
+     * itself already had the correct course_id. The success screen is the
+     * LAST consumer of this frozen state, not `finally`.
+     */
+    it('is NOT cleared in finally — the success screen still needs it after the save resolves', () => {
       const recovery = appSrc.slice(appSrc.indexOf('const handleRecoverSave = useCallback('), appSrc.indexOf('const handleRecoverKeep = useCallback('))
-      expect(recovery).toMatch(/\} finally \{[\s\S]*?setRecoveryUploadCourse\(null\)[\s\S]*?\}/)
+      const finallyBlock = recovery.slice(recovery.indexOf('} finally {'))
+      expect(finallyBlock).not.toContain('setRecoveryUploadCourse(null)')
+    })
+
+    it('is released only where the terminal recovery screen is actually left: View lecture, Record another, and Try again', () => {
+      const onViewLecture = appSrc.slice(appSrc.indexOf('onViewLecture={() => {'), appSrc.indexOf('onRecordAnother={() => {'))
+      const onRecordAnother = appSrc.slice(appSrc.indexOf('onRecordAnother={() => {'), appSrc.indexOf('onRetry={() => {'))
+      const onRetry = appSrc.slice(appSrc.indexOf('onRetry={() => {'), appSrc.indexOf('onRecoverRecording={() => {'))
+      expect(onViewLecture).toContain('setRecoveryUploadCourse(null)')
+      expect(onRecordAnother).toContain('setRecoveryUploadCourse(null)')
+      expect(onRetry).toContain('setRecoveryUploadCourse(null)')
+    })
+
+    it('the "Lecture saved" success stage is not special-cased out of showingRecoveryCourse — a recovered save keeps its Course through ready/partial_ready', () => {
+      // showingRecoveryCourse only ever checks recordingStage === 'recovery_required'
+      // OR recoveryUploadCourse truthy — it has no branch that excludes
+      // 'ready'/'partial_ready' (the "Lecture saved" stages), and since
+      // recoveryUploadCourse is proven above to survive past the save
+      // (not cleared in finally), a successful recovery's Course keeps
+      // rendering all the way through the success screen for free.
+      expect(appSrc).not.toMatch(/showingRecoveryCourse[\s\S]{0,40}recordingStage !== 'ready'/)
+      expect(appSrc).not.toMatch(/showingRecoveryCourse[\s\S]{0,40}!isTerminalRecordingStage/)
+    })
+
+    it('the current Record-page selection never leaks into the header while a recovery Course is frozen', () => {
+      // The Course-A branch (`course.trim() || …`) is only reachable when
+      // showingRecoveryCourse is false — i.e. recoveryUploadCourse is null
+      // AND recordingStage isn't 'recovery_required'. There is no third
+      // path that reads `course`/`activeCourseIdentity` while a recovery
+      // save's frozen Course is set.
+      expect(appSrc).toMatch(
+        /const recordingHeaderCourseName = showingRecoveryCourse\s*\n\s*\?[\s\S]*?\n\s*: \(course\.trim\(\) \|\| tDesktop\('record\.unfiled'\)\)/,
+      )
+    })
+  })
+
+  describe('a normal (non-recovery) save never touches the recovery Course freeze', () => {
+    it('handleStopAndSave never sets recoveryUploadCourse, so its success screen keeps using the live Record-page selection', () => {
+      const normalSave = appSrc.slice(appSrc.indexOf('const handleStopAndSave = async'), appSrc.indexOf('const runTranscribeAndSummarize = async'))
+      expect(normalSave).not.toContain('setRecoveryUploadCourse')
     })
   })
 

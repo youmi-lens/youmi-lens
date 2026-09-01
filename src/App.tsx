@@ -3856,7 +3856,18 @@ const [editLectureModal, setEditLectureModal] = useState<{
       } finally {
         saveInFlightRef.current = false
         setRecoveryBusyId(null)
-        setRecoveryUploadCourse(null)
+        // Deliberately NOT cleared here: a successful save's `uploading` →
+        // `ready`/`partial_ready` transition happens in this SAME render
+        // pass (dispatchFlow below, then endCapture above already landed),
+        // and the "Lecture saved" success screen reads this exact state to
+        // keep showing the recovered Course. Clearing it here raced that
+        // screen and lost — the header fell back to the current Record-page
+        // selection the instant the save finished. It is cleared instead
+        // only where the terminal screen is actually left: View lecture,
+        // Record another, and a generic Try again (onViewLecture /
+        // onRecordAnother / onRetry below) — the same lifecycle already
+        // used for `recentCapture` itself. A fresh recovery attempt also
+        // overwrites it unconditionally at the top of this function.
         dispatchFlow({ type: 'CAPTURE_FINISHED' })
       }
     },
@@ -5647,11 +5658,15 @@ useEffect(() => {
         const id = recentCapture?.recordingId
         setRecentCapture(null)
         setRecentAi(null)
+        // The success screen is the last consumer of the frozen recovery
+        // Course — safe to release once it is actually being left.
+        setRecoveryUploadCourse(null)
         if (id) openLectureDetail(id)
       }}
       onRecordAnother={() => {
         setRecentCapture(null)
         setRecentAi(null)
+        setRecoveryUploadCourse(null)
         setTitle('')
         // Recovery Dismiss: hide the prompt for this session only. The durable
         // session and its audio chunks stay in IndexedDB, so the recording
@@ -5673,6 +5688,7 @@ useEffect(() => {
           return
         }
         setRecentCapture(null)
+        setRecoveryUploadCourse(null)
       }}
       onRecoverRecording={() => {
         const session = selectedRecoverySession
