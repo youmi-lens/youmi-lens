@@ -417,3 +417,81 @@ describe('Courses i18n', () => {
     }
   })
 })
+
+describe('Stage-4 column degrade is concurrency-safe (production Courses load)', () => {
+  /**
+   * Reproduces the exact production failure of 2026-09-01.
+   *
+   * `useCourses.load` issues `listActive()` and `listDeleted()` together in a
+   * `Promise.all`. Both share one `columns` closure variable. On a database
+   * WITHOUT `courses.deletion_updated_at` (production; staging has it, which is
+   * why every staging QA build passed) both selects fail 42703, then:
+   *   - whichever response is handled first degrades `columns` to LEGACY and
+   *     retries successfully;
+   *   - the second one finds `columns` ALREADY equal to LEGACY, concludes it
+   *     has run out of fallbacks, and rethrows the original 42703 —
+   *     surfacing "Couldn't load your courses."
+   *
+   * The guard must therefore compare the column list THAT ATTEMPT used, not
+   * the shared variable another in-flight call may already have changed.
+   */
+  function unmigratedClient() {
+    const attempted: string[] = []
+    const client = {
+      from() {
+        const builder: Record<string, unknown> = {}
+        const chain = () => builder
+        let cols = ''
+        Object.assign(builder, {
+          select: (c: string) => { cols = c; attempted.push(c); return chain() },
+          eq: () => chain(),
+          is: () => chain(),
+          not: () => chain(),
+          order: () => chain(),
+          then: (resolve: (v: { data: unknown; error: unknown }) => unknown) => {
+            const missing = cols.includes('deletion_updated_at')
+            return Promise.resolve(
+              missing
+                ? { data: null, error: { code: '42703', message: 'column courses.deletion_updated_at does not exist' } }
+                : { data: [], error: null },
+            ).then(resolve)
+          },
+        })
+        return builder
+      },
+    }
+    return { client, attempted }
+  }
+
+  it('loads both lists concurrently on a database without deletion_updated_at', async () => {
+    const { client, attempted } = unmigratedClient()
+    const repo = createSupabaseCoursesRepository(client as never, 'u1')
+
+    // The real call shape from useCourses.load — this is what broke.
+    await expect(
+      Promise.all([repo.listActive(), repo.listDeleted()]),
+    ).resolves.toEqual([[], []])
+
+    // Both calls must have actually retried on the legacy column list.
+    const legacyAttempts = attempted.filter((c) => !c.includes('deletion_updated_at'))
+    expect(legacyAttempts.length).toBe(2)
+  })
+
+  it('still surfaces a non-column error instead of masking it', async () => {
+    const client = {
+      from() {
+        const builder: Record<string, unknown> = {}
+        const chain = () => builder
+        Object.assign(builder, {
+          select: () => chain(), eq: () => chain(), is: () => chain(),
+          not: () => chain(), order: () => chain(),
+          then: (resolve: (v: { data: unknown; error: unknown }) => unknown) =>
+            Promise.resolve({ data: null, error: { code: '401', message: 'JWT expired' } }).then(resolve),
+        })
+        return builder
+      },
+    }
+    const repo = createSupabaseCoursesRepository(client as never, 'u1')
+    await expect(repo.listActive()).rejects.toMatchObject({ message: 'JWT expired' })
+  })
+})

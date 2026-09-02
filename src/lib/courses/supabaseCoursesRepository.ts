@@ -92,11 +92,20 @@ export function createSupabaseCoursesRepository(
   async function selectCourses(
     run: (cols: string) => PromiseLike<SelectResult>,
   ): Promise<unknown> {
-    const first = await run(columns)
+    // Compare the list THIS attempt used, not the shared `columns` variable:
+    // `useCourses.load` runs listActive() and listDeleted() in one Promise.all,
+    // so on an unmigrated database both fail 42703 concurrently. Reading the
+    // shared variable meant whichever response was handled second saw it
+    // already degraded to LEGACY, concluded it had run out of fallbacks, and
+    // rethrew — which is exactly how production showed "Couldn't load your
+    // courses" while staging (which has the Stage-4 column, so never degrades)
+    // stayed green.
+    const attempted = columns
+    const first = await run(attempted)
     if (!first.error) return first.data
-    if (columns === COLUMNS_LEGACY || !isMissingCourseColumn(first.error)) throw first.error
+    if (attempted === COLUMNS_LEGACY || !isMissingCourseColumn(first.error)) throw first.error
     columns = COLUMNS_LEGACY
-    const retry = await run(columns)
+    const retry = await run(COLUMNS_LEGACY)
     if (retry.error) throw retry.error
     return retry.data
   }
