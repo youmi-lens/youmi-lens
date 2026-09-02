@@ -3167,6 +3167,12 @@ const [editLectureModal, setEditLectureModal] = useState<{
   const openLectureDetail = useCallback(
     (recordingId: string) => {
       if (!recordingsInLibrary.some((r) => r.id === recordingId)) return
+      // Back keeps the selected id so Course navigation can preserve context.
+      // Reopening that same id must still start a fresh detail/audio load:
+      // React elides setSelectedId(recordingId) when the value is unchanged.
+      // Without this nonce the cleared detail below remains permanently in the
+      // loading state even though the persisted audio and AI result are ready.
+      setDetailRetryNonce((nonce) => nonce + 1)
       setDetail(null)
       setSelectedId(recordingId)
       setLibraryPickedIds([])

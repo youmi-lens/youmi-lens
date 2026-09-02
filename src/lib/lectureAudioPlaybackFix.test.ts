@@ -72,6 +72,15 @@ describe('save-result to Lecture Detail owns one fresh loader lifecycle', () => 
   it('the View lecture action routes through the shared opener', () => {
     expect(appSrc).toMatch(/const id = recentCapture\?\.recordingId[\s\S]*?if \(id\) openLectureDetail\(id\)/)
   })
+
+  it('reopening the already-selected lecture restarts the detail/audio loader', () => {
+    // Back preserves selectedId. Setting it to the same id is a React no-op,
+    // so the opener must also change the effect dependency used for retries.
+    const opener = appSrc.slice(appSrc.indexOf('const openLectureDetail'), appSrc.indexOf('const openLecture = useMemo'))
+    expect(opener).toMatch(
+      /setDetailRetryNonce\(\(nonce\) => nonce \+ 1\)[\s\S]*?setDetail\(null\)[\s\S]*?setSelectedId\(recordingId\)/,
+    )
+  })
 })
 
 describe('the row-select fallback is bounded and a null result is a real, Retry-capable failure', () => {
