@@ -183,8 +183,22 @@ describe('lecture to course association', () => {
     expect(findCourseForRecording(rec({ course: 'cs 250' }), courses)?.id).toBe('c1')
   })
 
-  it('falls back to the label when course_id points at an unknown course', () => {
-    expect(findCourseForRecording(rec({ courseId: 'gone', course: 'Math' }), courses)?.id).toBe('c2')
+  it('adopts a null-id legacy recording by a trimmed, case-insensitive label', () => {
+    expect(findCourseForRecording(rec({ courseId: null, course: '  cS 250  ' }), courses)?.id).toBe('c1')
+  })
+
+  it('does not rebind a missing canonical id to a same-name legacy match', () => {
+    expect(findCourseForRecording(rec({ courseId: 'gone', course: 'Math' }), courses)).toBeNull()
+  })
+
+  it('does not rebind a deleted canonical course to a newly-created same-name course', () => {
+    const oldDeleted = course({ id: 'old-test', name: 'test', deletedAt: 1 })
+    const newActive = course({ id: 'new-test', name: 'test' })
+    const historical = rec({ id: 'historical', courseId: oldDeleted.id, course: 'test' })
+
+    expect(findCourseForRecording(historical, [oldDeleted, newActive])).toBeNull()
+    expect(lecturesInCourse(newActive.id, [historical], [oldDeleted, newActive])).toEqual([])
+    expect(canDeleteCourse(newActive.id, [historical], [oldDeleted, newActive])).toBe(true)
   })
 
   it('returns null for Unfiled rather than inventing a course', () => {

@@ -174,7 +174,10 @@ export function lectureIdentity(course: Course | null | undefined): CourseIdenti
  * The course a recording belongs to.
  *
  * Resolution order, and the reason for each step:
- *   1. `course_id` — authoritative once Phase 1B has shipped.
+ *   1. `course_id` — authoritative once Phase 1B has shipped. A non-null
+ *      canonical id NEVER falls back to a legacy label: if its Course is
+ *      missing or deleted, it stays unowned rather than drifting to a later
+ *      same-name Course.
  *   2. the legacy `course` TEXT matched by normalized name — every row written
  *      by iPad, by an older Desktop, or by the server has only this. Without
  *      this step those lectures would appear Unfiled on Desktop even though
@@ -189,8 +192,7 @@ export function findCourseForRecording(
   courses: readonly Course[],
 ): Course | null {
   if (recording.courseId) {
-    const byId = courses.find((course) => course.id === recording.courseId)
-    if (byId) return byId
+    return courses.find((course) => course.id === recording.courseId && course.deletedAt === null) ?? null
   }
   const key = courseNameKey(recording.course)
   if (!key) return null
