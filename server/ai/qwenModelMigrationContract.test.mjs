@@ -58,8 +58,8 @@ describe('Qwen text-model migration runtime contract', () => {
     })
     expect(requests).toHaveLength(2)
     expect(requests.map((request) => request.model)).toEqual(['qwen-flash', 'qwen-flash'])
-    expect(requests[0].max_tokens).toBe(512)
-    expect(requests[1].max_tokens).toBe(1200)
+    expect(requests[0].max_tokens).toBe(1024)
+    expect(requests[1].max_tokens).toBe(4000)
     expect(requests[1].response_format).toEqual({ type: 'json_object' })
   })
 
@@ -73,7 +73,7 @@ describe('Qwen text-model migration runtime contract', () => {
     })
     await expect(byokTranslate('qwen', 'Class begins now.', 'zh', 'test-only-key')).resolves.toBe('翻译结果')
     expect(requests[0].model).toBe('qwen-flash')
-    expect(requests[0].max_tokens).toBe(512)
+    expect(requests[0].max_tokens).toBe(1024)
   })
 
   it('maps the shared structured-summary fields back to the established BYOK response shape', async () => {
@@ -93,7 +93,7 @@ describe('Qwen text-model migration runtime contract', () => {
       summaryEn: 'English summary',
       summaryZh: '中文摘要',
     })
-    expect(requests[0].max_tokens).toBe(1200)
+    expect(requests[0].max_tokens).toBe(4000)
   })
 
   it('fails before a request when an old deployment override still selects qwen-turbo', async () => {
@@ -106,5 +106,39 @@ describe('Qwen text-model migration runtime contract', () => {
       'QWEN_CHAT_MODEL_RETIRED',
     )
     expect(globalThis.fetch).not.toHaveBeenCalled()
+  })
+
+  it('fails hosted translation/summary instead of returning a max_tokens-truncated result', async () => {
+    process.env.ENABLE_STUB_AI = 'false'
+    delete process.env.VITE_ENABLE_STUB_AI
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    delete process.env.DASHSCOPE_OVERSEAS_API_KEY
+    delete process.env.YUMI_QWEN_CHAT_MODEL
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        model: 'qwen-flash',
+        choices: [{ finish_reason: 'length', message: { content: 'The lecture begins and then cuts' } }],
+      }),
+    )
+    await expect(hosted.translateText('Long transcript chunk.', 'Simplified Chinese')).rejects.toThrow(
+      'HOSTED_CHAT_TRUNCATED',
+    )
+    await expect(hosted.summarizeTranscript('Long transcript', 'CS111', 'Lecture 1')).rejects.toThrow(
+      'HOSTED_CHAT_TRUNCATED',
+    )
+  })
+
+  it('fails BYOK translation/summary instead of returning a max_tokens-truncated result', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        choices: [{ finish_reason: 'length', message: { content: 'partial' } }],
+      }),
+    )
+    await expect(byokTranslate('qwen', 'Long text.', 'zh', 'test-only-key')).rejects.toThrow(
+      'BYOK_CHAT_TRUNCATED',
+    )
+    await expect(byokSummarize('qwen', 'Long transcript', 'Course', 'Title', 'test-only-key')).rejects.toThrow(
+      'BYOK_CHAT_TRUNCATED',
+    )
   })
 })

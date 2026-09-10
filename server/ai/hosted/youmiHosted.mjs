@@ -146,6 +146,15 @@ async function chatCompleteJson(messages, opts = {}) {
           throw new Error('HOSTED_CHAT_FAILED')
         }
         const data = JSON.parse(raw)
+        const choice = data.choices?.[0]
+        // A max_tokens cutoff must fail loudly rather than hand back partial
+        // content as if it were a complete translation/summary — the caller's
+        // best-effort catch already treats this feature as optional, so a
+        // clear failure is strictly safer than silently truncated text.
+        if (choice?.finish_reason === 'length') {
+          console.warn('[youmiHosted] dash chat truncated', { maxTokens: opts.maxTokens })
+          throw new Error('HOSTED_CHAT_TRUNCATED')
+        }
         // Surface token usage WITHOUT changing the string return type or any
         // existing caller. Only the DashScope branch populates this (so an
         // OpenAI fallback is never recorded as dashscope). No prompt/content is
@@ -158,7 +167,7 @@ async function chatCompleteJson(messages, opts = {}) {
           opts.usageOut.completion_tokens = data.usage.completion_tokens
           opts.usageOut.total_tokens = data.usage.total_tokens
         }
-        return data.choices?.[0]?.message?.content ?? ''
+        return choice?.message?.content ?? ''
       },
     })
   }
@@ -184,7 +193,12 @@ async function chatCompleteJson(messages, opts = {}) {
     throw new Error('HOSTED_CHAT_FAILED')
   }
   const data = JSON.parse(raw)
-  return data.choices?.[0]?.message?.content ?? ''
+  const choice = data.choices?.[0]
+  if (choice?.finish_reason === 'length') {
+    console.warn('[youmiHosted] openai chat fallback truncated')
+    throw new Error('HOSTED_CHAT_TRUNCATED')
+  }
+  return choice?.message?.content ?? ''
 }
 
 /**
@@ -416,7 +430,11 @@ export async function translateText(text, target, source = 'English') {
       { role: 'system', content: system },
       { role: 'user', content: text.trim() },
     ],
-    { temperature: 0.2, maxTokens: 512, modelDash: resolveQwenChatModel() },
+    // 1024 matches the existing BYOK OpenAI translate budget in adapters.mjs —
+    // this path also serves the up-to-1600-char post-class transcript chunks
+    // (chunkTranscriptForTranslation in processRecording.mjs), not just short
+    // live-caption utterances, so it needs headroom beyond a single sentence.
+    { temperature: 0.2, maxTokens: 1024, modelDash: resolveQwenChatModel() },
   )
   return out.trim()
 }
@@ -455,7 +473,11 @@ export async function summarizeTranscript(transcript, course, title, options = {
   const usageOut = {}
   const raw = await chatCompleteJson(messages, {
     temperature: 0.3,
-    maxTokens: 1200,
+    // buildSummarizeMessages has no length cap: it asks for a full
+    // Outline/Key-terms/Takeaways structure per language, and both summaries
+    // share this one JSON response, so this must stay generous rather than
+    // risk cutting off a longer lecture's summary mid-JSON.
+    maxTokens: 4000,
     responseFormat: { type: 'json_object' },
     modelDash: resolveQwenChatModel(),
     usageOut,
