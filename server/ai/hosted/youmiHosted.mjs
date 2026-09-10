@@ -8,7 +8,7 @@
  * - DASHSCOPE_API_KEY — default China-region Model Studio key (Paraformer + Qwen)
  * - DASHSCOPE_OVERSEAS_API_KEY — optional international (Singapore) key; when set, all DashScope
  *   calls use intl endpoints with this key (server-side only, never sent to the browser)
- * - YUMI_QWEN_CHAT_MODEL — default qwen-turbo
+ * - YUMI_QWEN_CHAT_MODEL — optional text-model override; default qwen-flash
  * - YUMI_PARAFORMER_MODEL — default paraformer-v2
  * - YUMI_PARAFORMER_LANGUAGE_HINTS — comma list, default zh,en
  * - YUMI_HOSTED_TRANSCRIBE_IMPL — optional: openai_fallback (buffer /api/transcribe only; needs OPENAI_API_KEY)
@@ -30,6 +30,11 @@ import {
   getDashScopeHttpAttempts,
   withDashScopeHttpFallback,
 } from '../../dashscopeWithFallback.mjs'
+import {
+  assertSupportedQwenChatModel,
+  getQwenChatModelConfig,
+  resolveQwenChatModel,
+} from '../qwenModelConfig.mjs'
 
 /** Internal adapter id for logs and metrics (never shown in UI). */
 export const HOSTED_ADAPTER_ID = 'qwenHosted'
@@ -45,7 +50,6 @@ function safeUrlHost(u) {
   }
 }
 
-const QWEN_CHAT_MODEL = process.env.YUMI_QWEN_CHAT_MODEL || 'qwen-turbo'
 const OPENAI_CHAT_MODEL = process.env.YUMI_OPENAI_CHAT_MODEL || 'gpt-4o-mini'
 const PARAFORMER_MODEL = process.env.YUMI_PARAFORMER_MODEL || 'paraformer-v2'
 const STUB_ENABLED =
@@ -93,11 +97,14 @@ export function hostedRuntimeMode() {
 
 /** Secret-safe env presence diagnostics for server health/logging. */
 export function hostedEnvDiagnostics() {
+  const qwen = getQwenChatModelConfig()
   return {
     ...getDashScopeEnvSummary(),
     OPENAI_API_KEY: Boolean(process.env.OPENAI_API_KEY?.trim()),
     YUMI_HOSTED_TRANSCRIBE_IMPL: process.env.YUMI_HOSTED_TRANSCRIBE_IMPL || '',
-    YUMI_QWEN_CHAT_MODEL: process.env.YUMI_QWEN_CHAT_MODEL || 'qwen-turbo',
+    YUMI_QWEN_CHAT_MODEL: qwen.model,
+    YUMI_QWEN_CHAT_MODEL_SOURCE: qwen.source,
+    YUMI_QWEN_CHAT_MODEL_RETIRED: qwen.isRetired,
     YUMI_PARAFORMER_MODEL: process.env.YUMI_PARAFORMER_MODEL || 'paraformer-v2',
     ENABLE_STUB_AI: STUB_ENABLED,
   }
@@ -109,6 +116,11 @@ async function stubDelay(ms = 220) {
 
 /** Prefer DashScope (Qwen); fall back to OpenAI chat for legacy / single-key deploys. */
 async function chatCompleteJson(messages, opts = {}) {
+  // Reject a caller-supplied retired name too. This is intentionally checked
+  // before endpoint fallback so no request can fall back to qwen-turbo.
+  const dashModel = assertSupportedQwenChatModel(
+    opts.modelDash ?? opts.model ?? resolveQwenChatModel(),
+  )
   const dashAttempts = getDashScopeHttpAttempts()
   if (dashAttempts.length) {
     return withDashScopeHttpFallback({
@@ -121,7 +133,7 @@ async function chatCompleteJson(messages, opts = {}) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: opts.modelDash ?? opts.model ?? QWEN_CHAT_MODEL,
+            model: dashModel,
             temperature: opts.temperature ?? 0.3,
             ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
             messages,
@@ -140,7 +152,7 @@ async function chatCompleteJson(messages, opts = {}) {
         if (opts.usageOut && data?.usage && typeof data.usage === 'object') {
           opts.usageOut.provider = 'dashscope'
           opts.usageOut.model =
-            typeof data.model === 'string' ? data.model : opts.modelDash ?? opts.model ?? QWEN_CHAT_MODEL
+            typeof data.model === 'string' ? data.model : dashModel
           opts.usageOut.prompt_tokens = data.usage.prompt_tokens
           opts.usageOut.completion_tokens = data.usage.completion_tokens
           opts.usageOut.total_tokens = data.usage.total_tokens
@@ -403,7 +415,7 @@ export async function translateText(text, target, source = 'English') {
       { role: 'system', content: system },
       { role: 'user', content: text.trim() },
     ],
-    { temperature: 0.2, modelDash: QWEN_CHAT_MODEL },
+    { temperature: 0.2, modelDash: resolveQwenChatModel() },
   )
   return out.trim()
 }
@@ -443,7 +455,7 @@ export async function summarizeTranscript(transcript, course, title, options = {
   const raw = await chatCompleteJson(messages, {
     temperature: 0.3,
     responseFormat: { type: 'json_object' },
-    modelDash: QWEN_CHAT_MODEL,
+    modelDash: resolveQwenChatModel(),
     usageOut,
   })
   let parsed

@@ -18,6 +18,7 @@ describe('normalizeProvider', () => {
 
   it('maps known aliases', () => {
     expect(normalizeProvider('qwen')).toBe('dashscope')
+    expect(normalizeProvider('qwen-flash')).toBe('dashscope')
     expect(normalizeProvider('sendinblue')).toBe('brevo')
     expect(normalizeProvider('gpt')).toBe('openai')
   })

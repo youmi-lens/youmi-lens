@@ -3,6 +3,7 @@
  */
 
 import { buildSummarizeMessages } from '../summarizePrompt.mjs'
+import { resolveQwenChatModel } from '../qwenModelConfig.mjs'
 
 const OPENAI_AUDIO = 'https://api.openai.com/v1/audio/transcriptions'
 const OPENAI_CHAT = 'https://api.openai.com/v1/chat/completions'
@@ -68,7 +69,7 @@ export async function byokSummarize(provider, transcript, course, title, apiKey)
   } else if (provider === 'deepseek') {
     raw = await chatOpenAiCompatible(DEEPSEEK_CHAT, apiKey, 'deepseek-chat', payload)
   } else if (provider === 'qwen') {
-    raw = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, 'qwen-turbo', payload)
+    raw = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, resolveQwenChatModel(), payload)
   } else {
     throw new Error('BAD_PROVIDER')
   }
@@ -116,7 +117,7 @@ export async function byokTranslate(provider, text, target, apiKey) {
       messages,
     })
   } else if (provider === 'qwen') {
-    out = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, 'qwen-turbo', {
+    out = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, resolveQwenChatModel(), {
       temperature: 0.2,
       messages,
     })
