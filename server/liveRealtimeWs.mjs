@@ -489,11 +489,36 @@ export function attachLiveRealtimeWs(server) {
           }, 120)
         }
 
+        // Every finalized English caption's translation job must reach an
+        // OBSERVABLE terminal state -- delivered, or explicitly unavailable --
+        // never silent disappearance (queue-age drop, queue-depth drop, an
+        // empty model response, and a hard request failure all used to vanish
+        // with no client signal and, for the two queue-pressure paths, no log
+        // at all). This sends a terminal `stream_translation` with no
+        // `translated_text` and `status: 'unavailable'` so the client can
+        // settle that caption line out of a "still translating" state instead
+        // of waiting forever, and always logs the reason with the job's id.
+        const sendTranslationUnavailable = (job, reason) => {
+          console.warn(
+            '[liveRealtimeWs] live_translation_unavailable',
+            JSON.stringify({ wsSessionId, id: job.id, interim: false, reason, ageMs: Date.now() - job.enqueuedAt }),
+          )
+          if (clientRef.ws) {
+            safeSend(clientRef.ws, {
+              type: 'stream_translation', id: job.id, status: 'unavailable', reason,
+              translation_language: translationLanguage, is_final: true,
+            })
+          }
+        }
+
         const drainFinalTranslationQueue = () => {
           while (activeFinalTranslations < MAX_CONCURRENT_FINAL_TRANSLATIONS && finalTranslationQueue.length > 0) {
             const job = finalTranslationQueue.shift()
             if (!job) return
-            if (Date.now() - job.enqueuedAt > 8000) continue
+            if (Date.now() - job.enqueuedAt > 8000) {
+              sendTranslationUnavailable(job, 'stale')
+              continue
+            }
             activeFinalTranslations += 1
             console.info(
               '[liveRealtimeWs] live_translation_requested',
@@ -503,7 +528,10 @@ export function attachLiveRealtimeWs(server) {
               .translateText(job.text, qwenTarget.name, qwenSource.name)
               .then((translatedText) => {
                 const out = typeof translatedText === 'string' ? translatedText.trim() : ''
-                if (!out) return
+                if (!out) {
+                  sendTranslationUnavailable(job, 'empty_response')
+                  return
+                }
                 console.info(
                   '[liveRealtimeWs] live_translation_ok',
                   JSON.stringify({ wsSessionId, id: job.id, textLen: job.text.length, translationLen: out.length }),
@@ -530,6 +558,7 @@ export function attachLiveRealtimeWs(server) {
                     message: err instanceof Error ? err.message : String(err),
                   }),
                 )
+                sendTranslationUnavailable(job, 'request_failed')
               })
               .finally(() => {
                 activeFinalTranslations -= 1
@@ -541,7 +570,8 @@ export function attachLiveRealtimeWs(server) {
         const enqueueFinalTranslation = (id, text) => {
           finalTranslationQueue.push({ id, text, enqueuedAt: Date.now() })
           if (finalTranslationQueue.length > MAX_FINAL_TRANSLATION_QUEUE) {
-            finalTranslationQueue.splice(0, finalTranslationQueue.length - MAX_FINAL_TRANSLATION_QUEUE)
+            const overflow = finalTranslationQueue.splice(0, finalTranslationQueue.length - MAX_FINAL_TRANSLATION_QUEUE)
+            for (const job of overflow) sendTranslationUnavailable(job, 'queue_overflow')
           }
           drainFinalTranslationQueue()
         }
