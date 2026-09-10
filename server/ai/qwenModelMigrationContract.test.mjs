@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { byokTranslate } from './byok/adapters.mjs'
+import { byokSummarize, byokTranslate } from './byok/adapters.mjs'
 import * as hosted from './hosted/youmiHosted.mjs'
 
 const ENV_KEYS = [
@@ -71,6 +71,21 @@ describe('Qwen text-model migration runtime contract', () => {
     })
     await expect(byokTranslate('qwen', 'Class begins now.', 'zh', 'test-only-key')).resolves.toBe('翻译结果')
     expect(requests[0].model).toBe('qwen-flash')
+  })
+
+  it('maps the shared structured-summary fields back to the established BYOK response shape', async () => {
+    delete process.env.YUMI_QWEN_CHAT_MODEL
+    globalThis.fetch = vi.fn(async () => jsonResponse({
+      choices: [{ message: { content: JSON.stringify({
+        source_summary: 'English summary',
+        translated_summary: '中文摘要',
+      }) } }],
+    }))
+
+    await expect(byokSummarize('qwen', 'Transcript', 'Course', 'Title', 'test-only-key')).resolves.toEqual({
+      summaryEn: 'English summary',
+      summaryZh: '中文摘要',
+    })
   })
 
   it('fails before a request when an old deployment override still selects qwen-turbo', async () => {

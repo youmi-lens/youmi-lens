@@ -88,8 +88,11 @@ export async function byokSummarize(provider, transcript, course, title, apiKey)
     }
     if (!parsed) throw new Error('BYOK_SUMMARY_PARSE')
   }
-  const summaryEn = parsed.summary_en?.trim()
-  const summaryZh = parsed.summary_zh?.trim()
+  // The provider-neutral prompt uses source/translated names; retain the
+  // public BYOK response contract (summaryEn/summaryZh) and accept the legacy
+  // field names only for compatibility with older provider responses.
+  const summaryEn = (parsed.source_summary ?? parsed.summary_en)?.trim()
+  const summaryZh = (parsed.translated_summary ?? parsed.summary_zh)?.trim()
   if (!summaryEn || !summaryZh) throw new Error('BYOK_SUMMARY_SHAPE')
   return { summaryEn, summaryZh }
 }
