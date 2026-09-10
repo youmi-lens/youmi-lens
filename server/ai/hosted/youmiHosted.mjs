@@ -135,6 +135,7 @@ async function chatCompleteJson(messages, opts = {}) {
           body: JSON.stringify({
             model: dashModel,
             temperature: opts.temperature ?? 0.3,
+            ...(Number.isInteger(opts.maxTokens) ? { max_tokens: opts.maxTokens } : {}),
             ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
             messages,
           }),
@@ -415,7 +416,7 @@ export async function translateText(text, target, source = 'English') {
       { role: 'system', content: system },
       { role: 'user', content: text.trim() },
     ],
-    { temperature: 0.2, modelDash: resolveQwenChatModel() },
+    { temperature: 0.2, maxTokens: 512, modelDash: resolveQwenChatModel() },
   )
   return out.trim()
 }
@@ -454,6 +455,7 @@ export async function summarizeTranscript(transcript, course, title, options = {
   const usageOut = {}
   const raw = await chatCompleteJson(messages, {
     temperature: 0.3,
+    maxTokens: 1200,
     responseFormat: { type: 'json_object' },
     modelDash: resolveQwenChatModel(),
     usageOut,

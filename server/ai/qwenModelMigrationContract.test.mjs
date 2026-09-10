@@ -58,6 +58,8 @@ describe('Qwen text-model migration runtime contract', () => {
     })
     expect(requests).toHaveLength(2)
     expect(requests.map((request) => request.model)).toEqual(['qwen-flash', 'qwen-flash'])
+    expect(requests[0].max_tokens).toBe(512)
+    expect(requests[1].max_tokens).toBe(1200)
     expect(requests[1].response_format).toEqual({ type: 'json_object' })
   })
 
@@ -71,21 +73,27 @@ describe('Qwen text-model migration runtime contract', () => {
     })
     await expect(byokTranslate('qwen', 'Class begins now.', 'zh', 'test-only-key')).resolves.toBe('翻译结果')
     expect(requests[0].model).toBe('qwen-flash')
+    expect(requests[0].max_tokens).toBe(512)
   })
 
   it('maps the shared structured-summary fields back to the established BYOK response shape', async () => {
     delete process.env.YUMI_QWEN_CHAT_MODEL
-    globalThis.fetch = vi.fn(async () => jsonResponse({
+    const requests = []
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      requests.push(JSON.parse(init.body))
+      return jsonResponse({
       choices: [{ message: { content: JSON.stringify({
         source_summary: 'English summary',
         translated_summary: '中文摘要',
       }) } }],
-    }))
+      })
+    })
 
     await expect(byokSummarize('qwen', 'Transcript', 'Course', 'Title', 'test-only-key')).resolves.toEqual({
       summaryEn: 'English summary',
       summaryZh: '中文摘要',
     })
+    expect(requests[0].max_tokens).toBe(1200)
   })
 
   it('fails before a request when an old deployment override still selects qwen-turbo', async () => {

@@ -60,6 +60,7 @@ export async function byokSummarize(provider, transcript, course, title, apiKey)
   const messages = buildSummarizeMessages(transcript, course, title)
   const payload = {
     temperature: 0.3,
+    max_tokens: 1200,
     response_format: { type: 'json_object' },
     messages,
   }
@@ -122,6 +123,7 @@ export async function byokTranslate(provider, text, target, apiKey) {
   } else if (provider === 'qwen') {
     out = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, resolveQwenChatModel(), {
       temperature: 0.2,
+      max_tokens: 512,
       messages,
     })
   } else {
