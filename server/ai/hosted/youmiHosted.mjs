@@ -20,6 +20,7 @@
  */
 
 import { buildSummarizeMessages } from '../summarizePrompt.mjs'
+import { extractSummaryFields, parseJsonObjectLoose, summaryShapeDiagnostic } from '../summaryResponseParsing.mjs'
 import { qwenLanguageFor, resolveContentLanguagePair, shouldTranslate } from '../../contentLanguages.mjs'
 import {
   getDashScopeEffectiveKey,
@@ -482,18 +483,23 @@ export async function summarizeTranscript(transcript, course, title, options = {
     modelDash: resolveQwenChatModel(),
     usageOut,
   })
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
+  const parsed = parseJsonObjectLoose(raw)
+  if (!parsed) {
+    console.warn('[youmiHosted] summarizeTranscript parse_failed', summaryShapeDiagnostic(raw, parsed))
     throw new Error('HOSTED_SUMMARY_PARSE')
   }
-  const sourceSummary = parsed.source_summary?.trim()
-  if (!sourceSummary) throw new Error('HOSTED_SUMMARY_SHAPE')
+  const { sourceSummary, translatedSummary: translatedFromResponse } = extractSummaryFields(parsed)
+  if (!sourceSummary) {
+    console.warn('[youmiHosted] summarizeTranscript shape_failed', { field: 'source_summary', ...summaryShapeDiagnostic(raw, parsed) })
+    throw new Error('HOSTED_SUMMARY_SHAPE')
+  }
   let translatedSummary = null
   if (needTranslated) {
-    translatedSummary = parsed.translated_summary?.trim() || null
-    if (!translatedSummary) throw new Error('HOSTED_SUMMARY_SHAPE')
+    translatedSummary = translatedFromResponse
+    if (!translatedSummary) {
+      console.warn('[youmiHosted] summarizeTranscript shape_failed', { field: 'translated_summary', ...summaryShapeDiagnostic(raw, parsed) })
+      throw new Error('HOSTED_SUMMARY_SHAPE')
+    }
   }
   console.warn('[youmiHosted] summarizeTranscript done', {
     sourceSummaryLen: sourceSummary.length, translatedSummaryLen: translatedSummary?.length ?? 0,

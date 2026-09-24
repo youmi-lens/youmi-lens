@@ -36,6 +36,7 @@ const PROCESSING_RECORDING_COLUMNS = [
   'id',
   'user_id',
   'duration_sec',
+  'created_at',
   'storage_path',
   'course',
   'title',
@@ -494,6 +495,14 @@ async function runJob({
   usingServiceRoleForRecordings,
 }) {
   const jobT0 = Date.now()
+  // Bounded, content-free per-job timing — durations and stage outcomes only,
+  // never transcript/summary text. uploadToJobStartMs is the only figure that
+  // needs the recording's own creation time; everything else is measured
+  // relative to jobT0 below.
+  const createdAtMs = recording?.created_at ? Date.parse(recording.created_at) : NaN
+  const uploadToJobStartMs = Number.isFinite(createdAtMs) ? Math.max(0, jobT0 - createdAtMs) : null
+  const stageTimings = { transcript_persist_ms: null, translation_ms: null, final_persist_ms: null }
+  const stageOutcomes = { transcript: null, translation: null, summary: null }
   const heartbeat = setInterval(() => {
     void renewProcessingLease(dbSb, { recordingId, leaseToken }).then(({ renewed }) => {
       if (!renewed) jobLog('lease_lost', { recordingId })
@@ -604,30 +613,41 @@ async function runJob({
     const pathTail = row.storage_path.includes('/')
       ? row.storage_path.slice(row.storage_path.lastIndexOf('/') + 1)
       : row.storage_path
-    try {
-      const headRes = await fetch(signed.signedUrl, { method: 'HEAD' })
-      const cl = headRes.headers.get('content-length')
-      const ct = headRes.headers.get('content-type')
-      jobLog('audio_head', {
-        recordingId,
-        storageObjectTail: pathTail,
-        headStatus: headRes.status,
-        contentLength: cl ?? 'absent',
-        contentType: ct ?? 'absent',
+    // Diagnostic only — its result (content-length/type) never gates or
+    // informs transcription, so it must not block the transcribe submit on
+    // the critical path. Fire-and-forget; logs the same fields as before.
+    void fetch(signed.signedUrl, { method: 'HEAD' })
+      .then((headRes) => {
+        jobLog('audio_head', {
+          recordingId,
+          storageObjectTail: pathTail,
+          headStatus: headRes.status,
+          contentLength: headRes.headers.get('content-length') ?? 'absent',
+          contentType: headRes.headers.get('content-type') ?? 'absent',
+        })
       })
-    } catch (hErr) {
-      jobLog('audio_head_failed', {
-        recordingId,
-        storageObjectTail: pathTail,
-        message: String(hErr),
+      .catch((hErr) => {
+        jobLog('audio_head_failed', {
+          recordingId,
+          storageObjectTail: pathTail,
+          message: String(hErr),
+        })
       })
-    }
 
     let transcriptRaw
+    const transcribeT0 = Date.now()
     try {
       jobLog('transcribe_begin', { recordingId })
       transcriptRaw = await youmiHosted.transcribeAudioFromUrl(signed.signedUrl, [qwenLanguageFor(sourceLanguage).code])
-      jobLog('transcribe_done', { recordingId, textLen: transcriptRaw?.length ?? 0 })
+      // Submit vs. provider-queue-wait aren't split out here: the hosted
+      // adapter (youmiHosted.mjs) owns that boundary internally and is a
+      // stateless, recording-agnostic module — splitting it would mean
+      // threading recordingId through a shared AI-provider adapter for a
+      // number that's provider-queue-dominated anyway (see Task D evidence:
+      // 42s-6min variance). This combined figure still separates OUR total
+      // transcribe wall time from provider queue time in the BEFORE/AFTER report.
+      stageTimings.transcribe_ms = Date.now() - transcribeT0
+      jobLog('transcribe_done', { recordingId, textLen: transcriptRaw?.length ?? 0, transcribe_ms: stageTimings.transcribe_ms })
     } catch (e) {
       console.warn('[process-recording] transcribe', e)
       jobLog('transcribe_error', { recordingId, message: e instanceof Error ? e.message : String(e) })
@@ -673,6 +693,7 @@ async function runJob({
       }),
     )
 
+    const transcriptPersistT0 = Date.now()
     let { error: txErr } = await dbSb
       .from('recordings')
       .update(transcriptSavePayload)
@@ -713,6 +734,8 @@ async function runJob({
       await markFailed('Could not save transcript after transcription.')
       return
     }
+    stageTimings.transcript_persist_ms = Date.now() - transcriptPersistT0
+    stageOutcomes.transcript = 'executed'
 
     console.warn('[process-recording] done', JSON.stringify({ phase: 'transcript_saved_core', recordingId }))
 
@@ -738,47 +761,63 @@ async function runJob({
       transcriptRawLen: transcriptRaw.length,
     })
     } else {
+      stageOutcomes.transcript = 'reused'
       jobLog('resume_summary_only', {
         recordingId,
         transcriptLen: transcriptCanonical.length,
       })
     }
 
-    // Best-effort: translate the English transcript to Chinese for bilingual
-    // study support. A failure here must never fail the job — the English
-    // transcript is already persisted and the summaries stand on their own.
+    // Transcript translation (best-effort, writes translated_transcript /
+    // transcript_zh) and summarization (required, writes summary_en /
+    // summary_zh / source_summary / translated_summary) both depend only on
+    // the already-persisted canonical transcript — never on each other's
+    // output — and write disjoint columns, so they run concurrently instead
+    // of serially to cut wall time. translateStageDone is started here but
+    // deliberately not awaited yet; it keeps running while summarization
+    // proceeds below, and is joined (awaited) at each exit point so the job
+    // never returns with it still in flight. Its own semantics are unchanged:
+    // still gated the same way, still best-effort, still never fails the job.
     const canTranslate = youmiHosted.hostedCapabilities().translate
-    if (
+    const wantTranscriptTranslation = (
       resumeStage === PROCESSING_RESUME_STAGES.TRANSCRIPTION_THEN_SUMMARY
       && canTranslate
       && shouldTranslate(sourceLanguage, translationLanguage)
-    ) {
-      try {
-        jobLog('transcript_translate_begin', {
-          recordingId,
-          transcriptLen: transcriptCanonical.length,
+    )
+    const translateStageDone = wantTranscriptTranslation
+      ? (async () => {
+          stageOutcomes.translation = 'executed'
+          const translateT0 = Date.now()
+          jobLog('transcript_translate_begin', {
+            recordingId,
+            transcriptLen: transcriptCanonical.length,
+          })
+          const translatedTranscript = await translateTranscript(transcriptCanonical, sourceLanguage, translationLanguage)
+          if (translatedTranscript) {
+            await persistTranslatedTranscript(dbSb, recordingId, userId, translatedTranscript, translationLanguage)
+            stageTimings.translation_ms = Date.now() - translateT0
+            jobLog('transcript_translate_done', { recordingId, translatedTranscriptLen: translatedTranscript.length, translationLanguage })
+          } else {
+            stageTimings.translation_ms = Date.now() - translateT0
+            jobLog('transcript_translate_empty', { recordingId })
+          }
+        })().catch((e) => {
+          // Logged and swallowed — the Chinese transcript is optional study support.
+          console.warn('[process-recording] transcript_translate', e)
+          jobLog('transcript_translate_error', {
+            recordingId,
+            message: e instanceof Error ? e.message : String(e),
+          })
         })
-        const translatedTranscript = await translateTranscript(transcriptCanonical, sourceLanguage, translationLanguage)
-        if (translatedTranscript) {
-          await persistTranslatedTranscript(dbSb, recordingId, userId, translatedTranscript, translationLanguage)
-          jobLog('transcript_translate_done', { recordingId, translatedTranscriptLen: translatedTranscript.length, translationLanguage })
-        } else {
-          jobLog('transcript_translate_empty', { recordingId })
-        }
-      } catch (e) {
-        // Logged and swallowed — the Chinese transcript is optional study support.
-        console.warn('[process-recording] transcript_translate', e)
-        jobLog('transcript_translate_error', {
-          recordingId,
-          message: e instanceof Error ? e.message : String(e),
-        })
-      }
-    } else {
-      jobLog('transcript_translate_skipped', { recordingId, reason: canTranslate ? 'source_equals_target' : 'translate_unconfigured' })
-    }
+      : (
+        stageOutcomes.translation = 'skipped',
+        jobLog('transcript_translate_skipped', { recordingId, reason: canTranslate ? 'source_equals_target' : 'translate_unconfigured' }),
+        Promise.resolve()
+      )
 
     const canSummarize = youmiHosted.hostedCapabilities().summarize
     if (!canSummarize) {
+      await translateStageDone
       jobLog('job_done_no_summarize', { recordingId })
       v1PipelineLog('job_partial', { recordingId, reason: 'summarize_unconfigured' })
       return
@@ -820,6 +859,7 @@ async function runJob({
         eventType: 'summary',
         feature: 'after_class_summary',
       })
+      stageOutcomes.summary = 'executed'
       jobLog('summarize_done', {
         recordingId,
         sourceSummaryLen: sourceSummary?.length ?? 0,
@@ -828,6 +868,22 @@ async function runJob({
     } catch (e) {
       console.warn('[process-recording] summarize', e)
       jobLog('summarize_error', { recordingId, message: e instanceof Error ? e.message : String(e) })
+      // Join the concurrently-running translation stage before returning —
+      // it writes independent columns and its outcome (success or its own
+      // already-swallowed failure) is unaffected by this summarize failure.
+      await translateStageDone
+      jobLog('stage_timings', {
+        recordingId,
+        outcome: 'summary_failed',
+        upload_to_job_start_ms: uploadToJobStartMs,
+        transcribe_ms: stageTimings.transcribe_ms ?? null,
+        transcript_persist_ms: stageTimings.transcript_persist_ms,
+        translation_ms: stageTimings.translation_ms,
+        summary_ms: Date.now() - summarizeWallT0,
+        final_persist_ms: null,
+        total_processing_ms: Date.now() - jobT0,
+        stages: { ...stageOutcomes, summary: 'failed' },
+      })
       const summarizeFailCore = {
         // Failure is terminal/visible to clients, while the persisted transcript
         // remains authoritative evidence that the next retry is summary-only.
@@ -885,6 +941,12 @@ async function runJob({
       summarize_wall_ms: Date.now() - summarizeWallT0,
     })
 
+    // Join the concurrently-running translation stage — by this point
+    // summarization has already taken at least as long, so this almost never
+    // adds wait time; it only bounds the job's lifecycle so a fast summarize
+    // can't return while translation is still writing its own columns.
+    await translateStageDone
+
     const translationRequired = shouldTranslate(sourceLanguage, translationLanguage)
     const summaryOk = Boolean(sourceSummary?.trim() && (!translationRequired || translatedSummary?.trim()))
     /** Summary success path: persist the complete language pair atomically. */
@@ -922,11 +984,13 @@ async function runJob({
         usingServiceRoleForRecordings,
       }),
     )
+    const finalPersistT0 = Date.now()
     const { error: doneErr } = await dbSb
       .from('recordings')
       .update(donePayload)
       .eq('id', recordingId)
       .eq('user_id', userId)
+    stageTimings.final_persist_ms = Date.now() - finalPersistT0
     if (doneErr) {
       console.warn(
         '[process-recording] supabase update error',
@@ -966,6 +1030,18 @@ async function runJob({
         },
         'final_done_flags',
       )
+      jobLog('stage_timings', {
+        recordingId,
+        outcome: 'done',
+        upload_to_job_start_ms: uploadToJobStartMs,
+        transcribe_ms: stageTimings.transcribe_ms ?? null,
+        transcript_persist_ms: stageTimings.transcript_persist_ms,
+        translation_ms: stageTimings.translation_ms,
+        summary_ms: Date.now() - summarizeWallT0,
+        final_persist_ms: stageTimings.final_persist_ms,
+        total_processing_ms: Date.now() - jobT0,
+        stages: stageOutcomes,
+      })
       jobLog('job_done', { recordingId, summary_ready_ms: summaryReadyMs })
       console.warn('[process-recording] done', JSON.stringify({ phase: 'job_complete', recordingId }))
     }

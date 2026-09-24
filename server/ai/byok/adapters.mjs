@@ -3,6 +3,7 @@
  */
 
 import { buildSummarizeMessages } from '../summarizePrompt.mjs'
+import { extractSummaryFields, parseJsonObjectLoose } from '../summaryResponseParsing.mjs'
 import { resolveQwenChatModel } from '../qwenModelConfig.mjs'
 
 const OPENAI_AUDIO = 'https://api.openai.com/v1/audio/transcriptions'
@@ -82,25 +83,12 @@ export async function byokSummarize(provider, transcript, course, title, apiKey)
     throw new Error('BAD_PROVIDER')
   }
 
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (m) {
-      try {
-        parsed = JSON.parse(m[0])
-      } catch {
-        /* fall through */
-      }
-    }
-    if (!parsed) throw new Error('BYOK_SUMMARY_PARSE')
-  }
+  const parsed = parseJsonObjectLoose(raw)
+  if (!parsed) throw new Error('BYOK_SUMMARY_PARSE')
   // The provider-neutral prompt uses source/translated names; retain the
   // public BYOK response contract (summaryEn/summaryZh) and accept the legacy
   // field names only for compatibility with older provider responses.
-  const summaryEn = (parsed.source_summary ?? parsed.summary_en)?.trim()
-  const summaryZh = (parsed.translated_summary ?? parsed.summary_zh)?.trim()
+  const { sourceSummary: summaryEn, translatedSummary: summaryZh } = extractSummaryFields(parsed)
   if (!summaryEn || !summaryZh) throw new Error('BYOK_SUMMARY_SHAPE')
   return { summaryEn, summaryZh }
 }

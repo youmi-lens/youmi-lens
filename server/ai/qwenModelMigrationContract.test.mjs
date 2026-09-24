@@ -141,4 +141,59 @@ describe('Qwen text-model migration runtime contract', () => {
       'BYOK_CHAT_TRUNCATED',
     )
   })
+
+  // Real production incident (2026-09-24, recording 9ca64d1f-1b5e-4dc2-a7cf-
+  // 9c76ebe1db7b): a genuinely successful, non-truncated hosted summary
+  // completion used the legacy summary_en/summary_zh field pair (a shape the
+  // sibling BYOK path already tolerated) and was rejected with
+  // HOSTED_SUMMARY_SHAPE, forcing a full re-transcription + re-translation on
+  // retry even though both had already succeeded. This pins the fix end to
+  // end through the actual hosted call site, not just the shared parser unit.
+  it('accepts the incident-rejected legacy field-name summary shape end to end through the hosted path', async () => {
+    process.env.ENABLE_STUB_AI = 'false'
+    delete process.env.VITE_ENABLE_STUB_AI
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    delete process.env.DASHSCOPE_OVERSEAS_API_KEY
+    delete process.env.YUMI_QWEN_CHAT_MODEL
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({
+        model: 'qwen-flash',
+        choices: [{ message: { content: JSON.stringify({ summary_en: 'English summary', summary_zh: '中文摘要' }) } }],
+      }),
+    )
+    await expect(hosted.summarizeTranscript('Lecture transcript', 'CS111', 'Lecture 1')).resolves.toMatchObject({
+      sourceSummary: 'English summary',
+      translatedSummary: '中文摘要',
+    })
+  })
+
+  it('accepts a prose/markdown-fenced-but-complete hosted summary response via JSON extraction', async () => {
+    process.env.ENABLE_STUB_AI = 'false'
+    delete process.env.VITE_ENABLE_STUB_AI
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    delete process.env.DASHSCOPE_OVERSEAS_API_KEY
+    delete process.env.YUMI_QWEN_CHAT_MODEL
+    const fenced = '```json\n' + JSON.stringify({ source_summary: 'Source', translated_summary: 'Translated' }) + '\n```'
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ model: 'qwen-flash', choices: [{ message: { content: fenced } }] }),
+    )
+    await expect(hosted.summarizeTranscript('Lecture transcript', 'CS111', 'Lecture 1')).resolves.toMatchObject({
+      sourceSummary: 'Source',
+      translatedSummary: 'Translated',
+    })
+  })
+
+  it('still rejects a genuinely malformed/fieldless hosted summary response as HOSTED_SUMMARY_SHAPE', async () => {
+    process.env.ENABLE_STUB_AI = 'false'
+    delete process.env.VITE_ENABLE_STUB_AI
+    process.env.DASHSCOPE_API_KEY = 'test-only-key'
+    delete process.env.DASHSCOPE_OVERSEAS_API_KEY
+    delete process.env.YUMI_QWEN_CHAT_MODEL
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ model: 'qwen-flash', choices: [{ message: { content: JSON.stringify({ unrelated_field: 'x' }) } }] }),
+    )
+    await expect(hosted.summarizeTranscript('Lecture transcript', 'CS111', 'Lecture 1')).rejects.toThrow(
+      'HOSTED_SUMMARY_SHAPE',
+    )
+  })
 })
