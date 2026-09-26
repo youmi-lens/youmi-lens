@@ -14,7 +14,7 @@ function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
 
 /** Approved production macOS build — must equal the homepage CTA in index.html. */
 export const MAC_DOWNLOAD_URL =
-  'https://github.com/Ayden-Z0410/youmi-lens/releases/download/v0.1.9/Youmi.Lens_0.1.9_aarch64.dmg'
+  'https://github.com/youmi-lens/youmi-lens/releases/download/v0.1.9/Youmi.Lens_0.1.9_aarch64.dmg'
 
 /** Absolute destinations so every link resolves from any route, never /pricing/#download. */
 export const NAV_LINKS = [
