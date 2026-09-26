@@ -46,7 +46,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/Ayden-Z0410/youmi-lens/releases/latest/download/latest.json"
+        "https://github.com/youmi-lens/youmi-lens/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlCMUM0MERBNzQyNzY4MkMKUldRc2FDZDAya0FjbTAzRFNyeFp1UEpuSVZBZ2laL3VsRHk4WHBPTTVGeG5wT1RTRXY3RWlOUmIK"
     },
