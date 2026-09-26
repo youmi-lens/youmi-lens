@@ -9,7 +9,7 @@ preserving account, recordings, **pending uploads**, settings, and local data.
 
 - **Hosting:** GitHub Releases + a static, signed `latest.json` manifest.
 - **Endpoint** (`src-tauri/tauri.conf.json` → `plugins.updater.endpoints`):
-  `https://github.com/Ayden-Z0410/youmi-lens/releases/latest/download/latest.json`
+  `https://github.com/youmi-lens/youmi-lens/releases/latest/download/latest.json`
 - **Signature verification is mandatory** (Tauri refuses unsigned/mismatched
   updates). No unsigned fallback. HTTPS only. Downgrade is prevented (an update is
   offered only for a strictly newer semver — see `src/lib/updater/updaterCore.ts`).
