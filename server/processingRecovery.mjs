@@ -23,9 +23,21 @@ function summaryForLanguage(recording, language) {
  * Durable content, not a transient ai_status, determines the next stage.
  * A persisted canonical transcript is authoritative: recovery never sends the
  * audio through transcription again unless that transcript is absent.
+ *
+ * The one exception is `ai_status === 'done'` specifically (checked first,
+ * below) — unlike every other ai_status value (queued/transcribing/
+ * summarizing/failed), 'done' is never written speculatively or mid-flight
+ * anywhere in this codebase; it is only ever set atomically together with a
+ * genuinely complete result. That includes a DashScope
+ * SUCCESS_WITH_NO_VALID_FRAGMENT recording (transcription completed, found
+ * no speech), which legitimately has an EMPTY transcript. Without this
+ * check, the content-based logic below would misread that empty transcript
+ * as "never transcribed" and resubmit the same audio to the provider on
+ * every future resume/retry.
  */
 export function determineProcessingResumeStage(recording) {
   const row = recording ?? {}
+  if (row.ai_status === 'done') return PROCESSING_RESUME_STAGES.COMPLETE
   const sourceLanguage = row.source_language || 'en'
   const translationLanguage = row.translation_language || 'zh-Hans'
   const translationRequired = sourceLanguage !== translationLanguage

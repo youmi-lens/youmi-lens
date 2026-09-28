@@ -272,6 +272,23 @@ async function submitParaformerTask(apiKey, bases, fileUrl, languageHints) {
   return taskId
 }
 
+/**
+ * A Paraformer task can reach terminal FAILED for reasons with very
+ * different retry semantics. `SUCCESS_WITH_NO_VALID_FRAGMENT` is DashScope's
+ * own terminal code for "the task ran to completion but found no speech to
+ * transcribe" (confirmed against a real production failure, recording
+ * 7885e218-2814-4284-bfe9-dbca471a33a8, 2026-09-28) — a deterministic
+ * outcome for that exact audio, not a transient provider/network problem.
+ * Retrying the same audio will fail identically. Every other FAILED code is
+ * still the generic, possibly-transient HOSTED_TRANSCRIBE_FAILED — this
+ * function only carves out the one code we have real evidence is
+ * non-transient, so no other failure classification changes.
+ */
+export function paraformerFailureErrorCode(out) {
+  if (out?.code === 'SUCCESS_WITH_NO_VALID_FRAGMENT') return 'HOSTED_TRANSCRIBE_NO_SPEECH'
+  return 'HOSTED_TRANSCRIBE_FAILED'
+}
+
 async function pollParaformerTask(apiKey, bases, taskId) {
   const url = `${bases.tasksPollBase}/${taskId}`
   const maxMs = Number(process.env.YUMI_PARAFORMER_POLL_MAX_MS || 600_000)
@@ -324,7 +341,7 @@ async function pollParaformerTask(apiKey, bases, taskId) {
     }
     if (status === 'FAILED' || status === 'UNKNOWN') {
       console.warn('[youmiHosted] paraformer task failed', status, raw.slice(0, 400))
-      throw new Error('HOSTED_TRANSCRIBE_FAILED')
+      throw new Error(status === 'FAILED' ? paraformerFailureErrorCode(out) : 'HOSTED_TRANSCRIBE_FAILED')
     }
     await new Promise((res) => setTimeout(res, intervalMs))
   }
