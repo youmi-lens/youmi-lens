@@ -541,11 +541,15 @@ export async function deleteRecordingRemote(
   id: string,
   storagePath: string,
 ): Promise<void> {
-  const { error: stErr } = await supabase.storage.from(BUCKET).remove([storagePath])
-  if (stErr) throw stErr
-
+  // Delete the DB row FIRST. Removing storage before the row is gone means a
+  // failed row delete leaves a visible lecture with permanently missing audio.
+  // Orphaned storage after a successful row delete is recoverable; silent audio
+  // loss is not.
   const { error } = await supabase.from('recordings').delete().eq('id', id).eq('user_id', userId)
   if (error) throw error
+
+  const { error: stErr } = await supabase.storage.from(BUCKET).remove([storagePath])
+  if (stErr) throw stErr
 }
 
 function describeSupabaseError(prefix: string, error: unknown): Error {
@@ -572,8 +576,15 @@ function describeSupabaseError(prefix: string, error: unknown): Error {
 }
 
 /**
- * Delete one or more cloud or local lecture recordings. Cloud path removes Storage audio when a storage path exists,
- * then deletes the recording rows. No Supabase work for `localOnly` (local DB + blob only).
+ * Delete one or more cloud or local lecture recordings.
+ *
+ * Cloud path: delete recording rows first, verify they are gone, then remove
+ * Storage audio. Storage-before-row ordering is unsafe — a failed row delete
+ * after a successful storage remove permanently destroys the only audio copy
+ * while the lecture remains visible/restorable in the UI.
+ *
+ * Storage cleanup after a successful row delete is best-effort: an orphaned
+ * object is preferable to silent audio loss. No Supabase work for `localOnly`.
  */
 export async function deleteLectures(
   ids: string[],
@@ -632,18 +643,6 @@ export async function deleteLectures(
     throw new Error(`[deleteLectures] recording row not found for id(s): ${missingIds.join(',')}`)
   }
 
-  for (const id of unique) {
-    const storagePath = storageById.get(id)
-    if (!storagePath) {
-      console.warn('[deleteLectures] storage_path missing; deleting row only', { id })
-      continue
-    }
-    const { error: stErr } = await supabase.storage.from(BUCKET).remove([storagePath])
-    if (stErr) {
-      throw describeSupabaseError(`[deleteLectures] storage remove failed for id=${id}`, stErr)
-    }
-  }
-
   const { error: deleteError } = await supabase
     .from('recordings')
     .delete()
@@ -666,5 +665,26 @@ export async function deleteLectures(
       .map((row) => row.id)
       .filter(Boolean)
     throw new Error(`[deleteLectures] row delete did not remove id(s): ${remainingIds.join(',')}`)
+  }
+
+  for (const id of unique) {
+    const storagePath = storageById.get(id)
+    if (!storagePath) {
+      console.warn('[deleteLectures] storage_path missing; row already deleted', { id })
+      continue
+    }
+    const { error: stErr } = await supabase.storage.from(BUCKET).remove([storagePath])
+    if (stErr) {
+      // Row is already gone — do not fail the purge or the UI will look like
+      // nothing changed while audio may already be unreachable from the app.
+      console.warn(
+        '[deleteLectures] storage remove failed after row delete (orphan left)',
+        JSON.stringify({
+          id,
+          storagePath,
+          message: stErr.message ?? String(stErr),
+        }),
+      )
+    }
   }
 }
