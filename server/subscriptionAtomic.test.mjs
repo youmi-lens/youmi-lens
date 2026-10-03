@@ -133,13 +133,52 @@ describe('real PostgreSQL atomic subscription operation',()=>{
     const purchase=transaction(A,{purchaseDate:new Date().toISOString(),appleSignedAt:new Date().toISOString()})
     expect((await verifyAndPersistSubscription(db,A,purchase,{purchaseAuthorizationId:rows[0].admission.authorizationId})).active).toBe(true)
   })
-  it('admission cannot authorize another user or a second chain',async()=>{
+  it('admission is not ownership proof and cannot override the signed token',async()=>{
     const {rows}=await db.pg.query('select public.authorize_subscription_purchase($1,$2) as admission',[A,product])
     const options={purchaseAuthorizationId:rows[0].admission.authorizationId}
     const purchase=transaction(A,{purchaseDate:new Date().toISOString(),appleSignedAt:new Date().toISOString()})
-    await expect(verifyAndPersistSubscription(db,B,{...purchase,appAccountToken:B},options)).rejects.toThrow('persistence failed')
+    await expect(verifyAndPersistSubscription(db,B,purchase,options)).rejects.toThrow(SubscriptionAccountTokenError)
     await verifyAndPersistSubscription(db,A,purchase,options)
-    await expect(verifyAndPersistSubscription(db,A,{...purchase,originalTransactionId:'other'},options)).rejects.toThrow('persistence failed')
+    expect((await verifyAndPersistSubscription(db,A,{...purchase,originalTransactionId:'other'},options)).active).toBe(true)
+  })
+  it('signed Production notification can deliver first purchase while sales stay closed',async()=>{
+    await db.pg.exec('update public.billing_products set is_purchasable=false')
+    const state=await upsertSubscriptionState(db,A,transaction(),{source:'notification_v2',notificationType:'SUBSCRIBED',renewal:{autoRenewStatus:true}})
+    expect(state.active).toBe(true);expect(state.auto_renew_status).toBe(true)
+    expect((await db.snapshots()).bindings).toHaveLength(1)
+  })
+  it('notification cannot bootstrap an anonymous account or a wrong signed token',async()=>{
+    await expect(upsertSubscriptionState(db,G,transaction(G),{source:'notification_v2'})).rejects.toThrow(SubscriptionAlreadyLinkedError)
+    await expect(upsertSubscriptionState(db,B,transaction(),{source:'notification_v2'})).rejects.toThrow(SubscriptionAccountTokenError)
+    expect(await db.snapshots()).toEqual({bindings:[],states:[]})
+  })
+  it('signed cancellation preserves access until actual Apple expiry',async()=>{
+    const state=await upsertSubscriptionState(db,A,transaction(),{source:'notification_v2',notificationType:'DID_CHANGE_RENEWAL_STATUS',renewal:{autoRenewStatus:false}})
+    expect(state.status).toBe('cancelled_but_active_until_expiry');expect(state.active).toBe(true)
+  })
+  it('authoritative status API repairs missed renewal and treats revoked status as inactive',async()=>{
+    await verifyAndPersistSubscription(db,A,transaction(A,{appleExpiresDate:'2026-10-02T00:00:00Z'}))
+    const renewed=await upsertSubscriptionState(db,A,transaction(A,{purchaseDate:'2026-10-02T00:00:00Z',appleSignedAt:'2026-10-03T00:00:00Z'}),{source:'app_store_server_api',appleStatus:1,renewal:{autoRenewStatus:true}})
+    expect(renewed.active).toBe(true)
+    const revoked=await upsertSubscriptionState(db,A,transaction(A,{purchaseDate:'2026-10-02T00:00:00Z',appleSignedAt:'2026-10-03T01:00:00Z'}),{source:'app_store_server_api',appleStatus:5})
+    expect(revoked.active).toBe(false);expect(revoked.status).toBe('revoked')
+  })
+  it('later REFUND_REVERSED can restore the same period; ordinary newer replay cannot',async()=>{
+    await verifyAndPersistSubscription(db,A,transaction())
+    await upsertSubscriptionState(db,A,transaction(A,{revoked:true,revokedAt:'2026-10-03T00:00:00Z'}),{source:'notification_v2',notificationType:'REFUND',appleEventAt:'2026-10-03T00:00:00Z'})
+    expect((await verifyAndPersistSubscription(db,A,transaction(A,{appleSignedAt:'2026-10-03T01:00:00Z'}))).active).toBe(false)
+    expect((await upsertSubscriptionState(db,A,transaction(),{source:'notification_v2',notificationType:'REFUND_REVERSED',appleEventAt:'2026-10-03T02:00:00Z'})).active).toBe(true)
+  })
+  it('NULL event evidence cannot bypass terminal replay protection',async()=>{
+    const old={purchased_at:'2026-10-01',expires_at:'2099-01-01',status:'refunded',apple_event_at:'2026-10-03'}
+    const incoming={...old,status:'active',apple_event_at:null}
+    expect((await db.pg.query('select billing_private.state_precedes($1,$2) as allowed',[old,incoming])).rows[0].allowed).toBe(false)
+  })
+  it('authoritative grace expiry grants access, billing retry without grace does not',async()=>{
+    const grace=await upsertSubscriptionState(db,A,transaction(A,{appleExpiresDate:'2026-10-02T00:00:00Z'}),{source:'app_store_server_api',appleStatus:4,renewal:{isInBillingRetryPeriod:true,gracePeriodExpiresDate:'2099-01-01T00:00:00Z'}})
+    expect(grace.active).toBe(true);expect(grace.status).toBe('grace_period')
+    const retry=await upsertSubscriptionState(db,A,transaction(A,{appleSignedAt:'2026-10-03T01:00:00Z'}),{source:'app_store_server_api',appleStatus:3,renewal:{isInBillingRetryPeriod:true}})
+    expect(retry.active).toBe(false)
   })
   it('closed sales cannot issue an admission before StoreKit',async()=>{
     await db.pg.exec('update public.billing_products set is_purchasable=false')
@@ -150,10 +189,10 @@ describe('real PostgreSQL atomic subscription operation',()=>{
     await upsertSubscriptionState(db,A,transaction(),{source:'notification_v2',notificationType:{revoked:'REVOKE',refunded:'REFUND',expired:'EXPIRED'}[status],appleEventAt:'2026-10-03T00:00:00Z'})
     expect((await verifyAndPersistSubscription(db,A,transaction())).status).toBe(status)
     expect((await verifyAndPersistSubscription(db,A,transaction(A,{purchaseDate:'2026-09-01T00:00:00Z'}))).active).toBe(false)
-    expect((await verifyAndPersistSubscription(db,A,transaction(A,{purchaseDate:'2026-11-01T00:00:00Z',appleSignedAt:'2026-11-02T00:00:00Z'}))).active).toBe(true)
+    expect((await verifyAndPersistSubscription(db,A,transaction(A,{purchaseDate:'2026-10-02T00:00:00Z',appleSignedAt:'2026-10-03T00:00:00Z'}))).active).toBe(true)
   })
   it('older notification cannot revoke a later renewal',async()=>{
-    await verifyAndPersistSubscription(db,A,transaction(A,{purchaseDate:'2026-11-01T00:00:00Z'}))
+    await verifyAndPersistSubscription(db,A,transaction(A,{purchaseDate:'2026-10-02T00:00:00Z'}))
     expect((await upsertSubscriptionState(db,A,transaction(),{notificationType:'REFUND',source:'notification_v2',appleEventAt:'2026-12-01T00:00:00Z'})).active).toBe(true)
   })
   it('equal-event conflicts converge on terminal state regardless of order',async()=>{
@@ -183,10 +222,10 @@ describe('real PostgreSQL atomic subscription operation',()=>{
     try { expect((await db.pg.query('select public.persist_verified_subscription($1,$2,$3) as state',[A,transaction(),{}])).rows[0].state.active).toBe(true) }
     finally {await db.pg.exec('reset role')}
   })
-  it('closed sales roll back first claim, same owner restore remains authorized',async()=>{
+  it('closed sales preserve valid Production delivery including legacy clients without admission',async()=>{
     await db.pg.exec('update public.billing_products set is_purchasable=false')
-    await expect(verifyAndPersistSubscription(db,A,transaction())).rejects.toThrow('sales are closed')
-    expect(await db.snapshots()).toEqual({bindings:[],states:[]})
+    expect((await verifyAndPersistSubscription(db,A,transaction())).active).toBe(true)
+    expect((await db.snapshots()).states).toHaveLength(1)
     await db.pg.exec('update public.billing_products set is_purchasable=true')
     await verifyAndPersistSubscription(db,A,transaction())
     await db.pg.exec('update public.billing_products set is_purchasable=false')

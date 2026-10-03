@@ -445,32 +445,36 @@ export async function reserveNotification(db, decoded) {
     processing_status: 'processing',
     safe_error: null,
   }
-  const { error } = await db.from('apple_iap_notifications').insert(row)
-  if (!error) return { reserved: true, notificationUUID }
+  const { data: inserted, error } = await db.from('apple_iap_notifications').insert(row).select('updated_at').single()
+  if (!error) return { reserved: true, notificationUUID, lease: inserted.updated_at }
   if (error.code === '23505') {
     const { data, error: readErr } = await db
       .from('apple_iap_notifications')
-      .select('processing_status')
+      .select('processing_status,updated_at')
       .eq('notification_uuid', notificationUUID)
       .maybeSingle()
     if (readErr) throw readErr
-    if (data?.processing_status === 'failed') {
-      const { error: updateErr } = await db
-        .from('apple_iap_notifications')
-        .update(row)
-        .eq('notification_uuid', notificationUUID)
-        .eq('processing_status', 'failed')
+    if (data?.processing_status === 'processed') return { reserved: false, notificationUUID }
+    const stale = data?.processing_status === 'processing' &&
+      Number.isFinite(Date.parse(data.updated_at)) && Date.now() - Date.parse(data.updated_at) >= 5 * 60_000
+    if (data?.processing_status === 'failed' || stale) {
+      // Compare-and-swap the exact observed lease; only one retry owns it.
+      const { data: claimed, error: updateErr } = await db.from('apple_iap_notifications')
+        .update(row).eq('notification_uuid', notificationUUID)
+        .eq('processing_status', data.processing_status).eq('updated_at', data.updated_at).select('updated_at')
       if (updateErr) throw updateErr
-      return { reserved: true, notificationUUID, retrying: true }
+      if (claimed?.length) return { reserved: true, notificationUUID, retrying: true, lease: claimed[0].updated_at }
     }
-    return { reserved: false, notificationUUID }
+    // A processing record is not proof of delivery. Ask Apple to retry,
+    // including when its original worker died or another retry won the CAS.
+    return { reserved: false, notificationUUID, inFlight: true }
   }
   throw error
 }
 
-export async function markNotificationProcessed(db, notificationUUID) {
+export async function markNotificationProcessed(db, notificationUUID, lease = null) {
   if (!notificationUUID) return
-  const { error } = await db
+  let query = db
     .from('apple_iap_notifications')
     .update({
       processing_status: 'processed',
@@ -478,12 +482,14 @@ export async function markNotificationProcessed(db, notificationUUID) {
       safe_error: null,
     })
     .eq('notification_uuid', notificationUUID)
+  if (lease) query = query.eq('updated_at', lease).eq('processing_status', 'processing')
+  const { error } = await query
   if (error) throw error
 }
 
-export async function markNotificationFailed(db, notificationUUID, err) {
+export async function markNotificationFailed(db, notificationUUID, err, lease = null) {
   if (!notificationUUID) return
-  const { error } = await db
+  let query = db
     .from('apple_iap_notifications')
     .update({
       processing_status: 'failed',
@@ -491,5 +497,7 @@ export async function markNotificationFailed(db, notificationUUID, err) {
       safe_error: safeNotificationError(err),
     })
     .eq('notification_uuid', notificationUUID)
+  if (lease) query = query.eq('updated_at', lease).eq('processing_status', 'processing')
+  const { error } = await query
   if (error) throw error
 }

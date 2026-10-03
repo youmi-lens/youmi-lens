@@ -305,12 +305,12 @@ describe('findSubscriptionState — sales kill-switch escape hatch for Guests', 
 })
 
 describe('production kill switch', () => {
-  it('blocks brand-new Production grants while purchasable=false', () => {
+  it('keeps delivery independent of sales admission', () => {
     expect(shouldBlockSubscriptionGrant({
       product: monthlyProduct,
       verified: { environment: 'Production' },
       existingBinding: null,
-    })).toBe('sales_closed')
+    })).toBeNull()
   })
 
   it('allows Sandbox, existing bindings, and open sales', () => {
@@ -526,7 +526,7 @@ describe('permanent ownership and promotion regressions', () => {
 describe('effective access respects canonical ownership', () => {
   const owner = 'canonical-owner'
   const other = 'other-identity'
-  const row = (user) => ({ user_id: user, original_transaction_id: 'shared-chain', app_account_token: user, environment: 'Production', status: 'active', expires_at: new Date(future).toISOString() })
+  const row = (user) => ({ user_id: user, original_transaction_id: 'shared-chain', app_account_token: user, environment: 'Production', status: 'active', purchased_at: '2026-01-01T00:00:00Z', expires_at: new Date(future).toISOString() })
 
   it('preserves canonical owner access and denies historical duplicate rows', async () => {
     const db = makeFakeDb({ bindings: [{ original_transaction_id: 'shared-chain', user_id: owner, environment: 'Production', owner_state: 'active' }], states: [row(owner), row(other)] })

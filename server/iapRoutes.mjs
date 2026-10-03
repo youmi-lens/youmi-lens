@@ -50,11 +50,9 @@ import {
   SubscriptionEnvironmentError,
   SubscriptionSalesClosedError,
   findSubscriptionBinding,
-  findSubscriptionState,
   getEffectiveSubscription,
   isAutoRenewableProduct,
   safeSubscriptionEntitlement,
-  shouldBlockSubscriptionGrant,
   upsertSubscriptionState,
   verifyAndPersistSubscription,
 } from './iapSubscriptions.mjs'
@@ -68,6 +66,7 @@ const SUBSCRIPTION_STATUS_NOTIFICATIONS = new Set([
   NotificationTypeV2.OFFER_REDEEMED,
   NotificationTypeV2.PRICE_INCREASE,
   NotificationTypeV2.REFUND,
+  NotificationTypeV2.REFUND_REVERSED,
   NotificationTypeV2.REVOKE,
   NotificationTypeV2.SUBSCRIBED,
   NotificationTypeV2.DID_CHANGE_RENEWAL_STATUS,
@@ -294,33 +293,10 @@ async function verifyAndPersist(db, user, payload) {
     productKind: product?.kind ?? null,
     autoRenewable: isAutoRenewableProduct(product),
   })
-  if (isAutoRenewableProduct(product)) {
+  if (verified.autoRenewable || isAutoRenewableProduct(product)) {
     const existingBinding = await findSubscriptionBinding(db, verified.originalTransactionId)
-    // Legacy guests may have an original-owner state predating canonical
-    // binding enforcement. The later ownership check still applies to them.
-    const existingState = user.isAnonymous
-      ? await findSubscriptionState(db, verified.originalTransactionId, user.userId)
-      : null
-    const blockReason = shouldBlockSubscriptionGrant({
-      product,
-      verified,
-      existingBinding: existingBinding || existingState,
-    })
-    if (blockReason && !payload.purchaseAuthorizationId) {
-      await recordBillingEvent(db, user.userId, {
-        event_type: 'kill_switch_block',
-        product_id: verified.productId,
-        transaction_id: verified.transactionId,
-        environment: verified.environment,
-        detail: { reason: 'subscription_sales_closed' },
-      })
-      return {
-        granted: false,
-        code: blockReason,
-        message: 'Subscription sales are not open yet.',
-        transactionId: verified.transactionId,
-      }
-    }
+    // Sales admission controls starting StoreKit, never delivery after Apple succeeds.
+    // REAL verification, signed token and canonical ownership still fail closed.
     safeSubscriptionStage('binding_lookup', user, {
       productId: verified.productId,
       callerIsAnonymous: user.isAnonymous,
@@ -639,6 +615,7 @@ export async function handleAppleNotifications(req, res) {
   }
 
   let decoded
+  let reservation
   try {
     decoded = await verifyAppleNotification(signedPayload)
   } catch (err) {
@@ -649,18 +626,28 @@ export async function handleAppleNotifications(req, res) {
   }
 
   try {
-    const reservation = await reserveNotification(db, decoded)
+    reservation = await reserveNotification(db, decoded)
     if (!reservation.reserved) {
+      if (reservation.inFlight) { res.status(503).json({ ok: false, error: 'notification_in_progress' }); return }
       res.json({ ok: true, deduped: true })
       return
     }
 
     const tx = decoded.transaction
-    let ownerUserId = tx ? await findTransactionOwner(db, tx) : null
+    let ownerUserId = tx && !tx.autoRenewable ? await findTransactionOwner(db, tx) : null
 
     if (tx?.autoRenewable) {
       const binding = await findSubscriptionBinding(db, tx.originalTransactionId)
       ownerUserId = binding?.owner_state === 'active' ? binding.user_id : null
+      // Apple-signed Production evidence can recover a first purchase even
+      // when its client died before /verify. Never bootstrap a test chain,
+      // anonymous identity, deleted account, or an existing foreign binding.
+      if (!binding && tx.environment === 'Production' &&
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tx.appAccountToken ?? '')) {
+        const { data, error } = await db.auth.admin.getUserById(tx.appAccountToken)
+        if (error && error.status !== 404) throw error
+        if (data?.user && !data.user.is_anonymous) ownerUserId = data.user.id
+      }
       if (SUBSCRIPTION_STATUS_NOTIFICATIONS.has(decoded.notificationType)) {
         // Refresh only the canonical owner; possession of historical state rows
         // must not authorize a second identity on the same Apple lineage.
@@ -707,12 +694,12 @@ export async function handleAppleNotifications(req, res) {
       environment: decoded.environment,
       detail: { notificationType: decoded.notificationType, subtype: decoded.subtype ?? null },
     })
-    await markNotificationProcessed(db, decoded.notificationUUID)
+    await markNotificationProcessed(db, decoded.notificationUUID, reservation?.lease)
 
     res.json({ ok: true })
   } catch (err) {
     try {
-      await markNotificationFailed(db, decoded?.notificationUUID, err)
+      await markNotificationFailed(db, decoded?.notificationUUID, err, reservation?.lease)
     } catch (markErr) {
       console.warn('[iap/notifications] failed to mark notification failed', JSON.stringify({ message: markErr instanceof Error ? markErr.message : String(markErr) }))
     }

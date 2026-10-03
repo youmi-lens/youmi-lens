@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto'
 
 export const migration = readFileSync(new URL('../supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql', import.meta.url), 'utf8')
 export const tokenIndexMigration = readFileSync(new URL('../supabase/migrations/20261003014819_billing_token_lookup_index.sql', import.meta.url), 'utf8')
+export const deliveryMigration = readFileSync(new URL('../supabase/migrations/20261003190154_payment_delivery_recovery.sql', import.meta.url), 'utf8')
 const schema = `
 create role anon; create role authenticated; create role service_role bypassrls;
 create schema auth;
@@ -15,7 +16,10 @@ app_account_token uuid,environment text not null,owner_state text default 'activ
 create table public.app_store_subscription_states(original_transaction_id text,user_id uuid references auth.users(id) on delete cascade,
 product_id text not null,latest_transaction_id text not null,subscription_group_id text,environment text not null,ownership_type text,app_account_token uuid,
 purchased_at timestamptz not null,expires_at timestamptz not null,auto_renew_status boolean,status text not null,revocation_at timestamptz,
-source text default 'storekit_jws',last_notification_type text,last_verified_at timestamptz default now(),created_at timestamptz default now(),updated_at timestamptz default now(),primary key(original_transaction_id,user_id));
+source text default 'storekit_jws' check (source in ('storekit_jws','app_store_server_api','notification_v2','reconciliation')),last_notification_type text,last_verified_at timestamptz default now(),created_at timestamptz default now(),updated_at timestamptz default now(),primary key(original_transaction_id,user_id),
+-- Mirrors the PRODUCTION check constraints so a value Production would reject fails here too.
+constraint app_store_subscription_states_status_check check (status in ('active','expired','grace_period','billing_retry','revoked','refunded','cancelled_but_active_until_expiry','verification_pending','unknown')),
+constraint app_store_subscription_states_environment_check check (environment in ('Sandbox','Production','Xcode','LocalTesting')));
 grant usage on schema public to service_role; grant all on all tables in schema public to service_role;
 insert into public.billing_products values ('com.aydenz.youmilensipad.student.monthly','auto_renewable',true,null),('com.aydenz.youmilensipad.student.annual','auto_renewable',true,null);
 `
@@ -42,8 +46,21 @@ export async function createSubscriptionDatabase({ bindings = [], states = [], a
   // Production's legacy restriction; replacement is independently regression tested.
   await pg.exec("create unique index idx_subscription_binding_app_account_token on public.app_store_subscription_bindings(app_account_token,environment) where app_account_token is not null and owner_state='active'")
   if (replaceTokenIndex) await pg.exec(tokenIndexMigration)
+  await pg.exec(deliveryMigration)
   const decode = row => Object.fromEntries(Object.entries(row).map(([k,v])=>[k, (k==='user_id'||k==='app_account_token')?(aliases.get(v)??v):(v instanceof Date ? v.toISOString() : (typeof v==='string' && k.endsWith('_at') && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : v))]))
-  return { pg, uuid, decode,
+  const from = (table) => {
+    if (!['app_store_subscription_states','app_store_subscription_bindings','subscription_test_chain_policy'].includes(table)) throw Error('Unexpected test table')
+    let columns='*'; const filters=[],orders=[]
+    const execute=async()=>{
+      const args=filters.map(([,v])=>v)
+      const where=filters.length?' where '+filters.map(([k],i)=>`${k}=$${i+1}`).join(' and '):''
+      const order=orders.length?' order by '+orders.join(','):''
+      return {data:(await pg.query(`select ${columns} from public.${table}${where}${order}`,args)).rows.map(decode),error:null}
+    }
+    const query={select(v){columns=v;return query},eq(k,v){filters.push([k,v]);return query},order(k,options){orders.push(`${k} ${options?.ascending===false?'desc':'asc'}`);return query},async maybeSingle(){const r=await execute();return {...r,data:r.data[0]??null}},then(a,b){return execute().then(a,b)}}
+    return query
+  }
+  return { pg, uuid, decode, from,
     async rpc(_name,{p_user_id,p_transaction,p_options}) {
       const caller=uuid(p_user_id), token=uuid(p_transaction.appAccountToken)
       await pg.query('insert into auth.users values($1,$2) on conflict do nothing',[caller,anonymousUserIds.has(p_user_id)])

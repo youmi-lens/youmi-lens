@@ -1,4 +1,5 @@
 import { NotificationTypeV2, Subtype } from '@apple/app-store-server-library'
+import { reconcileSubscriptionFromApple } from './subscriptionServerReconciliation.mjs'
 
 export const SUBSCRIPTION_PRODUCT_IDS = new Set([
   'com.aydenz.youmilensipad.student.monthly',
@@ -43,14 +44,8 @@ export function deriveSubscriptionStatus({ transaction, renewal = null, notifica
   return 'active'
 }
 
-/** Production kill switch: block brand-new Production grants while sales stay closed. Sandbox/Xcode and existing bindings remain allowed. */
-export function shouldBlockSubscriptionGrant({ product, verified, existingBinding }) {
-  if (!isAutoRenewableProduct(product)) return null
-  if (product.is_purchasable !== false) return null
-  if (existingBinding) return null
-  if (verified?.environment !== 'Production') return null
-  return 'sales_closed'
-}
+/** Sales flags control purchase admission, not delivery of Apple-verified evidence. */
+export function shouldBlockSubscriptionGrant() { return null }
 
 /**
  * The single canonical vocabulary of "still entitled" subscription statuses.
@@ -110,7 +105,11 @@ export function shouldReplaceSubscriptionState(stored, incoming) {
   const rank = (status) => ({ refunded: 60, revoked: 50, expired: 40, billing_retry: 30,
     cancelled_but_active_until_expiry: 20, grace_period: 20, active: 10 })[status] ?? 0
   const oldRank = rank(stored.status), newRank = rank(incoming.status)
-  if (oldRank >= 40 && newRank < oldRank) return false
+  const terminalRecovery = ms(incoming.apple_event_at) > ms(stored.apple_event_at) && (
+    incoming.last_notification_type === 'REFUND_REVERSED' && oldRank >= 50 && !incoming.revocation_at ||
+    stored.status === 'expired' && (incoming.status === 'grace_period' || incoming.source === 'app_store_server_api') &&
+      ms(incoming.expires_at) > ms(stored.expires_at))
+  if (oldRank >= 40 && newRank < oldRank && !terminalRecovery) return false
   const oldEvent = ms(stored.apple_event_at), newEvent = ms(incoming.apple_event_at)
   if (Number.isFinite(oldEvent) && (!Number.isFinite(newEvent) || newEvent < oldEvent)) return false
   if (oldEvent === newEvent && newRank < oldRank) return false
@@ -194,10 +193,10 @@ export async function getEffectiveSubscription(db, userId) {
     .select('product_id, original_transaction_id, latest_transaction_id, subscription_group_id, environment, app_account_token, purchased_at, expires_at, auto_renew_status, status, revocation_at, last_verified_at')
     .eq('user_id', userId)
     .order('expires_at', { ascending: false })
-    .limit(10)
   if (error) throw error
   const rows = []
-  for (const row of Array.isArray(data) ? data : []) {
+  await Promise.all((Array.isArray(data) ? data : []).map(async (initialRow) => {
+    let row = initialRow
     const binding = await findSubscriptionBinding(db, row.original_transaction_id)
     // Existing canonical owners keep access, including legacy token provenance.
     // Every granted state must have a canonical owner; migration preflight checks existing rows.
@@ -212,13 +211,22 @@ export async function getEffectiveSubscription(db, userId) {
       if (policyError) throw policyError
       environmentAllowed = Boolean(policy)
     }
-    if (authorized && environmentAllowed) rows.push(row)
-  }
+    if (authorized && environmentAllowed) {
+      row = { ...row, user_id: userId }
+      row = await reconcileSubscriptionFromApple(row, snapshot => persistAtomic(db, userId, snapshot.transaction, {
+        source: 'app_store_server_api', renewal: snapshot.renewal, appleStatus: snapshot.appleStatus,
+        appleEventAt: snapshot.appleEventAt,
+      }))
+      const currentBinding = await findSubscriptionBinding(db, row.original_transaction_id)
+      if (currentBinding?.owner_state === 'active' && currentBinding.user_id === userId &&
+          currentBinding.environment === row.environment && row.user_id === userId) rows.push(row)
+    }
+  }))
   if (rows.length === 0) return null
   const ranked = rows.map((row) => ({
     ...row,
-    active: subscriptionStatusIsActive(row.status, row.expires_at),
-  }))
+    active: subscriptionStatusIsActive(row.status, row.expires_at) && Date.parse(row.purchased_at) <= Date.now(),
+  })).sort((a,b) => Date.parse(b.expires_at) - Date.parse(a.expires_at))
   return ranked.find((row) => row.active) ?? ranked[0]
 }
 
