@@ -21,8 +21,9 @@ describe('real PostgreSQL atomic subscription operation',()=>{
   it('one authorized owner may own distinct Apple chains without duplicating either chain',async()=>{
     await verifyAndPersistSubscription(db,A,transaction())
     await verifyAndPersistSubscription(db,A,transaction(A,{originalTransactionId:'second-chain'}))
+    await verifyAndPersistSubscription(db,A,transaction(A,{originalTransactionId:'third-chain'}))
     const snapshot=await db.snapshots()
-    expect(snapshot.bindings).toHaveLength(2)
+    expect(snapshot.bindings).toHaveLength(3)
     expect(snapshot.states.every(s=>s.user_id===A)).toBe(true)
   })
   it('legacy unique token index reproduces rejection and index replacement preserves all rows',async()=>{
@@ -38,6 +39,37 @@ describe('real PostgreSQL atomic subscription operation',()=>{
       await verifyAndPersistSubscription(legacy,A,transaction(A,{originalTransactionId:'second-chain'}))
       expect((await legacy.snapshots()).bindings).toHaveLength(2)
     } finally { await legacy.pg.close() }
+  })
+  it('index migration repeats idempotently without changing rows or canonical PK',async()=>{
+    await verifyAndPersistSubscription(db,A,transaction())
+    const before=await db.snapshots()
+    const {tokenIndexMigration}=await import('./subscriptionDatabaseHarness.mjs')
+    await db.pg.exec(tokenIndexMigration)
+    await db.pg.exec(tokenIndexMigration)
+    expect(await db.snapshots()).toEqual(before)
+    expect((await db.pg.query("select indisprimary,indisunique from pg_index where indexrelid='public.app_store_subscription_bindings_pkey'::regclass")).rows[0]).toEqual({indisprimary:true,indisunique:true})
+  })
+  it('unexpected replacement definition stops before legacy uniqueness is removed',async()=>{
+    const legacy=await createSubscriptionDatabase({replaceTokenIndex:false})
+    try {
+      await verifyAndPersistSubscription(legacy,A,transaction())
+      const before=await legacy.snapshots()
+      await legacy.pg.exec('create index idx_subscription_binding_token_lookup on public.app_store_subscription_bindings(user_id)')
+      const {tokenIndexMigration}=await import('./subscriptionDatabaseHarness.mjs')
+      await expect(legacy.pg.exec(tokenIndexMigration)).rejects.toThrow('Replacement token lookup index differs')
+      expect(await legacy.snapshots()).toEqual(before)
+      expect((await legacy.pg.query("select indisunique from pg_index where indexrelid='public.idx_subscription_binding_app_account_token'::regclass")).rows[0].indisunique).toBe(true)
+    } finally {await legacy.pg.close()}
+  })
+  it('two concurrent permanent challengers fail against the same already-bound chain',async()=>{
+    const C='dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    await db.pg.query('insert into auth.users values($1,false)',[C])
+    await verifyAndPersistSubscription(db,A,transaction())
+    const before=await db.snapshots()
+    const results=await Promise.allSettled([verifyAndPersistSubscription(db,B,transaction(B)),verifyAndPersistSubscription(db,C,transaction(C))])
+    expect(results.every(r=>r.status==='rejected' && r.reason instanceof SubscriptionAlreadyLinkedError)).toBe(true)
+    expect(await db.snapshots()).toEqual(before)
+    await expect(verifyAndPersistSubscription(db,B,transaction())).rejects.toThrow(SubscriptionAlreadyLinkedError)
   })
   it('correct Production free trial claim is active and idempotent',async()=>{
     for(let n=0;n<2;n++)expect((await verifyAndPersistSubscription(db,A,transaction())).active).toBe(true)
