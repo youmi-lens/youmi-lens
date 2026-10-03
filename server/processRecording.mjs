@@ -525,6 +525,91 @@ async function runJob({
     if (error) logPostgrestError('markFailed', error)
   }
 
+  /**
+   * DashScope's SUCCESS_WITH_NO_VALID_FRAGMENT (see youmiHosted.mjs's
+   * paraformerFailureErrorCode) means transcription genuinely completed —
+   * it just found no speech. That is a valid empty result, not a processing
+   * failure: the lecture must still reach Ready to Review, with an empty
+   * transcript/summary rather than being stuck at Processing Failed.
+   *
+   * This writes the SAME core columns the normal success path eventually
+   * writes (transcript/transcript_raw + the summary quartet + ai_status:
+   * 'done'), just atomically in one update instead of two, since there is
+   * nothing to transcribe/translate/summarize — no hosted chat call is made
+   * for empty content. `determineProcessingResumeStage` treats `ai_status
+   * === 'done'` as authoritative (see processingRecovery.mjs), so a later
+   * resume/retry will not misread this empty transcript as "never
+   * transcribed" and resubmit the same audio.
+   */
+  const markDoneEmptyNoSpeech = async () => {
+    jobLog('transcribe_no_speech_ready', { recordingId, userId: userId.slice(0, 8) })
+    const emptySuccessPayload = {
+      transcript_raw: '',
+      transcript: '',
+      summary_en: '',
+      summary_zh: '',
+      source_summary: '',
+      translated_summary: null,
+      ai_status: 'done',
+      ai_error: null,
+      ai_updated_at: new Date().toISOString(),
+    }
+    let { error } = await dbSb
+      .from('recordings')
+      .update(emptySuccessPayload)
+      .eq('id', recordingId)
+      .eq('user_id', userId)
+    if (error) {
+      // Same fallback as the normal transcript-save path just above:
+      // production's `recordings` table has no `transcript_raw` column
+      // (PostgREST error PGRST204, "column ... not found in the schema
+      // cache") — confirmed the real cause of a second production incident,
+      // 2026-09-28, recording b1aee347-08be-4b45-b12f-3e3e7a0cd869, where
+      // this write's OWN failure (not a new DashScope case) fell through to
+      // markFailed and produced a visible "Could not save transcription
+      // result." error despite transcription having genuinely completed.
+      const msg = String(error.message || '')
+      const looksLikeMissingColumn = /transcript_raw|column/i.test(msg)
+      if (looksLikeMissingColumn) {
+        jobLog('no_speech_ready_retry_without_transcript_raw', { recordingId, firstError: msg })
+        const { transcript_raw: _omit, ...minimalPayload } = emptySuccessPayload
+        const retry = await dbSb
+          .from('recordings')
+          .update(minimalPayload)
+          .eq('id', recordingId)
+          .eq('user_id', userId)
+        error = retry.error
+      }
+    }
+    if (error) {
+      logPostgrestError('markDoneEmptyNoSpeech', error, {
+        recordingId,
+        userIdPrefix: userId.slice(0, 8),
+        payloadKeys: Object.keys(emptySuccessPayload),
+      })
+      // The row must never be left stuck mid-flight (e.g. still
+      // 'transcribing') if the empty-success write itself fails — that is a
+      // real, if rare, failure the user should see, not a silent hang.
+      await markFailed('Could not save transcription result.')
+      return
+    }
+    await tryOptionalV1PipelineExtras(
+      dbSb,
+      recordingId,
+      userId,
+      {
+        transcript_ready: true,
+        summary_ready: true,
+        translation_ready: true,
+        ai_pipeline_timing: {
+          job_start_to_transcript_ready_ms: Date.now() - jobT0,
+        },
+      },
+      'no_speech_ready_flags',
+    )
+    jobLog('job_done_no_speech', { recordingId })
+  }
+
   jobLog('job_start', {
     recordingId,
     userIdPrefix: userId.slice(0, 8),
@@ -650,8 +735,20 @@ async function runJob({
       jobLog('transcribe_done', { recordingId, textLen: transcriptRaw?.length ?? 0, transcribe_ms: stageTimings.transcribe_ms })
     } catch (e) {
       console.warn('[process-recording] transcribe', e)
-      jobLog('transcribe_error', { recordingId, message: e instanceof Error ? e.message : String(e) })
-      await markFailed('Transcription did not finish. Try again in a moment.')
+      const errMessage = e instanceof Error ? e.message : String(e)
+      jobLog('transcribe_error', { recordingId, message: errMessage })
+      // HOSTED_TRANSCRIBE_NO_SPEECH is DashScope's own terminal
+      // "ran to completion, found no speech" code (see youmiHosted.mjs's
+      // paraformerFailureErrorCode) — a valid EMPTY result, not a processing
+      // failure. The lecture must still reach Ready to Review rather than
+      // being stuck at Processing Failed — see markDoneEmptyNoSpeech.
+      // Every other transcription failure keeps the original generic
+      // markFailed behavior completely unchanged.
+      if (errMessage === 'HOSTED_TRANSCRIBE_NO_SPEECH') {
+        await markDoneEmptyNoSpeech()
+      } else {
+        await markFailed('Transcription did not finish. Try again in a moment.')
+      }
       return
     }
 
