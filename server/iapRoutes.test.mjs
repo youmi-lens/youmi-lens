@@ -293,14 +293,14 @@ describe('Restore delivery contract', () => {
 
 
 describe('authorized terminal reconciliation and notification ownership', () => {
-  it('successfully persisted terminal subscription is safe to finish without granting active access', async () => {
+  it('revoked/refunded invalid access is not safe to finish', async () => {
     verifyAppleTransactionMock.mockResolvedValue(verifiedAnnualTransaction())
     loadBillingProductMock.mockResolvedValue(ANNUAL_PRODUCT_ROW)
     findSubscriptionBindingMock.mockResolvedValue({ user_id: TEST_USER_ID })
     verifyAndPersistSubscriptionMock.mockResolvedValue({ active: false, status: 'revoked' })
     const res = fakeRes()
     await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws' }] }), res)
-    expect(res.payload.verifiedTransactionIds).toEqual(['txn-annual-1'])
+    expect(res.payload.verifiedTransactionIds).toEqual([])
     expect(res.payload.activeRestoredCount).toBe(0)
   })
 
@@ -336,7 +336,7 @@ describe('authorized terminal reconciliation and notification ownership', () => 
     expect(upsertSubscriptionStateMock).not.toHaveBeenCalled()
   })
 
-  it('notification preserves legitimate original legacy guest state', async () => {
+  it('notification cannot grant without a canonical binding', async () => {
     verifyAppleNotificationMock.mockResolvedValue({ transaction: { ...verifiedAnnualTransaction(), autoRenewable: true }, notificationType: 'DID_RENEW', notificationUUID: 'notification-3', environment: 'Sandbox' })
     findSubscriptionBindingMock.mockResolvedValue(null)
     findSubscriptionStateMock.mockResolvedValue({ user_id: TEST_USER_ID })
@@ -344,7 +344,6 @@ describe('authorized terminal reconciliation and notification ownership', () => 
     const res = fakeRes()
     await handleAppleNotifications({ body: { signedPayload: 'jws' } }, res)
     expect(res.statusCode).toBe(200)
-    expect(upsertSubscriptionStateMock).toHaveBeenCalledTimes(1)
-    expect(upsertSubscriptionStateMock.mock.calls[0][1]).toBe(TEST_USER_ID)
+    expect(upsertSubscriptionStateMock).not.toHaveBeenCalled()
   })
 })

@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createSubscriptionDatabase } from './subscriptionDatabaseHarness.mjs'
+const engines = []
+afterEach(async () => { for (const db of engines.splice(0)) await db.pg.close() })
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 /**
  * Subscription state reconciliation hardening.
@@ -31,11 +34,14 @@ const OTXN = 'orig-1'
 const MONTHLY = 'com.aydenz.youmilensipad.student.monthly'
 const ANNUAL = 'com.aydenz.youmilensipad.student.annual'
 
+beforeEach(() => { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2098-09-15T00:00:00Z')) })
+afterEach(() => vi.useRealTimers())
+
 const t = (iso) => new Date(iso).toISOString()
-const P1 = t('2026-08-01T00:00:00Z') // older period start
-const P1_END = t('2026-09-01T00:00:00Z')
-const P2 = t('2026-09-01T00:00:00Z') // newer period start
-const P2_END = t('2026-10-01T00:00:00Z')
+const P1 = t('2098-08-01T00:00:00Z') // older period start
+const P1_END = t('2098-09-01T00:00:00Z')
+const P2 = t('2098-09-01T00:00:00Z') // newer period start
+const P2_END = t('2098-10-01T00:00:00Z')
 
 const stored = (o = {}) => ({
   user_id: 'u1',
@@ -51,22 +57,14 @@ const incoming = (o = {}) => ({ product_id: MONTHLY, status: 'active', purchased
 // ── A fake DB that records what actually reached the table ──────────────────
 function makeDb(initial = null) {
   const table = { row: initial }
-  return {
-    table,
-    from: () => ({
-      select: () => {
-        // app_store_subscription_states is now looked up by BOTH
-        // original_transaction_id AND user_id (composite key) — chain
-        // supports either one .eq() (legacy call shape) or two.
-        const withMaybeSingle = { maybeSingle: async () => ({ data: table.row, error: null }) }
-        return { eq: () => ({ ...withMaybeSingle, eq: () => withMaybeSingle }) }
-      },
-      upsert: async (row) => {
-        table.row = { ...row }
-        return { error: null }
-      },
-    }),
-  }
+  let enginePromise
+  return { table, async rpc(name,args) {
+    if (!enginePromise) enginePromise=createSubscriptionDatabase({users:['u1'],bindings:[{original_transaction_id:OTXN,user_id:'u1',environment:'Production'}],states:initial?[{original_transaction_id:OTXN,...initial}]:[]}).then(db=>{engines.push(db);return db})
+    const engine=await enginePromise
+    const response=await engine.rpc(name,{...args,p_transaction:{...args.p_transaction,environment:'Production'}})
+    const snapshot=await engine.snapshots(); table.row=snapshot.states[0]??null
+    return response
+  } }
 }
 
 const verified = (o = {}) => ({
@@ -137,7 +135,7 @@ describe('M1-M12: monotonic subscription state', () => {
       notificationType: 'REFUND',
       source: 'notification_v2',
     })
-    expect(res.stale).toBeUndefined()
+    expect(res.stale).toBe(false)
     expect(db.table.row.status).toBe('refunded')
     expect(subscriptionStatusIsActive(db.table.row.status, db.table.row.expires_at)).toBe(false)
   })
@@ -191,7 +189,7 @@ describe('M1-M12: monotonic subscription state', () => {
 })
 
 describe('S1-S12: canonical active-status vocabulary', () => {
-  const FUTURE = new Date(Date.now() + 86_400_000).toISOString()
+  const FUTURE = '2099-01-01T00:00:00.000Z'
   const PAST = new Date(Date.now() - 86_400_000).toISOString()
   const STARTED = new Date(Date.now() - 3_600_000).toISOString()
   const ent = (status, expires = FUTURE) => ({

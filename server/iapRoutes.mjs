@@ -16,6 +16,7 @@
  */
 import { createClient } from '@supabase/supabase-js'
 import { NotificationTypeV2 } from '@apple/app-store-server-library'
+import { subscriptionAvailability } from './subscriptionAvailability.mjs'
 import { buildQuotaStatus } from './betaUsageStatus.mjs'
 import { BETA_ERROR_CODES, getOrCreateUserQuota } from './betaGate.mjs'
 import { verifyAppleTransaction, verifyAppleNotification } from './iapApple.mjs'
@@ -45,6 +46,9 @@ import {
 import {
   SubscriptionAlreadyLinkedError,
   SubscriptionAccountTokenError,
+  SubscriptionDeletedAccountError,
+  SubscriptionEnvironmentError,
+  SubscriptionSalesClosedError,
   findSubscriptionBinding,
   findSubscriptionState,
   getEffectiveSubscription,
@@ -227,11 +231,14 @@ async function revokeByTransaction(db, transactionId, revokedAtIso) {
 // ── Verify (core) ────────────────────────────────────────────────────────────
 
 export function safeIapError(err) {
+  if (err instanceof SubscriptionDeletedAccountError) return { status: 409, error: 'iap_deleted_account_binding', message: 'This subscription needs account recovery review.' }
+  if (err instanceof SubscriptionEnvironmentError) return { status: 403, error: 'environment_not_allowed', message: 'This subscription belongs to a test environment.' }
+  if (err instanceof SubscriptionSalesClosedError) return { status: 403, error: 'sales_closed', message: 'Subscriptions currently unavailable.' }
   if (isAppleIapLedgerUnavailableError(err)) {
     return { status: 503, error: 'iap_temporarily_unavailable', message: 'In-app purchase service is temporarily unavailable.' }
   }
   if (
-    ['42P01', 'PGRST205', '42501', '42703', '23514', 'PGRST100', '57014'].includes(String(err?.code ?? '')) ||
+    ['IAP_DB_ERROR', 'PGRST202', '42P01', 'PGRST205', '42501', '42703', '23514', 'PGRST100', '57014'].includes(String(err?.code ?? '')) ||
     /fetch failed|timeout|timed out/i.test(String(err?.message ?? ''))
   ) {
     return { status: 503, error: 'iap_temporarily_unavailable', message: 'In-app purchase service is temporarily unavailable.' }
@@ -299,7 +306,7 @@ async function verifyAndPersist(db, user, payload) {
       verified,
       existingBinding: existingBinding || existingState,
     })
-    if (blockReason) {
+    if (blockReason && !payload.purchaseAuthorizationId) {
       await recordBillingEvent(db, user.userId, {
         event_type: 'kill_switch_block',
         product_id: verified.productId,
@@ -321,7 +328,7 @@ async function verifyAndPersist(db, user, payload) {
       bindingIsSameUser: existingBinding ? existingBinding.user_id === user.userId : null,
       bindingOwnerState: existingBinding?.owner_state ?? null,
     })
-    const subscription = await verifyAndPersistSubscription(db, user.userId, verified, { isAnonymous: user.isAnonymous })
+    const subscription = await verifyAndPersistSubscription(db, user.userId, verified, { purchaseAuthorizationId: payload.purchaseAuthorizationId ?? null })
     safeSubscriptionStage('subscription_state_write_ok', user, {
       productId: verified.productId,
       status: subscription.status,
@@ -338,7 +345,7 @@ async function verifyAndPersist(db, user, payload) {
     })
     return {
       granted: subscription.active,
-      safeToFinish: subscription.active || ['expired', 'revoked', 'refunded'].includes(subscription.status),
+      safeToFinish: !verified.revoked && (subscription.active || subscription.status === 'expired'),
       code: subscription.status,
       transactionId: verified.transactionId,
       entitlement: safeSubscriptionEntitlement({ ...subscription, active: subscription.active }),
@@ -356,7 +363,7 @@ async function verifyAndPersist(db, user, payload) {
         existingGrant.status === 'active' &&
         !existingGrant.revoked_at &&
         new Date(existingGrant.expires_at).getTime() > Date.now(),
-      safeToFinish: true,
+      safeToFinish: !verified.revoked,
       code: 'idempotent_replay',
       transactionId: verified.transactionId,
     }
@@ -390,7 +397,7 @@ async function verifyAndPersist(db, user, payload) {
   }
   await recordBillingEvent(db, user.userId, { ...decision.event, event_type: 'verify_ok' })
   await recordBillingEvent(db, user.userId, decision.event)
-  return { granted: decision.active, safeToFinish: true, code: decision.active ? 'granted' : decision.entitlementStatus, transactionId: verified.transactionId }
+  return { granted: decision.active, safeToFinish: !verified.revoked, code: decision.active ? 'granted' : decision.entitlementStatus, transactionId: verified.transactionId }
 }
 
 export async function handleIapVerify(req, res) {
@@ -415,6 +422,7 @@ export async function handleIapVerify(req, res) {
       res.status(result.code === 'sales_closed' ? 403 : 200).json({
         ok: result.code !== 'sales_closed' && result.code !== 'unknown_product',
         granted: false,
+        safeToFinish: Boolean(result.safeToFinish),
         reason: result.code,
         message: result.message ?? null,
         planType: quotaStatus?.planType ?? null,
@@ -426,6 +434,7 @@ export async function handleIapVerify(req, res) {
     res.json({
       ok: true,
       granted: true,
+      safeToFinish: Boolean(result.safeToFinish),
       planType: quotaStatus?.planType ?? null,
       entitlement,
       quotaStatus,
@@ -456,6 +465,7 @@ export async function handleIapRestore(req, res) {
             transactionId: p.transactionId,
             productId: p.productId,
             originalTransactionId: p.originalTransactionId ?? p.originalTransactionIdentifierIOS,
+            purchaseAuthorizationId: p.purchaseAuthorizationId,
           }
         })
         .filter((p) => p && (p.signedTransactionInfo || p.purchaseToken || p.transactionId))
@@ -488,26 +498,27 @@ export async function handleIapRestore(req, res) {
   let restoredCount = 0
   let alreadyLinked = false
   const verifiedTransactionIds = []
+  const outcomes = []
   for (const purchase of orderedPurchases) {
     try {
       const result = await verifyAndPersist(db, user, purchase)
+      outcomes.push({ transactionId: result.transactionId ?? purchase.transactionId ?? null,
+        code: result.code, granted: Boolean(result.granted), safeToFinish: Boolean(result.safeToFinish), retryable: result.code === 'sales_closed' })
       restoredCount += 1
       // Cryptographic validity alone is not delivery. Retryable policy denials
       // must leave the transaction available for later authorized reconciliation.
       if (result.safeToFinish && result.transactionId) verifiedTransactionIds.push(result.transactionId)
       if (result.granted) restoredActive += 1
     } catch (err) {
-      if (isAppleIapLedgerUnavailableError(err)) {
-        logIapFailure('restore', user, purchase, err)
-        const safe = safeIapError(err)
-        res.status(safe.status).json({ ok: false, error: safe.error, message: safe.message })
-        return
-      }
+      const itemError = safeIapError(err)
+      outcomes.push({ transactionId: purchase.transactionId ?? null, code: itemError.error,
+        granted: false, safeToFinish: false, retryable: itemError.status === 503 || itemError.error === 'sales_closed' })
       if (
         err instanceof AlreadyLinkedError ||
         err instanceof DeletedAccountBindingError ||
         err instanceof SubscriptionAlreadyLinkedError ||
-        err instanceof SubscriptionAccountTokenError
+        err instanceof SubscriptionAccountTokenError ||
+        err instanceof SubscriptionDeletedAccountError
       ) {
         // Ownership conflict — surface it (never silently swallow) so the
         // client shows "linked to another account" instead of the wrong
@@ -518,7 +529,7 @@ export async function handleIapRestore(req, res) {
         logIapFailure('restore', user, purchase, err)
         continue
       }
-      // Ignore individually unverifiable/expired purchases during restore.
+      logIapFailure('restore', user, purchase, err)
     }
   }
 
@@ -532,6 +543,7 @@ export async function handleIapRestore(req, res) {
     activeRestoredCount: restoredActive,
     alreadyLinked,
     verifiedTransactionIds,
+    outcomes,
   })
 }
 
@@ -649,17 +661,13 @@ export async function handleAppleNotifications(req, res) {
     if (tx?.autoRenewable) {
       const binding = await findSubscriptionBinding(db, tx.originalTransactionId)
       ownerUserId = binding?.owner_state === 'active' ? binding.user_id : null
-      // Preserve notifications for a legitimate unbound legacy guest, without
-      // creating ownership or granting a second identity from history alone.
-      if (!binding && tx.appAccountToken && await findSubscriptionState(db, tx.originalTransactionId, tx.appAccountToken)) {
-        ownerUserId = tx.appAccountToken
-      }
       if (SUBSCRIPTION_STATUS_NOTIFICATIONS.has(decoded.notificationType)) {
         // Refresh only the canonical owner; possession of historical state rows
         // must not authorize a second identity on the same Apple lineage.
         const affectedUserIds = ownerUserId ? [ownerUserId] : []
         for (const uid of affectedUserIds) {
           const state = await upsertSubscriptionState(db, uid, tx, {
+            appleEventAt: decoded.appleEventAt,
             renewal: decoded.renewal,
             notificationType: decoded.notificationType,
             subtype: decoded.subtype,
@@ -761,4 +769,25 @@ function logIapFailure(scope, user, body, err) {
       message: err instanceof Error ? err.message : String(err),
     }),
   )
+}
+
+// Account-independent, public catalog availability; no secrets or ownership data.
+export async function handleSubscriptionAvailability(_req, res) {
+  const db = makeAdminClient()
+  if (!db) return res.status(503).json({ ok: false, error: 'iap_temporarily_unavailable', products: [] })
+  try { res.json({ ok: true, products: await subscriptionAvailability(db) }) }
+  catch { res.status(503).json({ ok: false, error: 'iap_temporarily_unavailable', products: [] }) }
+}
+
+export async function handleSubscriptionPurchaseAuthorization(req, res) {
+  const user = await requireUser(req, res)
+  if (!user) return
+  const db = makeAdminClient()
+  if (!db) return res.status(503).json({ ok: false, error: 'iap_temporarily_unavailable' })
+  try {
+    const { data, error } = await db.rpc('authorize_subscription_purchase', { p_user_id: user.userId, p_product_id: req.body?.productId })
+    if (error) return res.status(String(error.message).includes('subscription_sales_closed') ? 403 : 503)
+      .json({ ok: false, error: String(error.message).includes('subscription_sales_closed') ? 'sales_closed' : 'iap_temporarily_unavailable' })
+    res.json({ ok: true, ...data })
+  } catch { res.status(503).json({ ok: false, error: 'iap_temporarily_unavailable' }) }
 }

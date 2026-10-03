@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { createSubscriptionDatabase } from './subscriptionDatabaseHarness.mjs'
+const engines = []
+afterEach(async () => { for (const db of engines.splice(0)) await db.pg.close() })
+import { afterEach, describe, expect, it } from 'vitest'
 import { NotificationTypeV2, Subtype } from '@apple/app-store-server-library'
 import {
   deriveSubscriptionStatus,
@@ -10,7 +13,6 @@ import {
   SubscriptionAlreadyLinkedError,
   isAutoRenewableProduct,
   isAnonymousUser,
-  claimSubscriptionBinding,
   upsertSubscriptionState,
   listSubscriptionStateUserIds,
   findSubscriptionState,
@@ -18,16 +20,22 @@ import {
   getEffectiveSubscription,
 } from './iapSubscriptions.mjs'
 
+async function claimSubscriptionBinding(db, userId, verified, options) {
+  await verifyAndPersistSubscription(db, userId, verified, options)
+  return db._tables.app_store_subscription_bindings.find(b => b.original_transaction_id === verified.originalTransactionId)
+}
+
 // ── Minimal in-memory fake db for the two tables these functions touch ──────
 // Only implements the exact chains iapSubscriptions.mjs actually calls
 // (select/eq/eq/maybeSingle, insert, update/eq/eq, upsert, auth.admin.getUserById).
 function makeFakeDb({ bindings = [], states = [], anonymousUserIds = new Set() } = {}) {
+  let enginePromise
   const tables = {
     app_store_subscription_bindings: [...bindings],
     app_store_subscription_states: [...states],
   }
   function query(table) {
-    let rows = tables[table]
+    let rows = tables[table] ?? (table === 'subscription_test_chain_policy' ? tables.app_store_subscription_states : [])
     const filters = []
     const builder = {
       select: () => builder,
@@ -47,6 +55,19 @@ function makeFakeDb({ bindings = [], states = [], anonymousUserIds = new Set() }
     return builder
   }
   return {
+    async rpc(name, args) {
+      if (!enginePromise) enginePromise = createSubscriptionDatabase({bindings: tables.app_store_subscription_bindings, states: tables.app_store_subscription_states, anonymousUserIds}).then(db => {engines.push(db); return db})
+      const engine = await enginePromise
+      await engine.pg.query('insert into auth.users values($1,$2) on conflict do nothing',[engine.uuid(args.p_user_id), anonymousUserIds.has(args.p_user_id)])
+      if (args.p_transaction.environment && args.p_transaction.environment !== 'Production') {
+        await engine.pg.query('insert into public.subscription_test_chain_policy values($1,$2,$3,$4,now()) on conflict do nothing',[engine.uuid(args.p_user_id), args.p_transaction.originalTransactionId,args.p_transaction.environment,'Test fixture policy'])
+      }
+      const result = await engine.rpc(name,args)
+      const snapshot = await engine.snapshots()
+      tables.app_store_subscription_bindings.splice(0, tables.app_store_subscription_bindings.length, ...snapshot.bindings)
+      tables.app_store_subscription_states.splice(0, tables.app_store_subscription_states.length, ...snapshot.states)
+      return result
+    },
     from(table) {
       return {
         select: (...args) => query(table).select(...args),
@@ -154,7 +175,7 @@ describe('subscription status model', () => {
 
   it('does not grant billing retry and keeps valid grace active', () => {
     expect(subscriptionStatusIsActive('billing_retry', new Date(future).toISOString())).toBe(false)
-    expect(subscriptionStatusIsActive('grace_period', new Date(past).toISOString())).toBe(true)
+    expect(subscriptionStatusIsActive('grace_period', new Date(future).toISOString())).toBe(true)
     expect(subscriptionStatusIsActive('expired', new Date(past).toISOString())).toBe(false)
     expect(subscriptionStatusIsActive('refunded', new Date(future).toISOString())).toBe(false)
     expect(subscriptionStatusIsActive('revoked', new Date(future).toISOString())).toBe(false)
@@ -370,8 +391,8 @@ describe('normalized entitlement snapshot', () => {
 describe('subscription product change within the same group', () => {
   const OWNER = '11111111-1111-4111-8111-111111111111'
   const ORIGINAL = 'orig-shared-across-group'
-  const monthly = tx({ originalTransactionId: ORIGINAL, appAccountToken: OWNER })
-  const annual = tx({ originalTransactionId: ORIGINAL, appAccountToken: OWNER })
+  const monthly = tx({ originalTransactionId: ORIGINAL, appAccountToken: OWNER, environment: 'Sandbox' })
+  const annual = tx({ originalTransactionId: ORIGINAL, appAccountToken: OWNER, environment: 'Sandbox' })
 
   it('S5/S6: the same owner keeps identity when switching Monthly ⇄ Annual', () => {
     expect(() => assertSubscriptionIdentity(monthly)).not.toThrow()
@@ -513,9 +534,9 @@ describe('effective access respects canonical ownership', () => {
     expect(await getEffectiveSubscription(db, other)).toBeNull()
   })
 
-  it('preserves only original-token-owner access for unbound legacy guests', async () => {
+  it('unbound legacy states cannot grant access without a canonical owner', async () => {
     const db = makeFakeDb({ states: [row(owner), { ...row(other), app_account_token: owner }] })
-    expect((await getEffectiveSubscription(db, owner)).active).toBe(true)
+    expect(await getEffectiveSubscription(db, owner)).toBeNull()
     expect(await getEffectiveSubscription(db, other)).toBeNull()
   })
 })

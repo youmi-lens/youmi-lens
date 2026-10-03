@@ -28,6 +28,8 @@ import {
   handleAppleNotifications,
   handleIapEntitlement,
   handleIapRestore,
+  handleSubscriptionAvailability,
+  handleSubscriptionPurchaseAuthorization,
   handleIapVerify,
 } from './iapRoutes.mjs'
 import { handleDeleteAccount } from './accountRoutes.mjs'
@@ -299,6 +301,9 @@ app.post('/api/admin/watch/snapshots/refresh', (req, res) => {
     }
   })
 })
+
+app.get('/api/iap/subscriptions/availability', handleSubscriptionAvailability)
+app.post('/api/iap/subscriptions/authorize', handleSubscriptionPurchaseAuthorization)
 
 // Primary Student Pass verification endpoint.
 app.post('/api/iap/apple/verify', (req, res) => {
