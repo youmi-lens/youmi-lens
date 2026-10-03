@@ -7,7 +7,7 @@ import { recordDashscopeChatUsage } from './watchModelUsage.mjs'
 
 const USAGE = {
   provider: 'dashscope',
-  model: 'qwen-turbo',
+  model: 'qwen-flash',
   prompt_tokens: 10000,
   completion_tokens: 500,
   total_tokens: 10500,
@@ -43,7 +43,7 @@ describe('recordDashscopeChatUsage (Phase 5B)', () => {
       user_id: 'user-1',
       recording_id: 'rec-1',
       metadata: {
-        model: 'qwen-turbo',
+        model: 'qwen-flash',
         request_type: 'summary',
         feature: 'after_class_summary',
         direction: 'input',
@@ -119,7 +119,7 @@ describe('recordDashscopeChatUsage (Phase 5B)', () => {
       // Metadata is EXACTLY the five safe descriptors with constant values —
       // proving no extra/text/secret fields can ride along.
       expect(event.metadata).toEqual({
-        model: 'qwen-turbo',
+        model: 'qwen-flash',
         request_type: 'summary',
         feature: 'after_class_summary',
         direction: dir,

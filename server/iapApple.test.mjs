@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Environment, Type } from '@apple/app-store-server-library'
-import { environmentTryOrder, normalizeDecodedTransaction } from './iapApple.mjs'
+import { assertNotificationLineage, environmentTryOrder, normalizeDecodedTransaction } from './iapApple.mjs'
 
 const baseDecoded = {
   bundleId: 'com.aydenz.youmilensipad',
@@ -12,6 +12,15 @@ const baseDecoded = {
   expiresDate: Date.parse('2099-01-01T00:00:00Z'),
   type: Type.CONSUMABLE,
 }
+
+describe('signed notification component consistency', () => {
+  const tx = { environment: 'Production', originalTransactionId: 'chain', appAccountToken: 'OWNER' }
+  it('accepts matching components', () => expect(() => assertNotificationLineage('Production', tx, { environment: 'Production', originalTransactionId: 'chain', appAccountToken: 'owner' })).not.toThrow())
+  it('rejects cross-environment transaction', () => expect(() => assertNotificationLineage('Sandbox', tx, null)).toThrow(/environment/))
+  it('rejects cross-environment renewal', () => expect(() => assertNotificationLineage('Production', tx, { environment: 'Sandbox' })).toThrow(/environment/))
+  it('rejects renewal from another Apple chain', () => expect(() => assertNotificationLineage('Production', tx, { originalTransactionId: 'other' })).toThrow(/originalTransactionId/))
+  it('rejects inconsistent signed account tokens', () => expect(() => assertNotificationLineage('Production', tx, { appAccountToken: 'other' })).toThrow(/appAccountToken/))
+})
 
 function normalize(decoded = {}) {
   return normalizeDecodedTransaction(

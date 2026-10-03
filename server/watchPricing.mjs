@@ -28,8 +28,11 @@ const PROVIDER_SET = new Set(KNOWN_PROVIDERS)
 /** A few friendly aliases → canonical provider. */
 const PROVIDER_ALIASES = Object.freeze({
   qwen: 'dashscope',
-  'qwen-turbo': 'dashscope',
+  'qwen-flash': 'dashscope',
   'qwen-plus': 'dashscope',
+  // Historical telemetry only: retained so pre-migration ledger rows remain
+  // attributable to DashScope. It is not a selectable inference model.
+  'qwen-turbo': 'dashscope',
   dash: 'dashscope',
   gpt: 'openai',
   'open-ai': 'openai',

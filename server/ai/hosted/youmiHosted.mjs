@@ -8,7 +8,7 @@
  * - DASHSCOPE_API_KEY — default China-region Model Studio key (Paraformer + Qwen)
  * - DASHSCOPE_OVERSEAS_API_KEY — optional international (Singapore) key; when set, all DashScope
  *   calls use intl endpoints with this key (server-side only, never sent to the browser)
- * - YUMI_QWEN_CHAT_MODEL — default qwen-turbo
+ * - YUMI_QWEN_CHAT_MODEL — optional text-model override; default qwen-flash
  * - YUMI_PARAFORMER_MODEL — default paraformer-v2
  * - YUMI_PARAFORMER_LANGUAGE_HINTS — comma list, default zh,en
  * - YUMI_HOSTED_TRANSCRIBE_IMPL — optional: openai_fallback (buffer /api/transcribe only; needs OPENAI_API_KEY)
@@ -20,6 +20,7 @@
  */
 
 import { buildSummarizeMessages } from '../summarizePrompt.mjs'
+import { extractSummaryFields, parseJsonObjectLoose, summaryShapeDiagnostic } from '../summaryResponseParsing.mjs'
 import { qwenLanguageFor, resolveContentLanguagePair, shouldTranslate } from '../../contentLanguages.mjs'
 import {
   getDashScopeEffectiveKey,
@@ -30,6 +31,11 @@ import {
   getDashScopeHttpAttempts,
   withDashScopeHttpFallback,
 } from '../../dashscopeWithFallback.mjs'
+import {
+  assertSupportedQwenChatModel,
+  getQwenChatModelConfig,
+  resolveQwenChatModel,
+} from '../qwenModelConfig.mjs'
 
 /** Internal adapter id for logs and metrics (never shown in UI). */
 export const HOSTED_ADAPTER_ID = 'qwenHosted'
@@ -45,7 +51,6 @@ function safeUrlHost(u) {
   }
 }
 
-const QWEN_CHAT_MODEL = process.env.YUMI_QWEN_CHAT_MODEL || 'qwen-turbo'
 const OPENAI_CHAT_MODEL = process.env.YUMI_OPENAI_CHAT_MODEL || 'gpt-4o-mini'
 const PARAFORMER_MODEL = process.env.YUMI_PARAFORMER_MODEL || 'paraformer-v2'
 const STUB_ENABLED =
@@ -93,11 +98,14 @@ export function hostedRuntimeMode() {
 
 /** Secret-safe env presence diagnostics for server health/logging. */
 export function hostedEnvDiagnostics() {
+  const qwen = getQwenChatModelConfig()
   return {
     ...getDashScopeEnvSummary(),
     OPENAI_API_KEY: Boolean(process.env.OPENAI_API_KEY?.trim()),
     YUMI_HOSTED_TRANSCRIBE_IMPL: process.env.YUMI_HOSTED_TRANSCRIBE_IMPL || '',
-    YUMI_QWEN_CHAT_MODEL: process.env.YUMI_QWEN_CHAT_MODEL || 'qwen-turbo',
+    YUMI_QWEN_CHAT_MODEL: qwen.model,
+    YUMI_QWEN_CHAT_MODEL_SOURCE: qwen.source,
+    YUMI_QWEN_CHAT_MODEL_RETIRED: qwen.isRetired,
     YUMI_PARAFORMER_MODEL: process.env.YUMI_PARAFORMER_MODEL || 'paraformer-v2',
     ENABLE_STUB_AI: STUB_ENABLED,
   }
@@ -109,6 +117,11 @@ async function stubDelay(ms = 220) {
 
 /** Prefer DashScope (Qwen); fall back to OpenAI chat for legacy / single-key deploys. */
 async function chatCompleteJson(messages, opts = {}) {
+  // Reject a caller-supplied retired name too. This is intentionally checked
+  // before endpoint fallback so no request can fall back to qwen-turbo.
+  const dashModel = assertSupportedQwenChatModel(
+    opts.modelDash ?? opts.model ?? resolveQwenChatModel(),
+  )
   const dashAttempts = getDashScopeHttpAttempts()
   if (dashAttempts.length) {
     return withDashScopeHttpFallback({
@@ -121,8 +134,9 @@ async function chatCompleteJson(messages, opts = {}) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: opts.modelDash ?? opts.model ?? QWEN_CHAT_MODEL,
+            model: dashModel,
             temperature: opts.temperature ?? 0.3,
+            ...(Number.isInteger(opts.maxTokens) ? { max_tokens: opts.maxTokens } : {}),
             ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
             messages,
           }),
@@ -133,6 +147,15 @@ async function chatCompleteJson(messages, opts = {}) {
           throw new Error('HOSTED_CHAT_FAILED')
         }
         const data = JSON.parse(raw)
+        const choice = data.choices?.[0]
+        // A max_tokens cutoff must fail loudly rather than hand back partial
+        // content as if it were a complete translation/summary — the caller's
+        // best-effort catch already treats this feature as optional, so a
+        // clear failure is strictly safer than silently truncated text.
+        if (choice?.finish_reason === 'length') {
+          console.warn('[youmiHosted] dash chat truncated', { maxTokens: opts.maxTokens })
+          throw new Error('HOSTED_CHAT_TRUNCATED')
+        }
         // Surface token usage WITHOUT changing the string return type or any
         // existing caller. Only the DashScope branch populates this (so an
         // OpenAI fallback is never recorded as dashscope). No prompt/content is
@@ -140,12 +163,12 @@ async function chatCompleteJson(messages, opts = {}) {
         if (opts.usageOut && data?.usage && typeof data.usage === 'object') {
           opts.usageOut.provider = 'dashscope'
           opts.usageOut.model =
-            typeof data.model === 'string' ? data.model : opts.modelDash ?? opts.model ?? QWEN_CHAT_MODEL
+            typeof data.model === 'string' ? data.model : dashModel
           opts.usageOut.prompt_tokens = data.usage.prompt_tokens
           opts.usageOut.completion_tokens = data.usage.completion_tokens
           opts.usageOut.total_tokens = data.usage.total_tokens
         }
-        return data.choices?.[0]?.message?.content ?? ''
+        return choice?.message?.content ?? ''
       },
     })
   }
@@ -171,7 +194,12 @@ async function chatCompleteJson(messages, opts = {}) {
     throw new Error('HOSTED_CHAT_FAILED')
   }
   const data = JSON.parse(raw)
-  return data.choices?.[0]?.message?.content ?? ''
+  const choice = data.choices?.[0]
+  if (choice?.finish_reason === 'length') {
+    console.warn('[youmiHosted] openai chat fallback truncated')
+    throw new Error('HOSTED_CHAT_TRUNCATED')
+  }
+  return choice?.message?.content ?? ''
 }
 
 /**
@@ -244,6 +272,23 @@ async function submitParaformerTask(apiKey, bases, fileUrl, languageHints) {
   return taskId
 }
 
+/**
+ * A Paraformer task can reach terminal FAILED for reasons with very
+ * different retry semantics. `SUCCESS_WITH_NO_VALID_FRAGMENT` is DashScope's
+ * own terminal code for "the task ran to completion but found no speech to
+ * transcribe" (confirmed against a real production failure, recording
+ * 7885e218-2814-4284-bfe9-dbca471a33a8, 2026-09-28) — a deterministic
+ * outcome for that exact audio, not a transient provider/network problem.
+ * Retrying the same audio will fail identically. Every other FAILED code is
+ * still the generic, possibly-transient HOSTED_TRANSCRIBE_FAILED — this
+ * function only carves out the one code we have real evidence is
+ * non-transient, so no other failure classification changes.
+ */
+export function paraformerFailureErrorCode(out) {
+  if (out?.code === 'SUCCESS_WITH_NO_VALID_FRAGMENT') return 'HOSTED_TRANSCRIBE_NO_SPEECH'
+  return 'HOSTED_TRANSCRIBE_FAILED'
+}
+
 async function pollParaformerTask(apiKey, bases, taskId) {
   const url = `${bases.tasksPollBase}/${taskId}`
   const maxMs = Number(process.env.YUMI_PARAFORMER_POLL_MAX_MS || 600_000)
@@ -296,7 +341,7 @@ async function pollParaformerTask(apiKey, bases, taskId) {
     }
     if (status === 'FAILED' || status === 'UNKNOWN') {
       console.warn('[youmiHosted] paraformer task failed', status, raw.slice(0, 400))
-      throw new Error('HOSTED_TRANSCRIBE_FAILED')
+      throw new Error(status === 'FAILED' ? paraformerFailureErrorCode(out) : 'HOSTED_TRANSCRIBE_FAILED')
     }
     await new Promise((res) => setTimeout(res, intervalMs))
   }
@@ -403,7 +448,11 @@ export async function translateText(text, target, source = 'English') {
       { role: 'system', content: system },
       { role: 'user', content: text.trim() },
     ],
-    { temperature: 0.2, modelDash: QWEN_CHAT_MODEL },
+    // 1024 matches the existing BYOK OpenAI translate budget in adapters.mjs —
+    // this path also serves the up-to-1600-char post-class transcript chunks
+    // (chunkTranscriptForTranslation in processRecording.mjs), not just short
+    // live-caption utterances, so it needs headroom beyond a single sentence.
+    { temperature: 0.2, maxTokens: 1024, modelDash: resolveQwenChatModel() },
   )
   return out.trim()
 }
@@ -442,22 +491,32 @@ export async function summarizeTranscript(transcript, course, title, options = {
   const usageOut = {}
   const raw = await chatCompleteJson(messages, {
     temperature: 0.3,
+    // buildSummarizeMessages has no length cap: it asks for a full
+    // Outline/Key-terms/Takeaways structure per language, and both summaries
+    // share this one JSON response, so this must stay generous rather than
+    // risk cutting off a longer lecture's summary mid-JSON.
+    maxTokens: 4000,
     responseFormat: { type: 'json_object' },
-    modelDash: QWEN_CHAT_MODEL,
+    modelDash: resolveQwenChatModel(),
     usageOut,
   })
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
+  const parsed = parseJsonObjectLoose(raw)
+  if (!parsed) {
+    console.warn('[youmiHosted] summarizeTranscript parse_failed', summaryShapeDiagnostic(raw, parsed))
     throw new Error('HOSTED_SUMMARY_PARSE')
   }
-  const sourceSummary = parsed.source_summary?.trim()
-  if (!sourceSummary) throw new Error('HOSTED_SUMMARY_SHAPE')
+  const { sourceSummary, translatedSummary: translatedFromResponse } = extractSummaryFields(parsed)
+  if (!sourceSummary) {
+    console.warn('[youmiHosted] summarizeTranscript shape_failed', { field: 'source_summary', ...summaryShapeDiagnostic(raw, parsed) })
+    throw new Error('HOSTED_SUMMARY_SHAPE')
+  }
   let translatedSummary = null
   if (needTranslated) {
-    translatedSummary = parsed.translated_summary?.trim() || null
-    if (!translatedSummary) throw new Error('HOSTED_SUMMARY_SHAPE')
+    translatedSummary = translatedFromResponse
+    if (!translatedSummary) {
+      console.warn('[youmiHosted] summarizeTranscript shape_failed', { field: 'translated_summary', ...summaryShapeDiagnostic(raw, parsed) })
+      throw new Error('HOSTED_SUMMARY_SHAPE')
+    }
   }
   console.warn('[youmiHosted] summarizeTranscript done', {
     sourceSummaryLen: sourceSummary.length, translatedSummaryLen: translatedSummary?.length ?? 0,

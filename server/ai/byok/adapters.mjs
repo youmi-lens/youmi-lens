@@ -3,6 +3,8 @@
  */
 
 import { buildSummarizeMessages } from '../summarizePrompt.mjs'
+import { extractSummaryFields, parseJsonObjectLoose } from '../summaryResponseParsing.mjs'
+import { resolveQwenChatModel } from '../qwenModelConfig.mjs'
 
 const OPENAI_AUDIO = 'https://api.openai.com/v1/audio/transcriptions'
 const OPENAI_CHAT = 'https://api.openai.com/v1/chat/completions'
@@ -52,13 +54,21 @@ async function chatOpenAiCompatible(url, apiKey, model, body) {
   const raw = await r.text()
   if (!r.ok) throw new Error('BYOK_CHAT_FAILED')
   const data = JSON.parse(raw)
-  return data.choices?.[0]?.message?.content ?? ''
+  const choice = data.choices?.[0]
+  // A max_tokens cutoff must fail loudly, not hand back partial text as a
+  // completed translation/summary. Callers surface this as a request error.
+  if (choice?.finish_reason === 'length') throw new Error('BYOK_CHAT_TRUNCATED')
+  return choice?.message?.content ?? ''
 }
 
 export async function byokSummarize(provider, transcript, course, title, apiKey) {
   const messages = buildSummarizeMessages(transcript, course, title)
   const payload = {
     temperature: 0.3,
+    // Matches the hosted-adapter budget (youmiHosted.mjs summarizeTranscript):
+    // the shared prompt has no length cap and asks for a full two-language
+    // structured summary in one JSON response.
+    max_tokens: 4000,
     response_format: { type: 'json_object' },
     messages,
   }
@@ -68,27 +78,17 @@ export async function byokSummarize(provider, transcript, course, title, apiKey)
   } else if (provider === 'deepseek') {
     raw = await chatOpenAiCompatible(DEEPSEEK_CHAT, apiKey, 'deepseek-chat', payload)
   } else if (provider === 'qwen') {
-    raw = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, 'qwen-turbo', payload)
+    raw = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, resolveQwenChatModel(), payload)
   } else {
     throw new Error('BAD_PROVIDER')
   }
 
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    const m = raw.match(/\{[\s\S]*\}/)
-    if (m) {
-      try {
-        parsed = JSON.parse(m[0])
-      } catch {
-        /* fall through */
-      }
-    }
-    if (!parsed) throw new Error('BYOK_SUMMARY_PARSE')
-  }
-  const summaryEn = parsed.summary_en?.trim()
-  const summaryZh = parsed.summary_zh?.trim()
+  const parsed = parseJsonObjectLoose(raw)
+  if (!parsed) throw new Error('BYOK_SUMMARY_PARSE')
+  // The provider-neutral prompt uses source/translated names; retain the
+  // public BYOK response contract (summaryEn/summaryZh) and accept the legacy
+  // field names only for compatibility with older provider responses.
+  const { sourceSummary: summaryEn, translatedSummary: summaryZh } = extractSummaryFields(parsed)
   if (!summaryEn || !summaryZh) throw new Error('BYOK_SUMMARY_SHAPE')
   return { summaryEn, summaryZh }
 }
@@ -116,8 +116,12 @@ export async function byokTranslate(provider, text, target, apiKey) {
       messages,
     })
   } else if (provider === 'qwen') {
-    out = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, 'qwen-turbo', {
+    out = await chatOpenAiCompatible(DASHSCOPE_COMPAT, apiKey, resolveQwenChatModel(), {
       temperature: 0.2,
+      // Matches the OpenAI branch above — this path also serves chunked
+      // post-class transcript translation (up to 1600 source chars), not
+      // just short live-caption text.
+      max_tokens: 1024,
       messages,
     })
   } else {

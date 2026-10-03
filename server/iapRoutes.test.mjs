@@ -18,8 +18,14 @@ process.env.SUPABASE_ANON_KEY = 'test-anon-key'
 
 const TEST_USER_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 
-const { verifyAppleTransactionMock, loadBillingProductMock, findSubscriptionBindingMock, verifyAndPersistSubscriptionMock, recordBillingEventMock, buildQuotaStatusMock, getOrCreateUserQuotaMock, createClientMock } = vi.hoisted(() => ({
+const { verifyAppleNotificationMock, upsertSubscriptionStateMock, reserveNotificationMock, markNotificationProcessedMock, findTransactionOwnerMock, findSubscriptionStateMock, verifyAppleTransactionMock, loadBillingProductMock, findSubscriptionBindingMock, verifyAndPersistSubscriptionMock, recordBillingEventMock, buildQuotaStatusMock, getOrCreateUserQuotaMock, createClientMock } = vi.hoisted(() => ({
   verifyAppleTransactionMock: vi.fn(),
+  verifyAppleNotificationMock: vi.fn(),
+  upsertSubscriptionStateMock: vi.fn(),
+  reserveNotificationMock: vi.fn(async () => ({ reserved: true })),
+  markNotificationProcessedMock: vi.fn(async () => {}),
+  findTransactionOwnerMock: vi.fn(async () => null),
+  findSubscriptionStateMock: vi.fn(async () => null),
   loadBillingProductMock: vi.fn(),
   findSubscriptionBindingMock: vi.fn(),
   verifyAndPersistSubscriptionMock: vi.fn(),
@@ -35,15 +41,15 @@ const { verifyAppleTransactionMock, loadBillingProductMock, findSubscriptionBind
 vi.mock('@supabase/supabase-js', () => ({ createClient: createClientMock }))
 vi.mock('./iapApple.mjs', () => ({
   verifyAppleTransaction: verifyAppleTransactionMock,
-  verifyAppleNotification: vi.fn(),
+  verifyAppleNotification: verifyAppleNotificationMock,
 }))
 vi.mock('./iapEntitlements.mjs', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, loadBillingProduct: loadBillingProductMock, recordBillingEvent: recordBillingEventMock }
+  return { ...actual, loadBillingProduct: loadBillingProductMock, recordBillingEvent: recordBillingEventMock, reserveNotification: reserveNotificationMock, markNotificationProcessed: markNotificationProcessedMock, findTransactionOwner: findTransactionOwnerMock }
 })
 vi.mock('./iapSubscriptions.mjs', async (importOriginal) => {
   const actual = await importOriginal()
-  return { ...actual, findSubscriptionBinding: findSubscriptionBindingMock, verifyAndPersistSubscription: verifyAndPersistSubscriptionMock }
+  return { ...actual, findSubscriptionBinding: findSubscriptionBindingMock, verifyAndPersistSubscription: verifyAndPersistSubscriptionMock, upsertSubscriptionState: upsertSubscriptionStateMock, findSubscriptionState: findSubscriptionStateMock }
 })
 vi.mock('./betaUsageStatus.mjs', () => ({ buildQuotaStatus: buildQuotaStatusMock }))
 vi.mock('./betaGate.mjs', async (importOriginal) => {
@@ -51,14 +57,17 @@ vi.mock('./betaGate.mjs', async (importOriginal) => {
   return { ...actual, getOrCreateUserQuota: getOrCreateUserQuotaMock }
 })
 
-let safeIapError, handleIapVerify, handleIapRestore, SubscriptionAccountTokenError, SubscriptionAlreadyLinkedError
+let safeIapError, handleAppleNotifications, handleIapVerify, handleIapRestore, SubscriptionAccountTokenError, SubscriptionAlreadyLinkedError
 
 beforeAll(async () => {
-  ;({ safeIapError, handleIapVerify, handleIapRestore } = await import('./iapRoutes.mjs'))
+  ;({ safeIapError, handleAppleNotifications, handleIapVerify, handleIapRestore } = await import('./iapRoutes.mjs'))
   ;({ SubscriptionAccountTokenError, SubscriptionAlreadyLinkedError } = await import('./iapSubscriptions.mjs'))
 })
 
 afterEach(() => {
+  verifyAppleNotificationMock.mockReset()
+  upsertSubscriptionStateMock.mockReset()
+  findSubscriptionStateMock.mockReset()
   verifyAppleTransactionMock.mockReset()
   loadBillingProductMock.mockReset()
   findSubscriptionBindingMock.mockReset()
@@ -239,5 +248,102 @@ describe('legitimate subscription flows are unaffected by the normalization', ()
     // recordBillingEvent (which only fires on a real grant/decision path) was
     // never reached — the identity assertion throws before any persistence.
     expect(recordBillingEventMock).not.toHaveBeenCalled()
+  })
+})
+
+
+describe('Restore delivery contract', () => {
+  it('H: sales_closed is not safe to finish and does not persist a subscription', async () => {
+    verifyAppleTransactionMock.mockResolvedValue(verifiedAnnualTransaction({ productId: MONTHLY_PRODUCT_ROW.product_id, environment: 'Production' }))
+    loadBillingProductMock.mockResolvedValue(MONTHLY_PRODUCT_ROW)
+    findSubscriptionBindingMock.mockResolvedValue(null)
+    const res = fakeRes()
+    await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws', transactionId: 'txn-annual-1' }] }), res)
+    expect(res.payload.verifiedTransactionIds).toEqual([])
+    expect(res.payload.activeRestoredCount).toBe(0)
+    expect(verifyAndPersistSubscriptionMock).not.toHaveBeenCalled()
+    expect(recordBillingEventMock).toHaveBeenCalledWith(expect.anything(), TEST_USER_ID, expect.objectContaining({ event_type: 'kill_switch_block' }))
+  })
+
+  it('I: granted transaction is safe to finish', async () => {
+    verifyAppleTransactionMock.mockResolvedValue(verifiedAnnualTransaction())
+    loadBillingProductMock.mockResolvedValue(ANNUAL_PRODUCT_ROW)
+    findSubscriptionBindingMock.mockResolvedValue(null)
+    verifyAndPersistSubscriptionMock.mockResolvedValue({ active: true, status: 'active' })
+    const res = fakeRes()
+    await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws', transactionId: 'txn-annual-1' }] }), res)
+    expect(res.payload.verifiedTransactionIds).toEqual(['txn-annual-1'])
+    expect(res.payload.activeRestoredCount).toBe(1)
+  })
+
+  it('verification or retryable persistence failure is not safe to finish', async () => {
+    verifyAppleTransactionMock.mockRejectedValue(new Error('verification unavailable'))
+    const res = fakeRes()
+    await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws', transactionId: 'txn-annual-1' }] }), res)
+    expect(res.payload.verifiedTransactionIds).toEqual([])
+    verifyAppleTransactionMock.mockResolvedValue(verifiedAnnualTransaction())
+    loadBillingProductMock.mockResolvedValue(ANNUAL_PRODUCT_ROW)
+    findSubscriptionBindingMock.mockResolvedValue(null)
+    verifyAndPersistSubscriptionMock.mockRejectedValue(new Error('database unavailable'))
+    const retry = fakeRes()
+    await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws' }] }), retry)
+    expect(retry.payload.verifiedTransactionIds).toEqual([])
+  })
+})
+
+
+describe('authorized terminal reconciliation and notification ownership', () => {
+  it('revoked/refunded invalid access is not safe to finish', async () => {
+    verifyAppleTransactionMock.mockResolvedValue(verifiedAnnualTransaction())
+    loadBillingProductMock.mockResolvedValue(ANNUAL_PRODUCT_ROW)
+    findSubscriptionBindingMock.mockResolvedValue({ user_id: TEST_USER_ID })
+    verifyAndPersistSubscriptionMock.mockResolvedValue({ active: false, status: 'revoked' })
+    const res = fakeRes()
+    await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws' }] }), res)
+    expect(res.payload.verifiedTransactionIds).toEqual([])
+    expect(res.payload.activeRestoredCount).toBe(0)
+  })
+
+  it('retryable verification_pending state is not safe to finish', async () => {
+    verifyAppleTransactionMock.mockResolvedValue(verifiedAnnualTransaction())
+    loadBillingProductMock.mockResolvedValue(ANNUAL_PRODUCT_ROW)
+    findSubscriptionBindingMock.mockResolvedValue({ user_id: TEST_USER_ID })
+    verifyAndPersistSubscriptionMock.mockResolvedValue({ active: false, status: 'verification_pending' })
+    const res = fakeRes()
+    await handleIapRestore(fakeReq({ platform: 'ios', purchases: [{ signedTransactionInfo: 'jws' }] }), res)
+    expect(res.payload.verifiedTransactionIds).toEqual([])
+  })
+
+  it('renewal writes only canonical owner state', async () => {
+    const transaction = { ...verifiedAnnualTransaction(), autoRenewable: true }
+    verifyAppleNotificationMock.mockResolvedValue({ transaction, notificationType: 'DID_RENEW', notificationUUID: 'notification-1', environment: 'Sandbox' })
+    findSubscriptionBindingMock.mockResolvedValue({ user_id: TEST_USER_ID, owner_state: 'active' })
+    upsertSubscriptionStateMock.mockResolvedValue({ status: 'active' })
+    const res = fakeRes()
+    await handleAppleNotifications({ body: { signedPayload: 'jws' } }, res)
+    expect(res.statusCode).toBe(200)
+    expect(upsertSubscriptionStateMock).toHaveBeenCalledTimes(1)
+    expect(upsertSubscriptionStateMock).toHaveBeenCalledWith(expect.anything(), TEST_USER_ID, transaction, expect.anything())
+  })
+
+  it('notification without binding or original-owner state grants nobody', async () => {
+    verifyAppleNotificationMock.mockResolvedValue({ transaction: { ...verifiedAnnualTransaction(), autoRenewable: true }, notificationType: 'DID_RENEW', notificationUUID: 'notification-2', environment: 'Sandbox' })
+    findSubscriptionBindingMock.mockResolvedValue(null)
+    findSubscriptionStateMock.mockResolvedValue(null)
+    const res = fakeRes()
+    await handleAppleNotifications({ body: { signedPayload: 'jws' } }, res)
+    expect(res.statusCode).toBe(200)
+    expect(upsertSubscriptionStateMock).not.toHaveBeenCalled()
+  })
+
+  it('notification cannot grant without a canonical binding', async () => {
+    verifyAppleNotificationMock.mockResolvedValue({ transaction: { ...verifiedAnnualTransaction(), autoRenewable: true }, notificationType: 'DID_RENEW', notificationUUID: 'notification-3', environment: 'Sandbox' })
+    findSubscriptionBindingMock.mockResolvedValue(null)
+    findSubscriptionStateMock.mockResolvedValue({ user_id: TEST_USER_ID })
+    upsertSubscriptionStateMock.mockResolvedValue({ status: 'active' })
+    const res = fakeRes()
+    await handleAppleNotifications({ body: { signedPayload: 'jws' } }, res)
+    expect(res.statusCode).toBe(200)
+    expect(upsertSubscriptionStateMock).not.toHaveBeenCalled()
   })
 })

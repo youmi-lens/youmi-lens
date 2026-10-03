@@ -787,3 +787,54 @@ export async function recordBetaUsage(userId, email, recordingUuid, actionType, 
     console.warn('[betaGate] recordBetaUsage threw', e?.message)
   }
 }
+
+const PROCESSING_BILLABLE_ACTIONS = ['process_recording', 'regenerate_summary']
+
+export function processingUsageIdempotencyKey(userId, recordingUuid) {
+  return `process-recording:${userId}:${recordingUuid}`
+}
+
+/**
+ * Historical processing rows predate idempotency_key, so recovery checks the
+ * durable recording/action identity too. An unavailable ledger is a hard
+ * failure: proceeding would risk charging the same recording twice.
+ */
+export async function hasRecordedProcessingUsage(userId, recordingUuid) {
+  const db = getAdminClient()
+  if (!db) throw new Error('Usage ledger is unavailable.')
+  const { data, error } = await db
+    .from('beta_usage')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('recording_id', recordingUuid)
+    .in('action_type', PROCESSING_BILLABLE_ACTIONS)
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(`Could not inspect processing usage: ${error.message}`)
+  return Boolean(data?.id)
+}
+
+/**
+ * Exactly-once initial processing usage. The database's unique index
+ * on idempotency_key is the durable authority across retries and instances.
+ */
+export async function recordProcessingUsageOnce(userId, email, recordingUuid, durationSec = 0) {
+  const db = getAdminClient()
+  if (!db) throw new Error('Usage ledger is unavailable.')
+  const billableMinutes = Math.ceil((durationSec || 0) / 60)
+  const idempotencyKey = processingUsageIdempotencyKey(userId, recordingUuid)
+  const { error } = await db.from('beta_usage').upsert({
+    user_id: userId,
+    email: (email || '').toLowerCase(),
+    recording_id: recordingUuid,
+    action_type: 'process_recording',
+    duration_sec: Math.round(durationSec) || 0,
+    billable_minutes: billableMinutes,
+    idempotency_key: idempotencyKey,
+  }, {
+    onConflict: 'idempotency_key',
+    ignoreDuplicates: true,
+  })
+  if (error) throw new Error(`Could not persist processing usage: ${error.message}`)
+  return { idempotencyKey, billableMinutes }
+}

@@ -37,6 +37,10 @@ function dbWithSubscription(subscriptionRows) {
   return {
     from(table) {
       if (table === 'app_store_subscription_states') return subscriptionQuery
+      if (table === 'app_store_subscription_bindings') return {
+        select() { return this }, eq() { return this },
+        async maybeSingle() { return { data: { user_id: 'user-1', owner_state: 'active', environment: 'Sandbox' }, error: null } },
+      }
       return legacyQuery
     },
   }

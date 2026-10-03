@@ -71,10 +71,10 @@ describe('scrubMetadata', () => {
       transcript: 'long spoken text',
       audio: 'blob',
       payload: { big: 'thing' },
-      model: 'qwen-turbo',
+      model: 'qwen-flash',
       region: 'us',
     })
-    expect(out).toEqual({ model: 'qwen-turbo', region: 'us' })
+    expect(out).toEqual({ model: 'qwen-flash', region: 'us' })
   })
 
   it('drops oversized strings but keeps small scalars', () => {

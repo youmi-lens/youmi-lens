@@ -226,6 +226,7 @@ export function normalizeDecodedTransaction(decoded, { expectedBundleId, expecte
     originalTransactionId: decoded.originalTransactionId ?? decoded.transactionId,
     environment: decoded.environment,
     productType: decoded.type ?? null,
+    appleSignedAt: isoFromAppleMs(decoded.signedDate),
     purchaseDateMs: decoded.purchaseDate,
     purchaseDate: isoFromAppleMs(decoded.purchaseDate),
     // Consumables ignore Apple's expiresDate; for auto-renewable subscriptions it
@@ -299,12 +300,24 @@ export async function verifyAppleTransaction(input = {}) {
  * present, the embedded signed transaction. Returns a compact, audit-safe shape.
  * Accepts Sandbox or Production notifications (the same backend serves both).
  */
+export function assertNotificationLineage(environment, transaction, renewal) {
+  if (transaction && transaction.environment !== environment) throw new Error('Transaction environment does not match notification')
+  if (renewal?.environment && renewal.environment !== environment) throw new Error('Renewal info environment does not match notification')
+  if (transaction && renewal?.originalTransactionId && renewal.originalTransactionId !== transaction.originalTransactionId) {
+    throw new Error('Renewal info originalTransactionId does not match transaction')
+  }
+  if (transaction?.appAccountToken && renewal?.appAccountToken && transaction.appAccountToken.toLowerCase() !== renewal.appAccountToken.toLowerCase()) {
+    throw new Error('Renewal info appAccountToken does not match transaction')
+  }
+}
+
 export async function verifyAppleNotification(signedPayload) {
   if (!signedPayload || typeof signedPayload !== 'string') {
     throw new Error('signedPayload is required')
   }
   const { decoded, environment: verifiedEnvironment } = await verifyAndDecodeNotificationAnyEnvironment(signedPayload)
   const env = decoded?.data?.environment ?? verifiedEnvironment
+  if (env !== verifiedEnvironment) throw new Error('Notification environment does not match verified environment')
 
   let transaction = null
   const signedTransactionInfo = decoded?.data?.signedTransactionInfo
@@ -325,6 +338,7 @@ export async function verifyAppleNotification(signedPayload) {
       throw new Error('Renewal info environment does not match notification')
     }
     renewal = {
+      environment: renewalInfo.environment ?? verifiedEnvironment,
       originalTransactionId: renewalInfo.originalTransactionId ?? null,
       productId: renewalInfo.productId ?? null,
       autoRenewProductId: renewalInfo.autoRenewProductId ?? null,
@@ -337,7 +351,10 @@ export async function verifyAppleNotification(signedPayload) {
     }
   }
 
+  assertNotificationLineage(env, transaction, renewal)
+
   return {
+    appleEventAt: isoFromAppleMs(decoded?.signedDate),
     notificationType: decoded?.notificationType ?? null,
     subtype: decoded?.subtype ?? null,
     notificationUUID: decoded?.notificationUUID ?? null,
