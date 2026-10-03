@@ -40,7 +40,7 @@ Before migration: six states/six canonical chains, all owner/environment matched
 
 The migration adds two RLS tables, nullable apple_event_at, service-only RPCs and guard/deletion triggers. It refuses ambiguous legacy ownership; it does not rewrite catalog/bindings/states/entitlements. Migration-impact digests compare all existing rows before and after, excluding only the new nullable column.
 
-A separate proposed index migration replaces the legacy UNIQUE `(appAccountToken, environment)` restriction with a normal lookup index. A UUID can legitimately own distinct original Apple chains; the existing originalTransactionId primary key still prohibits duplicate owners. No rows are removed or rewritten. This schema-restriction removal requires the owner's explicit clarification because the request prohibits destructive migrations. A real-Postgres test reproduces the old rejection, proves replacement preserves all rows, and allows two authorized distinct chains.
+A separate proposed index migration replaces the legacy UNIQUE `(appAccountToken, environment)` restriction with a normal lookup index. A UUID can legitimately own distinct original Apple chains; the existing originalTransactionId primary key still prohibits duplicate owners. No rows are removed or rewritten. The owner subsequently authorized this schema-restriction removal. It is now applied with strict definition/primary-key guards; see token-index-replacement.md for pre/post data digests and conditional reversal. A real-Postgres test reproduces the old rejection, proves replacement preserves all rows, and allows two authorized distinct chains.
 
 ## Qualification and deployment
 

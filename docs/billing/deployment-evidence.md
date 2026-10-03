@@ -25,3 +25,5 @@ Reviewable backend PR: https://github.com/youmi-lens/youmi-lens/pull/47. iPad PR
 RC source: `a417fcedfde7f9c3bf0d46d2341edc17e6de39ec`, 0.2.2 Build 64, EAS build `3d3400eb-509e-43fa-88a0-2cff48ed4025`. EAS status FINISHED: a signed store archive was created successfully. It has not been submitted to TestFlight or physically qualified. Build completion/physical qualification/public rollout are separate gates. Current public Build 63 lacks the new availability and explicit per-item finishing contracts. Production reopening remains NO-GO.
 
 Completed RC: https://expo.dev/accounts/aydenz/projects/youmi-lens-ipad/builds/3d3400eb-509e-43fa-88a0-2cff48ed4025 . Artifact URL is available through that build page.
+
+Subsequent authorized index-only migration: the token-index blocker was resolved without changing any business rows or runtime code. See [token-index-replacement.md](token-index-replacement.md) for the exact history, digest proof, tests and remaining iOS/mainline gates. Earlier pending-index statements above describe the initial deployment observation.

@@ -14,7 +14,7 @@ WHERE app_account_token IS NOT NULL AND owner_state = 'active';
 
 Created by production migration `20260723031216_commercialization_v2_subscriptions`. Tracked source: `supabase-migration-commercialization-v2-subscriptions.sql`, introduced in Git commit `08e4b986146e95bbf8afaf1f522de2fc9d3c65f8` with auto-renewable verification. Source/history does not document a separate design rationale. Its effective model was one active binding per appAccountToken/environment; interpreting this as an anti-duplicate safeguard is an inference, not a historical fact.
 
-Six binding rows, all six indexed; no duplicate token/environment groups and no objects depend on the index. It does not back a pg_constraint. Replica identity uses the canonical primary key (default), not the legacy token index. A nonunique replacement accepts all existing rows without conflicts.
+Six binding rows, all six indexed; no duplicate token/environment groups and no objects depend on the index. It does not back a pg_constraint. Replica identity uses the canonical primary key (default), not the legacy token index. A nonunique replacement accepts all existing rows without conflicts. Binding owner_state=active describes canonical ownership, not whether the subscription period is still active; an expired chain therefore continued occupying the old unique token key.
 
 ## Independent security proof
 
@@ -60,3 +60,27 @@ Any error requires ROLLBACK. The transaction leaves replacement and data intact 
 ## Regression evidence
 
 117 tests across subscriptionAtomic, iapSubscriptions, subscriptionHardening and iapRoutes pass. Coverage includes same owner/token with three distinct chains; same-chain wrong owner/history; simultaneous permanent challengers; idempotent reverify; guest duplicate rejection; promotion races; explicit environment policy; migration repeat; unexpected-index guard; data preservation. Live staging migration also accepts two chains for one owner; simultaneous challenger requests must fail without new state. Temporary fixtures are removed after rehearsal.
+
+## Production application and final evidence
+
+Applied successfully October 2, 2026 approximately 22:20 Eastern. Supabase history: `20261003022002_billing_token_lookup_index`. Committed migration/security tests: `8256d7213dafe8ddb71e8ce0d9a6439450193cd0`. Backend runtime remains b87f0dc on deployment b4e1b7d1; no runtime redeployment was required.
+
+Legacy index absent; `idx_subscription_binding_token_lookup` valid/nonunique with exactly the prior columns and predicate. Canonical PK and user lookup index remain. Canonical RPC/Auth-lock/state-guard/PK fingerprint remains `c53b6544e8cf156cd678bd5720938acc` before and after. No authorization or environment policy changed.
+
+| Data table | Pre/post rows | Pre/post full-row digest | Result |
+|---|---:|---|---|
+| Bindings | 6 | 95905dc07c5078814b88966c1ba18b1d | MATCH |
+| States | 6 | f879fc814063b398104cc571f9f3b27e | MATCH |
+| Entitlements | 10 | 5759718e44a225403a8817c83ddb5066 | MATCH |
+| Catalog | 6 | 054e398d217ec94d2b7ffb0b478fcb19 | MATCH |
+| Billing events | 409 | 88920594a9324108d066717af5fa34db | MATCH |
+
+State digest includes EVERY column, including apple_event_at; unlike the earlier additive-migration report, there are no column exclusions here. Zero data-bearing rows modified. Migration-history metadata records the authorized schema application.
+
+Incident A: owner 10b3fa36…, chain …882155, Production active, correct binding/state token, exactly one state, canonical owner unchanged, Student Basic; expiry remains 2026-11-03T00:51:55Z. All six effective-access snapshots match. Duplicate canonical chains=0, duplicate active owners=0, unexplained grants=0.
+
+117 focused regression tests passed before application, and 29 atomic/schema tests passed again afterward. Live staging confirmed two chains with one owner and rejected two concurrent second-user requests with no extra state. All temporary staging bindings, states and Auth accounts were removed. No purchase, Restore, replay or manual Production ownership/state/entitlement mutation was performed.
+
+Live health and availability pass; monthly=false and annual=false. Initial post-migration HTTP window: two successful requests, zero 5xx; preceding five-minute observed window also had zero 5xx. This is an initial low-traffic observation, not a load or long-duration claim. Security-advisor findings are unchanged from the hardening baseline; see deployment-evidence.md for existing notice/remediation links.
+
+The token-index blocker is resolved. Remaining reopening blockers: backend/iPad PRs unmerged, RC 0.2.2 Build 64 not physically qualified/submitted/released publicly. Sales remain NO-GO. Next owner action: authorize physical qualification of the existing RC while sales remain closed. No automatic merge or new iOS build is performed in this task.
