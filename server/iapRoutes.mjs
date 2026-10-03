@@ -49,7 +49,6 @@ import {
   findSubscriptionState,
   getEffectiveSubscription,
   isAutoRenewableProduct,
-  listSubscriptionStateUserIds,
   safeSubscriptionEntitlement,
   shouldBlockSubscriptionGrant,
   upsertSubscriptionState,
@@ -290,11 +289,8 @@ async function verifyAndPersist(db, user, payload) {
   })
   if (isAutoRenewableProduct(product)) {
     const existingBinding = await findSubscriptionBinding(db, verified.originalTransactionId)
-    // A Guest never holds a binding (see claimSubscriptionBinding's doc
-    // comment) — for an anonymous caller the kill-switch escape hatch must
-    // instead look at THEIR OWN prior state row, or a returning Guest who
-    // purchased while sales were open would get wrongly blocked on a later
-    // restore/renewal once is_purchasable flips to false.
+    // Legacy guests may have an original-owner state predating canonical
+    // binding enforcement. The later ownership check still applies to them.
     const existingState = user.isAnonymous
       ? await findSubscriptionState(db, verified.originalTransactionId, user.userId)
       : null
@@ -342,6 +338,7 @@ async function verifyAndPersist(db, user, payload) {
     })
     return {
       granted: subscription.active,
+      safeToFinish: subscription.active || ['expired', 'revoked', 'refunded'].includes(subscription.status),
       code: subscription.status,
       transactionId: verified.transactionId,
       entitlement: safeSubscriptionEntitlement({ ...subscription, active: subscription.active }),
@@ -359,6 +356,7 @@ async function verifyAndPersist(db, user, payload) {
         existingGrant.status === 'active' &&
         !existingGrant.revoked_at &&
         new Date(existingGrant.expires_at).getTime() > Date.now(),
+      safeToFinish: true,
       code: 'idempotent_replay',
       transactionId: verified.transactionId,
     }
@@ -392,7 +390,7 @@ async function verifyAndPersist(db, user, payload) {
   }
   await recordBillingEvent(db, user.userId, { ...decision.event, event_type: 'verify_ok' })
   await recordBillingEvent(db, user.userId, decision.event)
-  return { granted: decision.active, code: decision.active ? 'granted' : decision.entitlementStatus, transactionId: verified.transactionId }
+  return { granted: decision.active, safeToFinish: true, code: decision.active ? 'granted' : decision.entitlementStatus, transactionId: verified.transactionId }
 }
 
 export async function handleIapVerify(req, res) {
@@ -494,7 +492,9 @@ export async function handleIapRestore(req, res) {
     try {
       const result = await verifyAndPersist(db, user, purchase)
       restoredCount += 1
-      if (result.transactionId) verifiedTransactionIds.push(result.transactionId)
+      // Cryptographic validity alone is not delivery. Retryable policy denials
+      // must leave the transaction available for later authorized reconciliation.
+      if (result.safeToFinish && result.transactionId) verifiedTransactionIds.push(result.transactionId)
       if (result.granted) restoredActive += 1
     } catch (err) {
       if (isAppleIapLedgerUnavailableError(err)) {
@@ -649,16 +649,15 @@ export async function handleAppleNotifications(req, res) {
     if (tx?.autoRenewable) {
       const binding = await findSubscriptionBinding(db, tx.originalTransactionId)
       ownerUserId = binding?.owner_state === 'active' ? binding.user_id : null
+      // Preserve notifications for a legitimate unbound legacy guest, without
+      // creating ownership or granting a second identity from history alone.
+      if (!binding && tx.appAccountToken && await findSubscriptionState(db, tx.originalTransactionId, tx.appAccountToken)) {
+        ownerUserId = tx.appAccountToken
+      }
       if (SUBSCRIPTION_STATUS_NOTIFICATIONS.has(decoded.notificationType)) {
-        // Sweep EVERY identity currently holding entitlement from this
-        // lineage — Guest X, Guest Y, and/or a permanent owner can all have
-        // their own row now (composite-keyed states table). A renewal must
-        // refresh all of them; a refund/revoke must end access for all of
-        // them. This intentionally no longer auto-creates a binding from a
-        // bare notification's appAccountToken — canonical ownership is only
-        // ever established through a live, authenticated permanent-account
-        // verify/restore call (claimSubscriptionBinding), never a webhook.
-        const affectedUserIds = await listSubscriptionStateUserIds(db, tx.originalTransactionId)
+        // Refresh only the canonical owner; possession of historical state rows
+        // must not authorize a second identity on the same Apple lineage.
+        const affectedUserIds = ownerUserId ? [ownerUserId] : []
         for (const uid of affectedUserIds) {
           const state = await upsertSubscriptionState(db, uid, tx, {
             renewal: decoded.renewal,

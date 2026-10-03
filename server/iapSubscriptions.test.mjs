@@ -15,6 +15,7 @@ import {
   listSubscriptionStateUserIds,
   findSubscriptionState,
   verifyAndPersistSubscription,
+  getEffectiveSubscription,
 } from './iapSubscriptions.mjs'
 
 // ── Minimal in-memory fake db for the two tables these functions touch ──────
@@ -30,10 +31,12 @@ function makeFakeDb({ bindings = [], states = [], anonymousUserIds = new Set() }
     const filters = []
     const builder = {
       select: () => builder,
+      order: () => builder,
+      limit: () => builder,
       eq(col, val) { filters.push([col, val]); return builder },
       async maybeSingle() {
         const match = rows.find((r) => filters.every(([c, v]) => r[c] === v))
-        return { data: match ?? null, error: null }
+        return { data: match ? { ...match } : null, error: null }
       },
       then(resolve) {
         // Awaited directly (no maybeSingle) — used by listSubscriptionStateUserIds.
@@ -58,12 +61,11 @@ function makeFakeDb({ bindings = [], states = [], anonymousUserIds = new Set() }
           const filters = []
           const b = {
             eq(col, val) { filters.push([col, val]); return b },
-            then(resolve) {
-              const rows = tables[table]
-              for (const r of rows) {
-                if (filters.every(([c, v]) => r[c] === v)) Object.assign(r, patch)
-              }
-              return Promise.resolve({ error: null }).then(resolve)
+            select: () => b,
+            async maybeSingle() {
+              const match = tables[table].find((r) => filters.every(([c, v]) => r[c] === v))
+              if (match) Object.assign(match, patch)
+              return { data: match ? { ...match } : null, error: null }
             },
           }
           return b
@@ -159,13 +161,7 @@ describe('subscription status model', () => {
   })
 })
 
-describe('appAccountToken presence (provenance, NOT an ownership gate)', () => {
-  // Guest cross-device restore model: appAccountToken is permanently fixed to
-  // whichever identity made the ORIGINAL purchase, so it can never equal a
-  // different device's restoring/upgrading identity even when that identity
-  // is the legitimate owner (see claimSubscriptionBinding's doc comment).
-  // assertSubscriptionIdentity therefore only checks the transaction is
-  // well-formed — it no longer compares appAccountToken to a caller id.
+describe('verified transaction shape (caller ownership is checked at claim)', () => {
   it('accepts a well-formed verified transaction regardless of who is asking', () => {
     expect(() => assertSubscriptionIdentity(tx())).not.toThrow()
   })
@@ -197,7 +193,7 @@ describe('claimSubscriptionBinding — canonical PERMANENT ownership only', () =
 
   it('first permanent claim on an unowned lineage succeeds', async () => {
     const db = makeFakeDb()
-    const binding = await claimSubscriptionBinding(db, P, tx({ originalTransactionId: T, appAccountToken: X }))
+    const binding = await claimSubscriptionBinding(db, P, tx({ originalTransactionId: T, appAccountToken: P }))
     expect(binding.user_id).toBe(P)
     expect(db._tables.app_store_subscription_bindings).toHaveLength(1)
   })
@@ -208,17 +204,12 @@ describe('claimSubscriptionBinding — canonical PERMANENT ownership only', () =
     expect(binding.user_id).toBe(P)
   })
 
-  it('a permanent account MAY claim a lineage whose binding is owned by an ANONYMOUS user — promotion, not theft', async () => {
-    // This is the exact case the appAccountToken equality rule used to break:
-    // Guest Y restored T (appAccountToken on the transaction is still X, the
-    // ORIGINAL purchaser), then upgraded in place to permanent account P
-    // (same UUID as Y). P must be able to become canonical owner even though
-    // appAccountToken (X) will never equal P's own uuid.
+  it('a matching permanent token holder may win a conditional legacy anonymous promotion', async () => {
     const db = makeFakeDb({
       bindings: [{ original_transaction_id: T, user_id: Y, app_account_token: X, environment: 'Sandbox', owner_state: 'active' }],
       anonymousUserIds: new Set([Y]),
     })
-    const binding = await claimSubscriptionBinding(db, P, tx({ originalTransactionId: T, appAccountToken: X, environment: 'Sandbox' }))
+    const binding = await claimSubscriptionBinding(db, P, tx({ originalTransactionId: T, appAccountToken: P, environment: 'Sandbox' }))
     expect(binding.user_id).toBe(P)
     expect(db._tables.app_store_subscription_bindings[0].user_id).toBe(P)
   })
@@ -234,38 +225,38 @@ describe('claimSubscriptionBinding — canonical PERMANENT ownership only', () =
   })
 })
 
-describe('anonymous Guest grant path never touches bindings', () => {
-  const T = 'orig-guest-only'
+describe('anonymous callers must respect canonical ownership', () => {
   const X = 'guest-x-uuid'
   const Y = 'guest-y-uuid'
+  const purchase = () => tx({ appAccountToken: X, originalTransactionId: 'guest-chain', appleExpiresDate: new Date(future).toISOString() })
 
-  it('Guest X purchases T -> own state row, NO binding row created', async () => {
+  it('matching original guest claims one binding and state', async () => {
     const db = makeFakeDb()
-    const state = await verifyAndPersistSubscription(
-      db,
-      X,
-      tx({ originalTransactionId: T, expiresDateMs: future, appleExpiresDate: new Date(future).toISOString() }),
-      { isAnonymous: true },
-    )
+    const state = await verifyAndPersistSubscription(db, X, purchase(), { isAnonymous: true })
     expect(state.active).toBe(true)
-    expect(db._tables.app_store_subscription_bindings).toHaveLength(0)
+    expect(db._tables.app_store_subscription_bindings).toHaveLength(1)
     expect(db._tables.app_store_subscription_states).toHaveLength(1)
   })
 
-  it('Guest X restores T again -> idempotent, still one row for X', async () => {
+  it('existing guest owner can restore idempotently', async () => {
     const db = makeFakeDb()
-    await verifyAndPersistSubscription(db, X, tx({ originalTransactionId: T }), { isAnonymous: true })
-    await verifyAndPersistSubscription(db, X, tx({ originalTransactionId: T }), { isAnonymous: true })
-    expect(db._tables.app_store_subscription_states.filter((r) => r.original_transaction_id === T && r.user_id === X)).toHaveLength(1)
+    await verifyAndPersistSubscription(db, X, purchase(), { isAnonymous: true })
+    await verifyAndPersistSubscription(db, X, purchase(), { isAnonymous: true })
+    expect(db._tables.app_store_subscription_states).toHaveLength(1)
   })
 
-  it('Guest Y restores the SAME verified T -> Y becomes active AND X remains unchanged (the core fix)', async () => {
+  it('second guest possessing the same history is rejected without a state', async () => {
     const db = makeFakeDb()
-    await verifyAndPersistSubscription(db, X, tx({ originalTransactionId: T }), { isAnonymous: true })
-    await verifyAndPersistSubscription(db, Y, tx({ originalTransactionId: T }), { isAnonymous: true })
-    const rows = db._tables.app_store_subscription_states.filter((r) => r.original_transaction_id === T)
-    expect(rows.map((r) => r.user_id).sort()).toEqual([X, Y].sort())
-    expect(rows.every((r) => r.status === 'active')).toBe(true)
+    await verifyAndPersistSubscription(db, X, purchase(), { isAnonymous: true })
+    await expect(verifyAndPersistSubscription(db, Y, purchase(), { isAnonymous: true })).rejects.toThrow(SubscriptionAlreadyLinkedError)
+    expect(db._tables.app_store_subscription_states.map((r) => r.user_id)).toEqual([X])
+  })
+
+  it('wrong guest cannot claim an unbound chain', async () => {
+    const db = makeFakeDb()
+    await expect(verifyAndPersistSubscription(db, Y, purchase(), { isAnonymous: true })).rejects.toThrow(SubscriptionAccountTokenError)
+    expect(db._tables.app_store_subscription_bindings).toHaveLength(0)
+    expect(db._tables.app_store_subscription_states).toHaveLength(0)
   })
 })
 
@@ -434,5 +425,110 @@ describe('subscription product change within the same group', () => {
       product_id: 'com.aydenz.youmilensipad.student.annual',
       kind: 'auto_renewable',
     })).toBe(true)
+  })
+})
+
+
+describe('permanent ownership and promotion regressions', () => {
+  const P = 'permanent-p'
+  const Q = 'permanent-q'
+  const G = 'legacy-guest'
+  const T = 'ownership-chain'
+  const purchase = (token = P) => tx({ originalTransactionId: T, appAccountToken: token, environment: 'Production', purchaseDate: new Date(Date.now() - 1000).toISOString(), appleExpiresDate: new Date(future).toISOString() })
+
+  it('A/K: matching first claim and repeated verification have one owner/state', async () => {
+    const db = makeFakeDb()
+    await verifyAndPersistSubscription(db, P, purchase())
+    await verifyAndPersistSubscription(db, P, purchase())
+    expect(db._tables.app_store_subscription_bindings.map((r) => r.user_id)).toEqual([P])
+    expect(db._tables.app_store_subscription_states.map((r) => r.user_id)).toEqual([P])
+  })
+
+  it('B: mismatched first permanent claim creates no binding or state', async () => {
+    const db = makeFakeDb()
+    await expect(verifyAndPersistSubscription(db, Q, purchase())).rejects.toThrow(SubscriptionAccountTokenError)
+    expect(db._tables.app_store_subscription_bindings).toHaveLength(0)
+    expect(db._tables.app_store_subscription_states).toHaveLength(0)
+  })
+
+  it('C/G: a different permanent user cannot replace the canonical owner', async () => {
+    const db = makeFakeDb()
+    await verifyAndPersistSubscription(db, P, purchase())
+    await expect(verifyAndPersistSubscription(db, Q, purchase(Q))).rejects.toThrow(SubscriptionAlreadyLinkedError)
+    expect(db._tables.app_store_subscription_bindings[0].user_id).toBe(P)
+    expect(db._tables.app_store_subscription_states.map((r) => r.user_id)).toEqual([P])
+  })
+
+  it('E/F/G: concurrent legacy promotion has exactly one winner; losing caller creates no state', async () => {
+    const db = makeFakeDb({ bindings: [{ original_transaction_id: T, user_id: G, app_account_token: G, environment: 'Production', owner_state: 'active' }], anonymousUserIds: new Set([G]) })
+    const results = await Promise.allSettled([
+      verifyAndPersistSubscription(db, P, purchase(P)),
+      verifyAndPersistSubscription(db, Q, purchase(Q)),
+    ])
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find((r) => r.status === 'rejected')
+    expect(rejected.reason).toBeInstanceOf(SubscriptionAlreadyLinkedError)
+    const winner = db._tables.app_store_subscription_bindings[0].user_id
+    expect(db._tables.app_store_subscription_states.map((r) => r.user_id)).toEqual([winner])
+  })
+
+  it('legacy promotion with mismatched token is rejected without changing owner', async () => {
+    const db = makeFakeDb({ bindings: [{ original_transaction_id: T, user_id: G, app_account_token: G, environment: 'Production', owner_state: 'active' }], anonymousUserIds: new Set([G]) })
+    await expect(verifyAndPersistSubscription(db, P, purchase(G))).rejects.toThrow(SubscriptionAccountTokenError)
+    expect(db._tables.app_store_subscription_bindings[0].user_id).toBe(G)
+    expect(db._tables.app_store_subscription_states).toHaveLength(0)
+  })
+
+  it.each(['revoked', 'refunded'])('J: stale active replay cannot resurrect a %s period', async (terminal) => {
+    const db = makeFakeDb()
+    const initial = purchase()
+    await verifyAndPersistSubscription(db, P, initial)
+    await upsertSubscriptionState(db, P, initial, { notificationType: terminal === 'refunded' ? NotificationTypeV2.REFUND : NotificationTypeV2.REVOKE })
+    const replayed = await verifyAndPersistSubscription(db, P, initial)
+    expect(replayed.active).toBe(false)
+    expect(replayed.status).toBe(terminal)
+    expect(db._tables.app_store_subscription_states[0].status).toBe(terminal)
+  })
+
+  it('L: valid Production transaction passes open monthly gate and persists Apple expiry', async () => {
+    const db = makeFakeDb()
+    const verified = purchase()
+    expect(shouldBlockSubscriptionGrant({ product: { ...monthlyProduct, is_purchasable: true }, verified, existingBinding: null })).toBeNull()
+    const state = await verifyAndPersistSubscription(db, P, verified)
+    expect(state.active).toBe(true)
+    expect(state.expires_at).toBe(verified.appleExpiresDate)
+    expect(state.app_account_token).toBe(P)
+  })
+})
+
+
+describe('effective access respects canonical ownership', () => {
+  const owner = 'canonical-owner'
+  const other = 'other-identity'
+  const row = (user) => ({ user_id: user, original_transaction_id: 'shared-chain', app_account_token: user, environment: 'Production', status: 'active', expires_at: new Date(future).toISOString() })
+
+  it('preserves canonical owner access and denies historical duplicate rows', async () => {
+    const db = makeFakeDb({ bindings: [{ original_transaction_id: 'shared-chain', user_id: owner, environment: 'Production', owner_state: 'active' }], states: [row(owner), row(other)] })
+    expect((await getEffectiveSubscription(db, owner)).active).toBe(true)
+    expect(await getEffectiveSubscription(db, other)).toBeNull()
+  })
+
+  it('preserves only original-token-owner access for unbound legacy guests', async () => {
+    const db = makeFakeDb({ states: [row(owner), { ...row(other), app_account_token: owner }] })
+    expect((await getEffectiveSubscription(db, owner)).active).toBe(true)
+    expect(await getEffectiveSubscription(db, other)).toBeNull()
+  })
+})
+
+
+describe('concurrent first claim', () => {
+  it('same matching owner retries concurrently without duplicate rows', async () => {
+    const db = makeFakeDb()
+    const owner = 'same-owner'
+    const verified = tx({ originalTransactionId: 'concurrent-first', appAccountToken: owner, environment: 'Production', appleExpiresDate: new Date(future).toISOString() })
+    const result = await Promise.all([verifyAndPersistSubscription(db, owner, verified), verifyAndPersistSubscription(db, owner, verified)])
+    expect(result.every((r) => r.active)).toBe(true)
+    expect(db._tables.app_store_subscription_bindings).toHaveLength(1)
+    expect(db._tables.app_store_subscription_states).toHaveLength(1)
   })
 })

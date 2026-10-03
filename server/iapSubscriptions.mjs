@@ -80,18 +80,16 @@ export function subscriptionStatusIsActive(status, expiresAt, nowMs = Date.now()
   return Number.isFinite(expiresMs) && expiresMs > nowMs
 }
 
-/**
- * Presence-only sanity check on the verified transaction. This intentionally
- * does NOT compare appAccountToken to a requesting user id anymore — see the
- * module doc comment above `claimSubscriptionBinding` for why an equality
- * check there was wrong for the Guest-restore case. `appAccountToken` is
- * still required to exist (a legitimate StoreKit 2 transaction for a product
- * this app configures always carries one), and is retained purely as
- * original-purchase provenance / diagnostic metadata.
- */
+/** Require verified Apple lineage and account-token provenance. */
 export function assertSubscriptionIdentity(verified) {
   if (!verified?.originalTransactionId) throw new Error('Verified subscription is missing originalTransactionId')
   if (!verified?.appAccountToken) throw new SubscriptionAccountTokenError('Subscription is missing appAccountToken')
+}
+
+function assertSubscriptionAccountToken(userId, verified) {
+  if (!userId || String(verified.appAccountToken).toLowerCase() !== String(userId).toLowerCase()) {
+    throw new SubscriptionAccountTokenError('Subscription appAccountToken does not match this account')
+  }
 }
 
 /**
@@ -107,29 +105,12 @@ export async function isAnonymousUser(db, userId) {
 }
 
 /**
- * Canonical PERMANENT-account ownership claim for an Apple subscription
- * lineage. Anonymous (Guest) callers must NEVER reach this function — see
- * `verifyAndPersistSubscription`'s `isAnonymous` branch, which routes Guests
- * straight to their own `app_store_subscription_states` row instead.
- *
- * Ownership model (App Review 5.1.1(v) clarification):
- *   - no existing binding                    -> this permanent account claims it
- *   - existing binding, same permanent user  -> idempotent success
- *   - existing binding, owner is ANONYMOUS   -> promote: this permanent
- *       account becomes the canonical owner. Safe because the caller only
- *       reaches here with a server-verified Apple transaction for T — Apple
- *       only ever hands that to a device actually authorized for T, so
- *       "promote" can only happen for someone who legitimately restored it.
- *   - existing binding, owner is a DIFFERENT permanent user -> reject
- *       (SubscriptionAlreadyLinkedError). This is the one case that must
- *       never move — an unrelated real account can never take over T.
- *
- * appAccountToken is stored for provenance but is NOT used to gate any of
- * this — it is permanently fixed to whichever identity made the ORIGINAL
- * purchase and therefore cannot equal a different device's restoring/
- * upgrading identity even when that identity is the legitimate owner.
+ * Canonical ownership applies to permanent AND anonymous callers. Existing
+ * owners retain access; a first claim must match the signed appAccountToken.
+ * A permanent caller may promote a legacy anonymous binding only with a
+ * matching signed token and a successful conditional ownership update.
  */
-export async function claimSubscriptionBinding(db, userId, verified) {
+export async function claimSubscriptionBinding(db, userId, verified, { isAnonymous = false } = {}) {
   assertSubscriptionIdentity(verified)
   const { data: existing, error: readError } = await db
     .from('app_store_subscription_bindings')
@@ -146,10 +127,12 @@ export async function claimSubscriptionBinding(db, userId, verified) {
       if (existing.environment !== verified.environment) throw new Error('Subscription environment binding mismatch')
       return existing
     }
+    if (isAnonymous) throw new SubscriptionAlreadyLinkedError('Subscription is already linked to another account')
     const existingOwnerIsAnonymous = await isAnonymousUser(db, existing.user_id)
     if (!existingOwnerIsAnonymous) {
       throw new SubscriptionAlreadyLinkedError('Subscription is already linked to another account')
     }
+    assertSubscriptionAccountToken(userId, verified)
     const promoted = {
       original_transaction_id: verified.originalTransactionId,
       user_id: userId,
@@ -157,15 +140,24 @@ export async function claimSubscriptionBinding(db, userId, verified) {
       environment: verified.environment,
       owner_state: 'active',
     }
-    const { error: promoteError } = await db
+    if (existing.environment !== verified.environment) throw new Error('Subscription environment binding mismatch')
+    const { data: claimed, error: promoteError } = await db
       .from('app_store_subscription_bindings')
       .update(promoted)
       .eq('original_transaction_id', verified.originalTransactionId)
       .eq('user_id', existing.user_id)
+      .eq('owner_state', 'active')
+      .eq('environment', verified.environment)
+      .select('original_transaction_id, user_id, app_account_token, environment, owner_state')
+      .maybeSingle()
     if (promoteError) throw promoteError
-    return promoted
+    if (!claimed || claimed.user_id !== userId || claimed.owner_state !== 'active' || claimed.environment !== verified.environment) {
+      throw new SubscriptionAlreadyLinkedError('Subscription ownership claim lost a race')
+    }
+    return claimed
   }
 
+  assertSubscriptionAccountToken(userId, verified)
   const row = {
     original_transaction_id: verified.originalTransactionId,
     user_id: userId,
@@ -220,6 +212,9 @@ export function shouldReplaceSubscriptionState(stored, incoming) {
   const ms = (v) => (v ? new Date(v).getTime() : NaN)
   const storedStart = ms(stored.purchased_at)
   const incomingStart = ms(incoming.purchased_at)
+  // A terminal period cannot be revived without a provably newer Apple period.
+  if (SUBSCRIPTION_TERMINAL_STATUSES.includes(stored.status) && !SUBSCRIPTION_TERMINAL_STATUSES.includes(incoming.status) &&
+      !(Number.isFinite(incomingStart) && Number.isFinite(storedStart) && incomingStart > storedStart)) return false
   // Without usable chronology on either side, fall back to accepting the write
   // rather than freezing the row forever.
   if (!Number.isFinite(storedStart) || !Number.isFinite(incomingStart)) return true
@@ -233,14 +228,7 @@ export function shouldReplaceSubscriptionState(stored, incoming) {
   return incomingExpiry >= storedExpiry
 }
 
-/**
- * `app_store_subscription_states` is now keyed by (original_transaction_id,
- * user_id) — every legitimately-verified identity holding entitlement from
- * lineage T (Guest X, Guest Y, and/or a permanent account) has its OWN row.
- * Loads/writes are therefore always scoped by BOTH columns; never by
- * original_transaction_id alone, or one identity's write would read/replace
- * another's.
- */
+/** Composite state keys are retained for schema compatibility; grants require a canonical owner. */
 async function loadSubscriptionState(db, originalTransactionId, userId) {
   if (!originalTransactionId || !userId) return null
   const { data, error } = await db
@@ -253,12 +241,12 @@ async function loadSubscriptionState(db, originalTransactionId, userId) {
   return data ?? null
 }
 
-/** Public wrapper — used by the sales kill-switch check (Guests never hold a binding, so it must consult their OWN state row instead). */
+/** Existing state lookup supports legacy guests created before canonical binding enforcement. */
 export async function findSubscriptionState(db, originalTransactionId, userId) {
   return loadSubscriptionState(db, originalTransactionId, userId)
 }
 
-/** Every distinct user_id currently holding an entitlement row for lineage T — used to sweep renewal/expiration/revocation notifications across every Guest + permanent identity, not just the canonical binding owner. */
+/** Enumerate historical state holders for diagnostics; this list does not authorize access. */
 export async function listSubscriptionStateUserIds(db, originalTransactionId) {
   if (!originalTransactionId) return []
   const { data, error } = await db
@@ -328,25 +316,9 @@ export async function upsertSubscriptionState(db, userId, verified, {
   return { ...row, active: subscriptionStatusIsActive(status, row.expires_at) }
 }
 
-/**
- * Grant/refresh entitlement for lineage T on behalf of `userId`.
- *
- * - Permanent (non-anonymous) caller: goes through `claimSubscriptionBinding`
- *   first — canonical ownership is a permanent-account-only concept (see that
- *   function's doc comment for the full rule).
- * - Anonymous (Guest) caller: NEVER touches `app_store_subscription_bindings`
- *   — no read, no write, no claim. A verified Apple transaction is
- *   sufficient on its own to grant/refresh THIS Guest's own state row. This
- *   is what lets Guest X (device A) and Guest Y (device B) both hold active
- *   entitlement from the same restored lineage without either rebinding or
- *   displacing the other — see `upsertSubscriptionState`'s composite key.
- */
+/** All authenticated callers must claim canonical ownership before state creation. */
 export async function verifyAndPersistSubscription(db, userId, verified, { isAnonymous = false } = {}) {
-  if (!isAnonymous) {
-    await claimSubscriptionBinding(db, userId, verified)
-  } else {
-    assertSubscriptionIdentity(verified)
-  }
+  await claimSubscriptionBinding(db, userId, verified, { isAnonymous })
   return upsertSubscriptionState(db, userId, verified)
 }
 
@@ -364,12 +336,21 @@ export async function findSubscriptionBinding(db, originalTransactionId) {
 export async function getEffectiveSubscription(db, userId) {
   const { data, error } = await db
     .from('app_store_subscription_states')
-    .select('product_id, original_transaction_id, latest_transaction_id, subscription_group_id, environment, purchased_at, expires_at, auto_renew_status, status, revocation_at, last_verified_at')
+    .select('product_id, original_transaction_id, latest_transaction_id, subscription_group_id, environment, app_account_token, purchased_at, expires_at, auto_renew_status, status, revocation_at, last_verified_at')
     .eq('user_id', userId)
     .order('expires_at', { ascending: false })
     .limit(10)
   if (error) throw error
-  const rows = Array.isArray(data) ? data : []
+  const rows = []
+  for (const row of Array.isArray(data) ? data : []) {
+    const binding = await findSubscriptionBinding(db, row.original_transaction_id)
+    // Existing canonical owners keep access, including legacy token provenance.
+    // Unbound legacy guest rows are accepted only for their original token owner.
+    const authorized = binding
+      ? binding.owner_state === 'active' && binding.user_id === userId && binding.environment === row.environment
+      : String(row.app_account_token ?? '').toLowerCase() === String(userId).toLowerCase()
+    if (authorized) rows.push(row)
+  }
   if (rows.length === 0) return null
   const ranked = rows.map((row) => ({
     ...row,
