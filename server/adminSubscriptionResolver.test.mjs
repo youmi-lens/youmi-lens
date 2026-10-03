@@ -185,6 +185,19 @@ describe('API contract: buildQuotaStatus output', () => {
     expect(status.entitlement.expiresAt).toBe(FUTURE)
   })
 
+  it('quota DTO preserves signed cancellation/renewal information and never infers null',async()=>{
+    state.quotaRow=quota('admin')
+    state.entitlement={...subEntitlement(ANNUAL),status:'cancelled_but_active_until_expiry',auto_renew_status:false}
+    const cancelled=await buildQuotaStatus(USER)
+    expect(cancelled.entitlement.status).toBe('cancelled_but_active_until_expiry')
+    expect(cancelled.entitlement.autoRenewStatus).toBe(false)
+    expect(cancelled.entitlement.active).toBe(true)
+    state.entitlement={...subEntitlement(ANNUAL),auto_renew_status:true}
+    expect((await buildQuotaStatus(USER)).entitlement.autoRenewStatus).toBe(true)
+    state.entitlement={...subEntitlement(ANNUAL),auto_renew_status:null}
+    expect((await buildQuotaStatus(USER)).entitlement.autoRenewStatus).toBeNull()
+  })
+
   it('ADMIN + NO SUBSCRIPTION -> admin, unlimited, studentPassActive=false', async () => {
     state.quotaRow = quota('admin')
     state.entitlement = null

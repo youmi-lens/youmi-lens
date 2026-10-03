@@ -1,7 +1,7 @@
 /**
  * Apple App Store server-side verification for Youmi Lens.
  *
- * Active product: Student Basic 30 Days (a CONSUMABLE purchase). The legacy
+ * Monthly and annual auto-renewables use Apple period expiry. The retired
  * Student Pass NON-CONSUMABLE remains verifiable for existing transactions.
  * modern, Apple-supported JWS path (@apple/app-store-server-library):
  *   - SignedDataVerifier.verifyAndDecodeTransaction  — signed StoreKit 2 txns
@@ -12,9 +12,8 @@
  * productId / transactionId / purchaseDate / expiry / plan type / status; any
  * client value passed in must MATCH the decoded value or we reject.
  *
- * IMPORTANT: this module performs NO entitlement decision. The 30-day window is
- * computed by the backend from the verified purchaseDate (see iapEntitlements
- * + iapRoutes). Apple's `expiresDate` is surfaced only as informational metadata.
+ * This module performs no grant decision. Apple expiry is authoritative for
+ * subscriptions; only retired passes use a server-computed 30-day window.
  *
  * Secrets (private key, JWS, JWT) are never logged here or by callers.
  */
@@ -46,7 +45,7 @@ const SUPPORTED_PRODUCT_TYPES = new Map([
 ])
 
 const verifiers = new Map()
-let apiClient = null
+const apiClients = new Map()
 
 function requiredEnv(name) {
   const value = process.env[name]?.trim()
@@ -157,16 +156,51 @@ async function verifyAndDecodeNotificationAnyEnvironment(signedPayload) {
   throw lastError ?? new Error('Notification could not be verified in any Apple environment')
 }
 
-function getApiClient() {
-  if (apiClient) return apiClient
-  apiClient = new AppStoreServerAPIClient(
+function getApiClient(environment = appleEnvironment()) {
+  if (![Environment.PRODUCTION, Environment.SANDBOX].includes(environment)) throw new Error('Apple server API environment is unsupported')
+  if (!apiClients.has(environment)) apiClients.set(environment, new AppStoreServerAPIClient(
     normalizeApplePrivateKey(requiredEnv('APPLE_IAP_PRIVATE_KEY')),
-    requiredEnv('APPLE_IAP_KEY_ID'),
-    requiredEnv('APPLE_IAP_ISSUER_ID'),
-    requiredEnv('APPLE_BUNDLE_ID'),
-    appleEnvironment(),
-  )
-  return apiClient
+    requiredEnv('APPLE_IAP_KEY_ID'), requiredEnv('APPLE_IAP_ISSUER_ID'),
+    requiredEnv('APPLE_BUNDLE_ID'), environment,
+  ))
+  return apiClients.get(environment)
+}
+
+export function appleServerApiConfigured() {
+  return ['APPLE_IAP_PRIVATE_KEY','APPLE_IAP_KEY_ID','APPLE_IAP_ISSUER_ID','APPLE_BUNDLE_ID']
+    .every(name => Boolean(process.env[name]?.trim()))
+}
+
+function normalizeRenewalInfo(info, environment) {
+  if (info.environment && info.environment !== environment) throw new Error('Renewal environment does not match verified environment')
+  return {
+    environment, originalTransactionId: info.originalTransactionId ?? null,
+    productId: info.productId ?? null, autoRenewProductId: info.autoRenewProductId ?? null,
+    autoRenewStatus: info.autoRenewStatus === 1 ? true : info.autoRenewStatus === 0 ? false : null,
+    isInBillingRetryPeriod: info.isInBillingRetryPeriod === true,
+    gracePeriodExpiresDate: isoFromAppleMs(info.gracePeriodExpiresDate),
+    renewalDate: isoFromAppleMs(info.renewalDate), expirationIntent: info.expirationIntent ?? null,
+    appAccountToken: info.appAccountToken ?? null, signedDate: isoFromAppleMs(info.signedDate),
+    renewalPrice: info.renewalPrice ?? null, currency: info.currency ?? null,
+  }
+}
+
+/** Read-only Apple status fetch; only a caller's already-canonical chain is returned. */
+export async function fetchVerifiedSubscriptionStatus(originalTransactionId, environment) {
+  const response = await getApiClient(environment).getAllSubscriptionStatuses(originalTransactionId)
+  for (const group of response?.data ?? []) for (const item of group.lastTransactions ?? []) {
+    if (String(item.originalTransactionId) !== String(originalTransactionId)) continue
+    if (!item.signedTransactionInfo || !item.signedRenewalInfo || ![1,2,3,4,5].includes(item.status)) throw new Error('Apple subscription status is incomplete')
+    const verifier = getVerifierForEnvironment(environment)
+    const transaction = normalizeDecodedTransaction(await verifier.verifyAndDecodeTransaction(item.signedTransactionInfo),
+      {expectedBundleId: requiredEnv('APPLE_BUNDLE_ID'), expectedEnvironment: environment})
+    const renewal = normalizeRenewalInfo(await verifier.verifyAndDecodeRenewalInfo(item.signedRenewalInfo), environment)
+    assertNotificationLineage(environment, transaction, renewal)
+    if (transaction.originalTransactionId !== originalTransactionId) throw new Error('Apple status chain does not match canonical binding')
+    const dates = [transaction.appleSignedAt, renewal.signedDate].filter(Boolean).sort()
+    return {transaction, renewal, appleStatus: item.status, appleEventAt: dates.at(-1) ?? transaction.purchaseDate}
+  }
+  return null
 }
 
 function isoFromAppleMs(ms) {
@@ -210,6 +244,7 @@ export function normalizeDecodedTransaction(decoded, { expectedBundleId, expecte
   }
 
   const autoRenewable = expectedProductType === Type.AUTO_RENEWABLE_SUBSCRIPTION
+  if (autoRenewable && !decoded.originalTransactionId) throw new Error('Verified subscription is missing originalTransactionId')
   if (autoRenewable && (typeof decoded.expiresDate !== 'number' || !Number.isFinite(decoded.expiresDate))) {
     throw new Error('Verified subscription transaction is missing expiresDate')
   }
@@ -239,6 +274,8 @@ export function normalizeDecodedTransaction(decoded, { expectedBundleId, expecte
     subscriptionGroupId: decoded.subscriptionGroupIdentifier ?? null,
     ownershipType: decoded.inAppOwnershipType ?? null,
     autoRenewable,
+    offerType: decoded.offerType ?? null, offerDiscountType: decoded.offerDiscountType ?? null,
+    price: decoded.price ?? null, currency: decoded.currency ?? null,
     // Legacy rows retain their existing decoded payload behavior. New
     // subscriptions persist only normalized fields, never the full JWS payload.
     rawTransaction: autoRenewable ? null : decoded,
@@ -250,11 +287,16 @@ export async function fetchSignedTransactionInfo(transactionId) {
   if (!transactionId || typeof transactionId !== 'string') {
     throw new Error('transactionId is required')
   }
-  const response = await getApiClient().getTransactionInfo(transactionId)
-  if (!response?.signedTransactionInfo) {
-    throw new Error('Apple did not return signed transaction info')
+  for (const environment of environmentTryOrder().filter(env => ['Production','Sandbox'].includes(env))) {
+    try {
+      const response = await getApiClient(environment).getTransactionInfo(transactionId)
+      if (!response?.signedTransactionInfo) throw new Error('Apple did not return signed transaction info')
+      return response.signedTransactionInfo
+    } catch (error) {
+      if (error.httpStatusCode !== 404) throw error
+    }
   }
-  return response.signedTransactionInfo
+  throw new Error('Apple transaction was not found in Production or Sandbox')
 }
 
 /**
@@ -337,18 +379,7 @@ export async function verifyAppleNotification(signedPayload) {
     if (renewalInfo.environment && renewalInfo.environment !== verifiedEnvironment) {
       throw new Error('Renewal info environment does not match notification')
     }
-    renewal = {
-      environment: renewalInfo.environment ?? verifiedEnvironment,
-      originalTransactionId: renewalInfo.originalTransactionId ?? null,
-      productId: renewalInfo.productId ?? null,
-      autoRenewProductId: renewalInfo.autoRenewProductId ?? null,
-      autoRenewStatus: renewalInfo.autoRenewStatus === 1,
-      isInBillingRetryPeriod: renewalInfo.isInBillingRetryPeriod === true,
-      gracePeriodExpiresDate: isoFromAppleMs(renewalInfo.gracePeriodExpiresDate),
-      renewalDate: isoFromAppleMs(renewalInfo.renewalDate),
-      expirationIntent: renewalInfo.expirationIntent ?? null,
-      appAccountToken: renewalInfo.appAccountToken ?? null,
-    }
+    renewal = normalizeRenewalInfo(renewalInfo, verifiedEnvironment)
   }
 
   assertNotificationLineage(env, transaction, renewal)

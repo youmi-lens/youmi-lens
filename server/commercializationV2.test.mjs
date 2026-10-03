@@ -55,9 +55,10 @@ describe('Commercialization V2 verification and notification wiring', () => {
     expect(routes).toContain('!tx.autoRenewable')
   })
 
-  it('keeps Production sales closed via kill switch while allowing Sandbox verify', () => {
-    expect(routes).toContain('shouldBlockSubscriptionGrant')
-    expect(routes).toContain('kill_switch_block')
+  it('keeps sales admission gated independently from verified delivery', () => {
+    expect(routes).toContain('authorize_subscription_purchase')
+    expect(routes).toContain('subscription_sales_closed')
+    expect(routes).not.toContain('shouldBlockSubscriptionGrant')
     expect(migration).toContain("is_purchasable = false")
   })
 

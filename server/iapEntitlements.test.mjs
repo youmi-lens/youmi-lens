@@ -306,9 +306,9 @@ describe('notification idempotency', () => {
       from() {
         return {
           insert(row) {
-            return row.notification_uuid === 'dupe'
+            return { select: () => ({ single: async () => row.notification_uuid === 'dupe'
               ? { error: { code: '23505', message: 'duplicate key' } }
-              : { error: null }
+              : { data: { updated_at: 'lease' }, error: null } }) }
           },
           select() {
             return {
@@ -327,7 +327,7 @@ describe('notification idempotency', () => {
 
     await expect(reserveNotification(db, { notificationUUID: 'new' })).resolves.toEqual({
       reserved: true,
-      notificationUUID: 'new',
+      notificationUUID: 'new', lease: 'lease',
     })
     await expect(reserveNotification(db, { notificationUUID: 'dupe' })).resolves.toEqual({
       reserved: false,
@@ -341,14 +341,14 @@ describe('notification idempotency', () => {
       from() {
         return {
           insert() {
-            return { error: { code: '23505', message: 'duplicate key' } }
+            return { select: () => ({ single: async () => ({ error: { code: '23505', message: 'duplicate key' } }) }) }
           },
           select() {
             return {
               eq() {
                 return {
                   maybeSingle() {
-                    return { data: { processing_status: 'failed' }, error: null }
+                    return { data: { processing_status: 'failed', updated_at: 'old-lease' }, error: null }
                   },
                 }
               },
@@ -356,15 +356,8 @@ describe('notification idempotency', () => {
           },
           update(row) {
             updates.push(row)
-            return {
-              eq() {
-                return {
-                  eq() {
-                    return { error: null }
-                  },
-                }
-              },
-            }
+            const query = { eq() { return query }, select: async () => ({ data: [{ updated_at: 'new-lease' }], error: null }) }
+            return query
           },
         }
       },

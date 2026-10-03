@@ -242,12 +242,18 @@ export async function buildQuotaStatus(userId, email) {
   const entitlement = ent
     ? {
         active: true,
-        status: 'active',
+        status: ent.status || 'active',
         productId: ent.product_id,
         planType: ent.plan_type,
         startsAt: ent.starts_at,
         expiresAt: ent.expires_at,
-        revoked: false,
+        autoRenewStatus: ent.auto_renew_status ?? null,
+        originalTransactionId: ent.original_transaction_id ?? null,
+        latestTransactionId: ent.source_transaction_id ?? null,
+        subscriptionGroupId: ent.subscription_group_id ?? null,
+        revocationAt: ent.revoked_at ?? null,
+        source: ent.source ?? null,
+        revoked: Boolean(ent.revoked_at),
       }
     : { active: false, productId: null, expiresAt: null }
   const studentPassActive = Boolean(ent)
