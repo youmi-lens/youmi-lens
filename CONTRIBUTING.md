@@ -67,11 +67,10 @@ Never force-push `main`, delete it, or try to bypass the repository rules.
 
 Use `<type>/<short-description>`; no personal names needed:
 
-`feature/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`
+`feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`
 
-Examples: `fix/notebook-image-resize`, `feature/course-material-search`,
-`docs/update-contributing`, `test/recording-recovery`. (Older branches use
-`feat/`; either is fine, just be consistent.)
+Examples: `feat/lecture-search`, `fix/notebook-image-resize`,
+`docs/update-contributing`, `test/recording-recovery`.
 
 ## 4. Keep changes scoped
 
