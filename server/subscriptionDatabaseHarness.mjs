@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 export const migration = readFileSync(new URL('../supabase/migrations/20261003011254_billing_atomic_subscription_persistence.sql', import.meta.url), 'utf8')
 export const tokenIndexMigration = readFileSync(new URL('../supabase/migrations/20261003014819_billing_token_lookup_index.sql', import.meta.url), 'utf8')
 export const deliveryMigration = readFileSync(new URL('../supabase/migrations/20261003190154_payment_delivery_recovery.sql', import.meta.url), 'utf8')
+export const earlyRenewalMigration = readFileSync(new URL('../supabase/migrations/20261004021500_early_renewal_entitlement.sql', import.meta.url), 'utf8')
 const schema = `
 create role anon; create role authenticated; create role service_role bypassrls;
 create schema auth;
@@ -47,6 +48,7 @@ export async function createSubscriptionDatabase({ bindings = [], states = [], a
   await pg.exec("create unique index idx_subscription_binding_app_account_token on public.app_store_subscription_bindings(app_account_token,environment) where app_account_token is not null and owner_state='active'")
   if (replaceTokenIndex) await pg.exec(tokenIndexMigration)
   await pg.exec(deliveryMigration)
+  await pg.exec(earlyRenewalMigration)
   const decode = row => Object.fromEntries(Object.entries(row).map(([k,v])=>[k, (k==='user_id'||k==='app_account_token')?(aliases.get(v)??v):(v instanceof Date ? v.toISOString() : (typeof v==='string' && k.endsWith('_at') && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : v))]))
   const from = (table) => {
     if (!['app_store_subscription_states','app_store_subscription_bindings','subscription_test_chain_policy'].includes(table)) throw Error('Unexpected test table')
