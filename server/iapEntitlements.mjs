@@ -295,10 +295,16 @@ export async function getActiveEntitlement(db, userId, nowIso) {
   }
   if (subscription?.active) {
     const safe = safeSubscriptionEntitlement(subscription)
+    // Canonical Apple-authoritative state is already active and unexpired here. A renewal delivered before its
+    // period's purchaseDate must not read as "not started yet" (isEntitlementActive requires starts_at <= now),
+    // so the projected start never lies in the future. Expiry/revocation remain authoritative.
+    const startsMs = Date.parse(safe.startsAt)
+    const nowMs = Date.parse(nowIso)
+    const startsAt = Number.isFinite(startsMs) && Number.isFinite(nowMs) && startsMs > nowMs ? nowIso : safe.startsAt
     return {
       product_id: safe.productId,
       plan_type: safe.planType,
-      starts_at: safe.startsAt,
+      starts_at: startsAt,
       expires_at: safe.expiresAt,
       status: safe.status,
       revoked_at: safe.revocationAt,

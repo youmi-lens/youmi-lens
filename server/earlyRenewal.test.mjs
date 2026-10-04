@@ -3,6 +3,7 @@
 // stored as 'verification_pending' (access lost for 5m21s). Apple-signed renewals may precede their purchaseDate.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createSubscriptionDatabase } from './subscriptionDatabaseHarness.mjs'
+import { getActiveEntitlement, isEntitlementActive } from './iapEntitlements.mjs'
 const apple = vi.hoisted(() => ({ fetch: vi.fn() }))
 vi.mock('./iapApple.mjs', async (original) => ({ ...await original(), appleServerApiConfigured: () => true, fetchVerifiedSubscriptionStatus: apple.fetch }))
 const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
@@ -108,5 +109,21 @@ describe('future purchaseDate never overrides Apple authority or ownership', () 
   it('normal Production-style subscription is unchanged (active, auto-renew, single owner)', async () => {
     const normal = await mod.verifyAndPersistSubscription(db, A, initial(A, { purchaseDate: iso(-1 * HOUR), appleExpiresDate: iso(30 * 24 * HOUR) }))
     expect(normal.status).toBe('active'); expect(normal.active).toBe(true)
+  })
+})
+
+describe('user-facing entitlement projection during the early-renewal window', () => {
+  it('Student Basic stays active in the entitlement layer (starts_at <= now) while the renewal precedes its purchaseDate', async () => {
+    await mod.verifyAndPersistSubscription(db, A, initial())
+    await didRenew(renewal())
+    const nowIso = new Date().toISOString()
+    const entitlement = await getActiveEntitlement(db, A, nowIso)
+    expect(entitlement).toBeTruthy()
+    expect(entitlement.source_transaction_id).toBe('renewal')
+    expect(Date.parse(entitlement.starts_at)).toBeLessThanOrEqual(Date.parse(nowIso))
+    expect(isEntitlementActive(entitlement, Date.parse(nowIso))).toBe(true)
+  })
+  it('legacy rows keep the starts_at gate (a not-yet-started legacy entitlement is not active)', () => {
+    expect(isEntitlementActive({ status: 'active', revoked_at: null, starts_at: iso(HOUR), expires_at: iso(2 * HOUR) }, Date.now())).toBe(false)
   })
 })
