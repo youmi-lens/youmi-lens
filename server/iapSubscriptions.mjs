@@ -225,7 +225,7 @@ export async function getEffectiveSubscription(db, userId) {
   if (rows.length === 0) return null
   const ranked = rows.map((row) => ({
     ...row,
-    active: subscriptionStatusIsActive(row.status, row.expires_at) && Date.parse(row.purchased_at) <= Date.now(),
+    active: subscriptionStatusIsActive(row.status, row.expires_at),
   })).sort((a,b) => Date.parse(b.expires_at) - Date.parse(a.expires_at))
   return ranked.find((row) => row.active) ?? ranked[0]
 }
