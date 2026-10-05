@@ -25,11 +25,8 @@ import {
   shouldTranslate,
 } from './contentLanguages.mjs'
 import { createDeepgramLiveCostFinalizer } from './watchLiveUsage.mjs'
-import {
-  appendSegment,
-  shouldFlushBuffer,
-  FINAL_BUFFER_DEBOUNCE_MS,
-} from './liveTranslationBuffer.mjs'
+import { createLiveTranslationSession } from './liveTranslationSession.mjs'
+import { scriptForSource } from './liveTranslationPolicy.mjs'
 
 /**
  * `/api/live-realtime-ws` — **single default realtime semantics** (Phase 1+2):
@@ -400,178 +397,24 @@ export function attachLiveRealtimeWs(server) {
         }
         let relayInterimSeg = 0
         let relayFinalSeg   = 0
-        let interimTranslationTimer = null
-        let latestInterimEn = ''
-        let lastTranslatedInterimEn = ''
-        let lastTranslatedInterimAt = 0
-        let interimTranslationGen = 0
-        const finalTranslationQueue = []
-        let activeFinalTranslations = 0
-        const MAX_CONCURRENT_FINAL_TRANSLATIONS = 2
-        const MAX_FINAL_TRANSLATION_QUEUE = 5
-
-        // Sentence-aware translation buffer. Deepgram finals are relayed to the
-        // client immediately as `stream_final` (English stays responsive), but
-        // their TRANSLATION is accumulated here into a coherent phrase so a
-        // sentence split across finals ("I have something" / "that I want to
-        // show you today.") is translated as one unit instead of disconnected
-        // fragments. The combined translation is attached to the LAST buffered
-        // segment id (which the iPad client already maps to that caption line).
-        let pendingFinalBuffer = ''
-        let pendingFinalLastId = null
-        let pendingFinalTimer = null
-
-        const translationEnabled = () =>
-          translationRequired && process.env.YOUMI_LIVE_TRANSLATION_EXPERIMENT === 'enabled'
-
-        const shouldTranslateInterim = (text) => {
-          const t = text.trim()
-          if (!t || t === lastTranslatedInterimEn) return false
-          if (/[.!?,;:\u2026]\s*$/.test(t)) return true
-          if (!lastTranslatedInterimEn) return t.length >= 6
-          if (t.length - lastTranslatedInterimEn.length >= 14) return true
-          return Date.now() - lastTranslatedInterimAt >= 520 && t.length > lastTranslatedInterimEn.length + 4
-        }
-
-        const scheduleInterimTranslation = () => {
-          if (interimTranslationTimer) clearTimeout(interimTranslationTimer)
-          const expectedGen = interimTranslationGen
-          interimTranslationTimer = setTimeout(() => {
-            interimTranslationTimer = null
-            if (!translationEnabled()) return
-            if (expectedGen !== interimTranslationGen) return
-            const text = latestInterimEn.trim()
-            if (!shouldTranslateInterim(text)) return
-            const id = `${wsSessionId}:draft:${relayFinalSeg + 1}`
-            console.info(
-              '[liveRealtimeWs] live_translation_requested',
-              JSON.stringify({ wsSessionId, id, textLen: text.length, interim: true }),
-            )
-            void youmiHosted
-              .translateText(text, qwenTarget.name, qwenSource.name)
-              .then((translatedText) => {
-                if (expectedGen !== interimTranslationGen) return
-                const out = typeof translatedText === 'string' ? translatedText.trim() : ''
-                if (!out) return
-                lastTranslatedInterimEn = text
-                lastTranslatedInterimAt = Date.now()
-                console.info(
-                  '[liveRealtimeWs] live_translation_ok',
-                  JSON.stringify({ wsSessionId, id, textLen: text.length, translationLen: out.length, interim: true }),
-                )
-                if (clientRef.ws) {
-                  safeSend(clientRef.ws, {
-                    type: 'stream_translation',
-                    id,
-                    translated_text: out,
-                    translation_language: translationLanguage,
-                    ...(translationLanguage === 'zh-Hans' ? { translation_zh: out } : {}),
-                    is_final: false,
-                    source_text: text,
-                  })
-                  console.info(
-                    '[liveRealtimeWs] live_translation_sent',
-                    JSON.stringify({ wsSessionId, id, translationLen: out.length, interim: true }),
-                  )
-                }
-              })
-              .catch((err) => {
-                console.warn(
-                  '[liveRealtimeWs] live_translation_failed',
-                  JSON.stringify({
-                    wsSessionId,
-                    id,
-                    interim: true,
-                    message: err instanceof Error ? err.message : String(err),
-                  }),
-                )
-              })
-          }, 120)
-        }
-
-        const drainFinalTranslationQueue = () => {
-          while (activeFinalTranslations < MAX_CONCURRENT_FINAL_TRANSLATIONS && finalTranslationQueue.length > 0) {
-            const job = finalTranslationQueue.shift()
-            if (!job) return
-            if (Date.now() - job.enqueuedAt > 8000) continue
-            activeFinalTranslations += 1
-            console.info(
-              '[liveRealtimeWs] live_translation_requested',
-              JSON.stringify({ wsSessionId, id: job.id, textLen: job.text.length, interim: false }),
-            )
-            void youmiHosted
-              .translateText(job.text, qwenTarget.name, qwenSource.name)
-              .then((translatedText) => {
-                const out = typeof translatedText === 'string' ? translatedText.trim() : ''
-                if (!out) return
-                console.info(
-                  '[liveRealtimeWs] live_translation_ok',
-                  JSON.stringify({ wsSessionId, id: job.id, textLen: job.text.length, translationLen: out.length }),
-                )
-                if (clientRef.ws) {
-                  safeSend(clientRef.ws, {
-                    type: 'stream_translation', id: job.id, translated_text: out,
-                    translation_language: translationLanguage, is_final: true,
-                    ...(translationLanguage === 'zh-Hans' ? { translation_zh: out } : {}),
-                  })
-                  console.info(
-                    '[liveRealtimeWs] live_translation_sent',
-                    JSON.stringify({ wsSessionId, id: job.id, translationLen: out.length, interim: false }),
-                  )
-                }
-              })
-              .catch((err) => {
-                console.warn(
-                  '[liveRealtimeWs] live_translation_failed',
-                  JSON.stringify({
-                    wsSessionId,
-                    id: job.id,
-                    interim: false,
-                    message: err instanceof Error ? err.message : String(err),
-                  }),
-                )
-              })
-              .finally(() => {
-                activeFinalTranslations -= 1
-                drainFinalTranslationQueue()
-              })
-          }
-        }
-
-        const enqueueFinalTranslation = (id, text) => {
-          finalTranslationQueue.push({ id, text, enqueuedAt: Date.now() })
-          if (finalTranslationQueue.length > MAX_FINAL_TRANSLATION_QUEUE) {
-            finalTranslationQueue.splice(0, finalTranslationQueue.length - MAX_FINAL_TRANSLATION_QUEUE)
-          }
-          drainFinalTranslationQueue()
-        }
-
-        // Translate whatever coherent phrase has accumulated, attaching the
-        // result to the last buffered segment id. Called on a sentence boundary,
-        // a debounce pause, or stream teardown.
-        const flushFinalTranslationBuffer = () => {
-          if (pendingFinalTimer) {
-            clearTimeout(pendingFinalTimer)
-            pendingFinalTimer = null
-          }
-          const text = pendingFinalBuffer.trim()
-          const id = pendingFinalLastId
-          pendingFinalBuffer = ''
-          pendingFinalLastId = null
-          if (!id || !text) return
-          if (!translationEnabled()) return
-          enqueueFinalTranslation(id, text)
-        }
+        // Live translation for THIS stream: scheduling, sentence buffer, queue and the
+        // `stream_translation` events live in liveTranslationSession.mjs (unit-tested).
+        const translation = createLiveTranslationSession({
+          wsSessionId,
+          translationLanguage,
+          sourceScript: scriptForSource(sourceLanguage),
+          isEnabled: () => translationRequired && process.env.YOUMI_LIVE_TRANSLATION_EXPERIMENT === 'enabled',
+          translateText: (text, targetName, sourceName) => youmiHosted.translateText(text, targetName, sourceName),
+          qwenSource,
+          qwenTarget,
+          send: (payload) => { if (clientRef.ws) safeSend(clientRef.ws, payload) },
+          getFinalSeq: () => relayFinalSeg,
+        })
         // Cross-scope cleanup: re-stream_start and WS close clear a stray buffer
         // timer (same pattern as ws._youmiLiveSessionEnd / cost finalize refs).
-        ws._youmiClearTranslationBuffer = () => {
-          if (pendingFinalTimer) {
-            clearTimeout(pendingFinalTimer)
-            pendingFinalTimer = null
-          }
-          pendingFinalBuffer = ''
-          pendingFinalLastId = null
-        }
+        ws._youmiClearTranslationBuffer = () => translation.clear()
+        // stream_stop: translate the trailing phrase now instead of waiting out the debounce.
+        ws._youmiFlushTranslationBuffer = () => translation.flush()
 
         const relayInterim = (text) => {
           relayInterimSeg += 1
@@ -593,9 +436,10 @@ export function attachLiveRealtimeWs(server) {
               JSON.stringify({ wsSessionId, previewLen: preview.length }),
             )
           }
-          if (clientRef.ws) safeSend(clientRef.ws, { type: 'stream_interim', text, transcript: text, caption: text })
-          latestInterimEn = typeof text === 'string' ? text : ''
-          scheduleInterimTranslation()
+          // `final_id` (additive): the stream_final id this interim will become, so a client can
+          // tie translation drafts to the caption they belong to without counting.
+          if (clientRef.ws) safeSend(clientRef.ws, { type: 'stream_interim', text, transcript: text, caption: text, final_id: `${wsSessionId}:${relayFinalSeg + 1}` })
+          translation.noteInterim(text)
           if (SRV_LIVE_VERBOSE) {
             console.log(
               '[YoumiLive][srv] relay stream_interim',
@@ -629,43 +473,7 @@ export function attachLiveRealtimeWs(server) {
             )
           }
 
-          interimTranslationGen += 1
-          latestInterimEn = ''
-          lastTranslatedInterimEn = ''
-          if (interimTranslationTimer) {
-            clearTimeout(interimTranslationTimer)
-            interimTranslationTimer = null
-          }
-          const finalTranslationEnabled = translationEnabled()
-          const trimmed = typeof text === 'string' ? text.trim() : ''
-          console.info(
-            '[liveRealtimeWs] live_translation_gate_checked',
-            JSON.stringify({
-              wsSessionId,
-              id,
-              enabled: finalTranslationEnabled,
-              envValuePresent: Boolean(process.env.YOUMI_LIVE_TRANSLATION_EXPERIMENT),
-              textLen: trimmed.length,
-            }),
-          )
-          if (!finalTranslationEnabled) {
-            console.info(
-              '[liveRealtimeWs] live_translation_skipped_gate_off',
-              JSON.stringify({ wsSessionId, id, textLen: trimmed.length }),
-            )
-            return
-          }
-          if (!trimmed) return
-          // Buffer this final into the current phrase; translate when a sentence
-          // boundary / max length is reached, otherwise after a short pause.
-          pendingFinalBuffer = appendSegment(pendingFinalBuffer, trimmed)
-          pendingFinalLastId = id
-          if (shouldFlushBuffer(pendingFinalBuffer) === 'flush') {
-            flushFinalTranslationBuffer()
-          } else {
-            if (pendingFinalTimer) clearTimeout(pendingFinalTimer)
-            pendingFinalTimer = setTimeout(flushFinalTranslationBuffer, FINAL_BUFFER_DEBOUNCE_MS)
-          }
+          translation.noteFinal(id, text)
         }
 
         if (liveProvider === 'dashscope') {
@@ -1045,6 +853,7 @@ export function attachLiveRealtimeWs(server) {
         console.info('[liveRealtimeWs] stream_stop_received', JSON.stringify({ wsSessionId, frameCount }))
         if (SRV_LIVE_VERBOSE) console.log('[YoumiLive][srv] stream_stop', JSON.stringify({ wsSessionId }))
         streamingSession?.stop()   // graceful: sends LAST_PACKET, waits for server final
+        if (typeof ws._youmiFlushTranslationBuffer === 'function') ws._youmiFlushTranslationBuffer()
         // Cost ledger (Deepgram only; once-guarded funnel).
         if (typeof ws._youmiDeepgramCostFinalize === 'function') {
           ws._youmiDeepgramCostFinalize('stream_stop')
