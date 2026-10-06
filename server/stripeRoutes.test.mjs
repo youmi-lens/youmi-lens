@@ -160,10 +160,10 @@ describe('checkout release switch (503 before any Stripe object is created)', ()
 
   it('the switch is the only thing standing between auth and plan validation', () => {
     // Guard placement is asserted structurally: the 503 branch must appear after
-    // requireUser and before plan_code / price resolution, so an invalid plan can
-    // never leak a 400 while commercialization is closed.
+    // authentication (handleCheckout injects `authenticate`, defaulting to requireUser) and before
+    // plan_code / price resolution, so an invalid plan can never leak a 400 while commercialization is closed.
     const src = readFileSync(new URL('./stripeRoutes.mjs', import.meta.url), 'utf8')
-    const auth = src.indexOf('const user = await requireUser(req, res)')
+    const auth = src.indexOf('const user = await authenticate(req, res)')
     const guard = src.indexOf('commercialization_not_available')
     const plan = src.indexOf("typeof req.body?.plan_code === 'string'")
     expect(auth).toBeGreaterThan(-1)

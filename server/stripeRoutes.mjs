@@ -10,6 +10,7 @@
  *   POST /api/subscription/refresh    — pull latest from Stripe and re-project.
  */
 import { verifyJwt } from './betaGate.mjs'
+import { getActiveEntitlement, isEntitlementActive } from './iapEntitlements.mjs'
 import { getBillingAdminClient, getStripe, getStripeWebhookSecret, isStripeConfigured } from './stripeClient.mjs'
 import {
   isAllowedPlanCode,
@@ -76,9 +77,38 @@ export function shouldBlockCheckoutForSubscription(subscription) {
   return false
 }
 
+/**
+ * Cross-provider double-purchase guard.
+ *
+ * Does the provider-neutral entitlement authority already show ACTIVE Student Basic access for this
+ * user? This is the exact lookup `getEffectiveQuota` / `/api/quota/status` use, so one definition of
+ * "has paid access" covers every source: an Apple subscription (Production, or an allowed Sandbox /
+ * TestFlight chain), an active Stripe subscription, an admin gift, and the legacy 30-day passes.
+ * Expired, revoked, not-yet-started and absent entitlements do not grant access, so they do not block.
+ *
+ * Read-only: unlike getEffectiveQuota it never creates a quota row. Throws on a lookup failure — the
+ * caller must FAIL CLOSED (no checkout), because selling a second subscription on a failed check is
+ * worse than a retry.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function hasActiveStudentBasicAccess(db, userId, nowMs = Date.now(), lookup = getActiveEntitlement) {
+  const entitlement = await lookup(db, userId, new Date(nowMs).toISOString())
+  return isEntitlementActive(entitlement, nowMs)
+}
+
 // ── POST /api/billing/checkout ───────────────────────────────────────────────
-export async function handleCheckout(req, res) {
-  const user = await requireUser(req, res)
+// `deps` exists only so the guard order is testable without Stripe or a database; production passes none.
+export async function handleCheckout(req, res, deps = {}) {
+  const {
+    authenticate = requireUser,
+    getDb = getBillingAdminClient,
+    getStripeClient = getStripe,
+    statusFor = buildSubscriptionStatus,
+    entitlementLookup = getActiveEntitlement,
+    ensureCustomer = getOrCreateStripeCustomer,
+  } = deps
+  const user = await authenticate(req, res)
   if (!user) return
 
   // Public release switch (fail-closed). Placed after auth so an unauthenticated
@@ -104,15 +134,15 @@ export async function handleCheckout(req, res) {
     return
   }
 
-  const db = getBillingAdminClient()
-  const stripe = await getStripe()
+  const db = getDb()
+  const stripe = await getStripeClient()
   if (!db || !stripe) {
     res.status(503).json({ ok: false, error: 'stripe_not_configured', message: 'Billing is temporarily unavailable.' })
     return
   }
 
   try {
-    const subscription = await buildSubscriptionStatus(db, user.userId, Date.now())
+    const subscription = await statusFor(db, user.userId, Date.now())
     if (shouldBlockCheckoutForSubscription(subscription)) {
       res.status(409).json({
         ok: false,
@@ -123,7 +153,30 @@ export async function handleCheckout(req, res) {
       return
     }
 
-    const customerId = await getOrCreateStripeCustomer(db, stripe, { userId: user.userId, email: user.email })
+    // Any OTHER active source of Student Basic (Apple, admin gift, legacy pass, an entitlement the Stripe
+    // status above does not see). Checked BEFORE a Stripe customer or session can be created.
+    let alreadyEntitled
+    try {
+      alreadyEntitled = await hasActiveStudentBasicAccess(db, user.userId, Date.now(), entitlementLookup)
+    } catch (err) {
+      console.error('[billing/checkout] entitlement check failed', err instanceof Error ? err.message : String(err))
+      res.status(503).json({
+        ok: false,
+        error: 'entitlement_check_failed',
+        message: 'We could not confirm your plan right now. Please try again in a moment.',
+      })
+      return
+    }
+    if (alreadyEntitled) {
+      res.status(409).json({
+        ok: false,
+        error: 'entitlement_already_active',
+        message: 'Your Student Basic access is already active. Manage it where you subscribed.',
+      })
+      return
+    }
+
+    const customerId = await ensureCustomer(db, stripe, { userId: user.userId, email: user.email })
     const urls = getCheckoutUrls()
     const session = await stripe.checkout.sessions.create(
       buildCheckoutSessionParams({ userId: user.userId, customerId, planCode, priceId, urls }),
