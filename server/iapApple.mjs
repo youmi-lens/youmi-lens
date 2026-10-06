@@ -57,7 +57,17 @@ function normalizeApplePrivateKey(value) {
   return value.replace(/\\n/g, '\n')
 }
 
-/** The Apple environment this server is configured to accept (Sandbox vs Production). */
+/**
+ * The Apple environment this server PREFERS (Sandbox vs Production).
+ *
+ * NOT an isolation mechanism. It only decides the order in which `environmentTryOrder()` attempts
+ * verification (configured first, then Production, then Sandbox); every environment is still tried, so
+ * one backend serves TestFlight/Sandbox and live App Store users at once and its value does not gate
+ * access. Environment isolation lives elsewhere: Apple signs the environment into each transaction,
+ * the verified environment is pinned to the subscription chain, and a non-Production chain only grants
+ * access with an explicit `subscription_test_chain_policy` row (enforced in the database).
+ * Also read by /api/health (diagnostics). An invalid value throws, which breaks all verification.
+ */
 export function appleEnvironment() {
   const raw = process.env.APPLE_IAP_ENVIRONMENT?.trim() || Environment.SANDBOX
   const match = Object.values(Environment).find((value) => value.toLowerCase() === raw.toLowerCase())
