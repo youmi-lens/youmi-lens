@@ -24,12 +24,72 @@ const PLAN_INTERVALS = {
 }
 
 /**
+ * Free-trial policy (owner decision, parity with the iPad's App Store Connect offer): ONE MONTH free on
+ * both Student Basic plans. The SERVER owns this — the client can neither request nor change a trial.
+ *
+ * "One month" is a CALENDAR month, not 30 days. Checkout's `trial_period_days` can only express whole
+ * days, but `trial_end` is an exact timestamp, so the server computes it (see addCalendarMonthsUtc).
+ */
+const PLAN_TRIAL_MONTHS = {
+  [PLAN_CODES.STUDENT_BASIC_MONTHLY]: 1,
+  [PLAN_CODES.STUDENT_BASIC_ANNUAL]: 1,
+}
+
+/**
+ * Which Stripe account mode the configured secret key belongs to: 'test', 'live', or null (missing / not a
+ * Stripe secret or restricted key). Stripe keeps TEST and LIVE data completely separate, so this is the mode
+ * every history lookup must be scoped to.
+ */
+export function stripeKeyMode(key) {
+  const value = typeof key === 'string' ? key.trim() : ''
+  if (/^(sk|rk)_test_.+/.test(value)) return 'test'
+  if (/^(sk|rk)_live_.+/.test(value)) return 'live'
+  return null
+}
+
+/**
+ * Lifetime of a Checkout Session that carries a trial. `trial_end` is fixed when the session is CREATED, so the
+ * time a customer takes to finish is deducted from their month. Stripe allows 30 min – 24 h (default 24 h); one
+ * hour caps that loss at 60 minutes (≈0.13% of a 31-day month) while leaving ample time for card entry / 3DS.
+ */
+export const TRIAL_CHECKOUT_EXPIRES_SECONDS = 3600
+
+/** Whole calendar months of free trial for a plan (0 = none, including unknown plans). */
+export function trialMonthsForPlanCode(planCode) {
+  return PLAN_TRIAL_MONTHS[planCode] ?? 0
+}
+
+/**
+ * `nowMs` + N calendar months in UTC, as unix SECONDS (what Stripe's `trial_end` takes).
+ *
+ * Same day-of-month and time-of-day; when the target month is shorter the day clamps to its last day
+ * (Jan 31 → Feb 28/29, Mar 31 → Apr 30, Oct 31 → Nov 30), the same month-end rule Stripe applies to a
+ * billing anchor. The instant is absolute, so the customer's timezone never changes the end moment.
+ */
+export function addCalendarMonthsUtc(nowMs, months) {
+  const start = new Date(nowMs)
+  const monthIndex = start.getUTCMonth() + months
+  const year = start.getUTCFullYear() + Math.floor(monthIndex / 12)
+  const month = ((monthIndex % 12) + 12) % 12
+  const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate()
+  const day = Math.min(start.getUTCDate(), lastDay)
+  const end = Date.UTC(year, month, day, start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds(), start.getUTCMilliseconds())
+  return Math.floor(end / 1000)
+}
+
+/** Unix-seconds `trial_end` for a NEW subscription on this plan, or null when the plan has no trial. */
+export function trialEndUnixForPlanCode(planCode, nowMs = Date.now()) {
+  const months = trialMonthsForPlanCode(planCode)
+  return months > 0 ? addCalendarMonthsUtc(nowMs, months) : null
+}
+
+/**
  * Past-due grace window (days) before access is withdrawn.
  *
  * PRODUCT POLICY: grace is NOT an approved business decision yet, so the default
  * is ZERO days. Access during past_due is therefore never extended beyond the
- * already-paid current_period_end unless STRIPE_GRACE_PERIOD_DAYS is explicitly
- * set to a positive value. The knob is preserved so a grace policy can be turned
+ * already-PAID boundary (the start of the unpaid period; see deriveSubscriptionRecord)
+ * unless STRIPE_GRACE_PERIOD_DAYS is explicitly set to a positive value. The knob is preserved so a grace policy can be turned
  * on later without a code change.
  */
 export function getGracePeriodDays() {

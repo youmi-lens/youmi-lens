@@ -61,7 +61,12 @@ function makeRes() {
 async function checkout(tables = {}, { authedAs = TEST_USER, req = {}, statusFor } = {}) {
   const calls = { customer: 0, session: 0, params: null }
   const res = makeRes()
-  const stripe = { checkout: { sessions: { create: async (params) => { calls.session += 1; calls.params = params; return { url: 'https://checkout.stripe.test/session' } } } } }
+  const stripe = {
+    checkout: { sessions: { create: async (params) => { calls.session += 1; calls.params = params; return { url: 'https://checkout.stripe.test/session' } } } },
+    // Trial-eligibility reads (covered in stripeTrial.test.mjs): an account with no Stripe history.
+    customers: { search: async () => ({ data: [] }) },
+    subscriptions: { list: async () => ({ data: [] }) },
+  }
   await handleCheckout(
     { headers: {}, body: { plan_code: 'student_basic_monthly' }, ...req },
     res,
