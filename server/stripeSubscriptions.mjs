@@ -236,6 +236,14 @@ export async function applyStripeSubscription(db, sub, { nowMs = Date.now(), eve
   const record = deriveSubscriptionRecord(sub, { nowMs })
   if (!record.provider_subscription_id) return { applied: false, reason: 'no_subscription_id' }
 
+  // A price we do not sell (foreign product, or this environment's price ids are not configured) must
+  // never reach the database: `subscriptions.plan_code` is NOT NULL, so it would fail there anyway. Fail
+  // explicitly BEFORE any write instead. It stays an error (webhook 500 -> event marked failed -> Stripe
+  // retries) rather than a silent ack, so a legitimately paid subscription is not dropped by a config slip.
+  if (!record.plan_code) {
+    throw new Error(`unknown_stripe_price: ${record.provider_price_id ?? 'none'}`)
+  }
+
   if (eventCreatedMs != null && Number.isFinite(eventCreatedMs)) {
     const { data: existing, error } = await db
       .from('subscriptions')

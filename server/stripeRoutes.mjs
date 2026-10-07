@@ -15,6 +15,7 @@ import { getBillingAdminClient, getStripe, getStripeWebhookSecret, isStripeConfi
 import {
   isAllowedPlanCode,
   isCommercializationEnabled,
+  isScopedTestCheckoutUser,
   priceIdForPlanCode,
   getCheckoutUrls,
 } from './stripeConfig.mjs'
@@ -115,12 +116,17 @@ export async function handleCheckout(req, res, deps = {}) {
   // caller still gets 401 and the switch state is not advertised to anonymous
   // probes. Blocks BEFORE any Stripe object would be created.
   if (!isCommercializationEnabled()) {
-    res.status(503).json({
-      ok: false,
-      error: 'commercialization_not_available',
-      message: 'Subscriptions are not available yet.',
-    })
-    return
+    // Scoped TEST-mode exception: only an allowlisted, server-authenticated user on a Stripe TEST key.
+    // It skips this one gate; every check below (plan, price, Stripe status, entitlement) still runs.
+    if (!isScopedTestCheckoutUser(user.userId)) {
+      res.status(503).json({
+        ok: false,
+        error: 'commercialization_not_available',
+        message: 'Subscriptions are not available yet.',
+      })
+      return
+    }
+    console.warn('[billing/checkout] scoped Stripe TEST checkout allowed while public commercialization is closed')
   }
 
   const planCode = typeof req.body?.plan_code === 'string' ? req.body.plan_code : ''
