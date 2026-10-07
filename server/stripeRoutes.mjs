@@ -18,6 +18,8 @@ import {
   isScopedTestCheckoutUser,
   priceIdForPlanCode,
   getCheckoutUrls,
+  TRIAL_CHECKOUT_EXPIRES_SECONDS,
+  trialEndUnixForPlanCode,
 } from './stripeConfig.mjs'
 import { getOrCreateStripeCustomer, getStripeCustomerId } from './stripeCustomers.mjs'
 import {
@@ -26,6 +28,7 @@ import {
   deriveSubscriptionRecord,
   entitlementProjection,
 } from './stripeSubscriptions.mjs'
+import { hasPriorSubscriptionHistory } from './stripeTrialEligibility.mjs'
 import { handleStripeWebhook } from './stripeWebhook.mjs'
 
 /**
@@ -34,14 +37,23 @@ import { handleStripeWebhook } from './stripeWebhook.mjs'
  * all derived server-side. The session is bound to the authenticated account via
  * client_reference_id + metadata.user_id (and subscription-level metadata).
  */
-export function buildCheckoutSessionParams({ userId, customerId, planCode, priceId, urls }) {
+export function buildCheckoutSessionParams({ userId, customerId, planCode, priceId, urls, trialEnd = null, expiresAt = null }) {
   return {
     mode: 'subscription',
     customer: customerId,
     line_items: [{ price: priceId, quantity: 1 }],
     client_reference_id: userId,
     metadata: { user_id: userId, plan_code: planCode },
-    subscription_data: { metadata: { user_id: userId, plan_code: planCode } },
+    subscription_data: {
+      metadata: { user_id: userId, plan_code: planCode },
+      // Free trial: ONLY a server-computed absolute end (see trialEndUnixForPlanCode), set only for an
+      // account with no prior subscription history. `trial_period_days` is never used (day-only).
+      ...(trialEnd ? { trial_end: trialEnd } : {}),
+    },
+    // A trial still collects a payment method up front (Checkout's default for subscriptions; explicit here
+    // so a trial can never start without a card to charge at its end). Its session is also short-lived because
+    // `trial_end` is fixed at creation: see TRIAL_CHECKOUT_EXPIRES_SECONDS.
+    ...(trialEnd ? { payment_method_collection: 'always', expires_at: expiresAt ?? undefined } : {}),
     success_url: urls.successUrl || undefined,
     cancel_url: urls.cancelUrl || undefined,
     allow_promotion_codes: false,
@@ -108,6 +120,7 @@ export async function handleCheckout(req, res, deps = {}) {
     statusFor = buildSubscriptionStatus,
     entitlementLookup = getActiveEntitlement,
     ensureCustomer = getOrCreateStripeCustomer,
+    trialHistory = hasPriorSubscriptionHistory,
   } = deps
   const user = await authenticate(req, res)
   if (!user) return
@@ -182,10 +195,35 @@ export async function handleCheckout(req, res, deps = {}) {
       return
     }
 
+    // Free-trial eligibility (server-decided from provider history; the client cannot request or alter a
+    // trial). A lookup failure refuses checkout: guessing could hand out a second free month.
+    let trialEnd = null
+    let expiresAt = null
+    const nowMs = Date.now()
+    const trialEndForPlan = trialEndUnixForPlanCode(planCode, nowMs)
+    if (trialEndForPlan) {
+      let priorHistory
+      try {
+        priorHistory = await trialHistory(db, stripe, user.userId)
+      } catch (err) {
+        console.error('[billing/checkout] trial eligibility check failed', err instanceof Error ? err.message : String(err))
+        res.status(503).json({
+          ok: false,
+          error: 'trial_eligibility_check_failed',
+          message: 'We could not confirm your eligibility right now. Please try again in a moment.',
+        })
+        return
+      }
+      if (!priorHistory) {
+        trialEnd = trialEndForPlan
+        expiresAt = Math.floor(nowMs / 1000) + TRIAL_CHECKOUT_EXPIRES_SECONDS
+      }
+    }
+
     const customerId = await ensureCustomer(db, stripe, { userId: user.userId, email: user.email })
     const urls = getCheckoutUrls()
     const session = await stripe.checkout.sessions.create(
-      buildCheckoutSessionParams({ userId: user.userId, customerId, planCode, priceId, urls }),
+      buildCheckoutSessionParams({ userId: user.userId, customerId, planCode, priceId, urls, trialEnd, expiresAt }),
     )
     res.json({ ok: true, url: session.url })
   } catch (err) {
@@ -254,6 +292,9 @@ function emptyStatus() {
     currentPeriodEnd: null,
     cancelAtPeriodEnd: false,
     graceUntil: null,
+    trialing: false,
+    trialEnd: null,
+    inGrace: false,
     manageable: false,
   }
 }

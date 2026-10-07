@@ -65,6 +65,7 @@ async function checkout(tables, { userId = USER, lookup } = {}) {
       getStripeClient: async () => stripe,
       statusFor: async () => ({ provider: null, active: false, status: 'none', manageable: false }),
       entitlementLookup: lookup,
+      trialHistory: async () => false, // trial eligibility is covered in stripeTrial.test.mjs; this suite is about the guards
       ensureCustomer: async () => { calls.customer += 1; return 'cus_test' },
     },
   )

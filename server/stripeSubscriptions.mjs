@@ -75,7 +75,7 @@ export function subscriptionPeriod(sub) {
 
 /**
  * Pure: Stripe subscription object → canonical `subscriptions` row shape.
- * grace_until is set only for past_due (server-computed; documented policy).
+ * grace_until is set only for past_due with a positive grace window (server-computed; documented policy).
  */
 export function deriveSubscriptionRecord(sub, { nowMs = Date.now(), graceDays } = {}) {
   const status = mapStripeStatus(sub?.status)
@@ -83,16 +83,25 @@ export function deriveSubscriptionRecord(sub, { nowMs = Date.now(), graceDays } 
   const planCode = planCodeForPriceId(priceId)
   const period = subscriptionPeriod(sub)
   const currentPeriodStart = unixToIso(period.start)
-  const currentPeriodEnd = unixToIso(period.end)
+  // While trialing, access ends at the trial end. Stripe's period normally equals the trial window, but the
+  // explicit `trial_end` is authoritative, so an unexpectedly longer period can never extend a free trial.
+  const currentPeriodEnd = (status === 'trialing' && unixToIso(sub?.trial_end)) || unixToIso(period.end)
   const cancelAtPeriodEnd = Boolean(sub?.cancel_at_period_end)
 
-  // Grace is measured from the already-paid current_period_end (never invents an
-  // unpaid window). Default grace is 0 days (unapproved policy) — see stripeConfig.
+  // Grace is measured from the end of what was actually PAID, which for a past_due subscription is the
+  // START of the current (unpaid) period. Stripe begins a new billing period when it creates the renewal
+  // invoice — and when a trial ends — even if that invoice then fails, so `current_period_end` of a past_due
+  // subscription is the end of an UNPAID period; measuring from it would hand out a free month on a failed
+  // first charge after a trial. Default grace is 0 days (unapproved policy): no grace_until is stored and a
+  // past_due subscription grants no access. A positive STRIPE_GRACE_PERIOD_DAYS gives exactly that many days
+  // after the paid-through boundary — see stripeConfig.
   let graceUntil = null
   if (status === 'past_due') {
     const days = Number.isFinite(graceDays) ? graceDays : getGracePeriodDays()
-    const periodEndMs = currentPeriodEnd ? Date.parse(currentPeriodEnd) : nowMs
-    graceUntil = new Date((Number.isFinite(periodEndMs) ? periodEndMs : nowMs) + days * DAY_MS).toISOString()
+    if (days > 0) {
+      const paidThroughMs = currentPeriodStart ? Date.parse(currentPeriodStart) : nowMs
+      graceUntil = new Date((Number.isFinite(paidThroughMs) ? paidThroughMs : nowMs) + days * DAY_MS).toISOString()
+    }
   }
 
   return {
@@ -297,6 +306,9 @@ export async function buildSubscriptionStatus(db, userId, nowMs = Date.now()) {
       currentPeriodEnd: null,
       cancelAtPeriodEnd: false,
       graceUntil: null,
+      trialing: false,
+      trialEnd: null,
+      inGrace: false,
       manageable,
     }
   }
@@ -313,6 +325,7 @@ export async function buildSubscriptionStatus(db, userId, nowMs = Date.now()) {
   }
   const chosen = best ?? rows[0]
   const projection = entitlementProjection(chosen, nowMs)
+  const trialing = chosen.status === 'trialing' && projection.active
 
   return {
     provider: 'stripe',
@@ -323,6 +336,11 @@ export async function buildSubscriptionStatus(db, userId, nowMs = Date.now()) {
     currentPeriodEnd: chosen.current_period_end,
     cancelAtPeriodEnd: Boolean(chosen.cancel_at_period_end),
     graceUntil: chosen.grace_until,
+    // Additive, secret-free trial / grace facts so a client can word these states truthfully. `status` and
+    // `cancelAtPeriodEnd` keep their meaning, so a trial cancelled during the trial is still `trialing`.
+    trialing,
+    trialEnd: trialing ? chosen.current_period_end : null,
+    inGrace: chosen.status === 'past_due' && projection.active,
     manageable,
   }
 }

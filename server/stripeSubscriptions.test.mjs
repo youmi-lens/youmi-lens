@@ -105,23 +105,25 @@ describe('deriveSubscriptionRecord', () => {
     expect(entitlementProjection(rec, NOW).expiresAt).toBe(new Date(END * 1000).toISOString())
   })
 
-  it('sets grace_until from period_end when a grace window is configured', () => {
+  it('sets grace_until from the PAID-THROUGH boundary (start of the unpaid period) when a grace window is configured', () => {
     const rec = deriveSubscriptionRecord(stripeSub({ status: 'past_due' }), { nowMs: NOW, graceDays: 3 })
     expect(rec.status).toBe('past_due')
-    // grace = period_end + 3d (measured from the already-paid period end)
-    expect(rec.grace_until).toBe(new Date(END * 1000 + 3 * DAY).toISOString())
+    // A past_due subscription's current period is the NEW, unpaid one (Stripe starts it when the renewal /
+    // post-trial invoice is created), so grace counts from its start = the end of what was paid.
+    expect(rec.grace_until).toBe(new Date(START * 1000 + 3 * DAY).toISOString())
   })
 
-  it('applies NO grace by default (unapproved policy → 0 days)', () => {
+  it('applies NO grace by default (unapproved policy → 0 days): no grace_until, no access while past_due', () => {
     const saved = process.env.STRIPE_GRACE_PERIOD_DAYS
     delete process.env.STRIPE_GRACE_PERIOD_DAYS
     try {
       expect(getGracePeriodDays()).toBe(0)
       const rec = deriveSubscriptionRecord(stripeSub({ status: 'past_due' }), { nowMs: NOW })
-      // grace_until collapses to period_end → no window beyond the paid period.
-      expect(rec.grace_until).toBe(new Date(END * 1000).toISOString())
-      // At period end the past_due entitlement is already inactive.
-      expect(entitlementProjection(rec, END * 1000 + 1).active).toBe(false)
+      expect(rec.grace_until).toBe(null)
+      // NOW is inside the unpaid period; with no grace it must not grant access (a failed first charge after
+      // a trial, or a failed renewal, must not hand out a free month).
+      expect(entitlementProjection(rec, NOW).active).toBe(false)
+      expect(entitlementProjection(rec, START * 1000 + 1).active).toBe(false)
     } finally {
       if (saved === undefined) delete process.env.STRIPE_GRACE_PERIOD_DAYS
       else process.env.STRIPE_GRACE_PERIOD_DAYS = saved
@@ -150,9 +152,9 @@ describe('entitlementProjection', () => {
 
   it('past_due preserves access only within an explicitly configured grace_until', () => {
     const graced = deriveSubscriptionRecord(stripeSub({ status: 'past_due' }), { nowMs: NOW, graceDays: 3 })
-    const within = entitlementProjection(graced, Date.parse('2026-07-12T00:00:00Z'))
-    expect(within.active).toBe(true) // grace = Jul 11 + 3d = Jul 14
-    const after = entitlementProjection(graced, Date.parse('2026-07-20T00:00:00Z'))
+    const within = entitlementProjection(graced, Date.parse('2026-06-12T00:00:00Z'))
+    expect(within.active).toBe(true) // grace = period start Jun 11 + 3d = Jun 14
+    const after = entitlementProjection(graced, Date.parse('2026-06-20T00:00:00Z'))
     expect(after.active).toBe(false)
   })
 
