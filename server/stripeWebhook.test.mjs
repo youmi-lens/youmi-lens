@@ -196,4 +196,24 @@ describe('handleStripeWebhook', () => {
     expect(calls.update.some((u) => u.table === 'stripe_webhook_events' && u.row.processing_status === 'failed')).toBe(true)
     expect(calls.billingEvents.some((e) => e.event_type === 'stripe_webhook_error')).toBe(true)
   })
+
+  it('a foreign Stripe price fails closed with a clean retryable error: nothing is granted, the event is marked failed', async () => {
+    const { db, calls } = makeDb()
+    const res = makeRes()
+    const foreign = stripeSub({ items: { data: [{ price: { id: 'price_foreign' } }] } })
+    const deps = {
+      db,
+      webhookSecret: 'whsec_test',
+      constructEvent: () => ({ id: 'evt_foreign', type: 'customer.subscription.created', data: { object: foreign } }),
+    }
+    await handleStripeWebhook({ headers: { 'stripe-signature': 'ok' }, body: Buffer.from('{}') }, res, deps)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toMatchObject({ error: 'webhook_processing_failed' })
+    expect(calls.upsert).toHaveLength(0) // no subscriptions row
+    expect(calls.rpc).toHaveLength(0) // no entitlement projection
+    const failed = calls.update.find((u) => u.table === 'stripe_webhook_events' && u.row.processing_status === 'failed')
+    expect(failed.row.safe_error).toContain('unknown_stripe_price: price_foreign')
+    expect(calls.update.some((u) => u.row.processing_status === 'processed')).toBe(false)
+    expect(calls.billingEvents.some((e) => e.event_type === 'stripe_webhook_error')).toBe(true)
+  })
 })

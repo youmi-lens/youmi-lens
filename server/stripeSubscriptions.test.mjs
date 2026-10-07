@@ -331,6 +331,35 @@ describe('applyStripeSubscription', () => {
     expect(result.applied).toBe(false)
     expect(calls.rpc).toHaveLength(0)
   })
+
+  it('rejects an unknown / foreign Stripe price explicitly, before any database write', async () => {
+    const { db, calls } = fakeDb({ customerUser: 'user-1' })
+    const foreign = stripeSub({ items: { data: [{ price: { id: 'price_foreign' } }] } })
+    await expect(applyStripeSubscription(db, foreign, { nowMs: NOW })).rejects.toThrow('unknown_stripe_price: price_foreign')
+    expect(calls.upserts).toHaveLength(0)
+    expect(calls.rpc).toHaveLength(0)
+  })
+
+  it('rejects a subscription with no price item the same way (no plan to grant)', async () => {
+    const { db, calls } = fakeDb({ customerUser: 'user-1' })
+    await expect(applyStripeSubscription(db, stripeSub({ items: { data: [] } }), { nowMs: NOW })).rejects.toThrow('unknown_stripe_price: none')
+    expect(calls.upserts).toHaveLength(0)
+    expect(calls.rpc).toHaveLength(0)
+  })
+
+  it('a foreign price for an UNMAPPED customer is still the quiet no_user skip (unchanged)', async () => {
+    const { db } = fakeDb()
+    const foreign = stripeSub({ metadata: {}, customer: 'cus_none', items: { data: [{ price: { id: 'price_foreign' } }] } })
+    await expect(applyStripeSubscription(db, foreign, { nowMs: NOW })).resolves.toMatchObject({ applied: false, reason: 'no_user' })
+  })
+
+  it('both configured prices still project normally', async () => {
+    for (const [price, product] of [['price_monthly', 'student_basic_monthly'], ['price_annual', 'student_basic_annual']]) {
+      const { db, calls } = fakeDb({ customerUser: 'user-1' })
+      await applyStripeSubscription(db, stripeSub({ items: { data: [{ price: { id: price } }] } }), { nowMs: NOW })
+      expect(calls.rpc[0].args.p_product_id).toBe(product)
+    }
+  })
 })
 
 describe('buildSubscriptionStatus', () => {
