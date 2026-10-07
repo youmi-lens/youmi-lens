@@ -7,6 +7,7 @@
 import { getSession, getUsername, getQuotaStatus, getSubscriptionStatus, openBillingPortal, signOut } from './auth.js'
 import { esc, toast } from './auth-ui.js'
 import { mins, usd, PRICE } from './plans.js'
+import { resolveAccountEntry } from './checkoutSuccess.js'
 
 const root = () => document.getElementById('account-root')
 function set(html) { const r = root(); if (r) r.innerHTML = html }
@@ -140,7 +141,10 @@ async function load() {
 }
 
 ;(async () => {
-  const session = await getSession()
-  if (!session) { location.replace('/login/?next=/account/'); return }
+  // `?checkout=success` is decided FIRST and never touches the website session: this browser may be signed in as a
+  // different account than the purchaser, so the success page is identity-neutral (see checkoutSuccess.js).
+  const entry = await resolveAccountEntry({ pathname: location.pathname, search: location.search, getSession })
+  if (entry.kind === 'checkout-success') { document.title = 'Subscription activated — Youmi Lens'; set(entry.html); return }
+  if (entry.kind === 'login') { location.replace('/login/?next=/account/'); return }
   load()
 })()

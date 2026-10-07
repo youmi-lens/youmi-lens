@@ -9,6 +9,7 @@
  * Only the right-hand cell varies:  signed out → Log in   ·   signed in → Account
  */
 import { getSession, onAuthChange } from './auth.js'
+import { isCheckoutSuccessAccountRoute } from './checkoutSuccess.js'
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])) }
 
@@ -36,13 +37,16 @@ function visibleNavLinks() {
   return on ? NAV_LINKS : NAV_LINKS.filter(([href]) => href !== '/pricing/')
 }
 
-function render(signedIn, email) {
+function render(signedIn, email, neutral = false) {
   const onPricing = location.pathname.startsWith('/pricing')
   const links = visibleNavLinks().map(([href, label]) => {
     const current = href === '/pricing/' && onPricing
     return `<a href="${href}"${current ? ' aria-current="page" class="is-current"' : ''}>${label}</a>`
   }).join('\n        ')
-  const right = signedIn
+  // Checkout-success route: never show the browser's current account (initial or login state) — it may not be the purchaser.
+  const right = neutral
+    ? `<a class="nav-account" href="/account/">Account</a>`
+    : signedIn
     ? `<a class="nav-account" href="/account/"><span class="av">${esc((email || 'A')[0].toUpperCase())}</span>Account</a>`
     : `<a class="nav-login" href="/login/">Log in</a>`
   return `
@@ -61,6 +65,7 @@ function render(signedIn, email) {
 async function mount() {
   const host = document.getElementById('site-header')
   if (!host) return
+  if (isCheckoutSuccessAccountRoute(location.pathname, location.search)) { host.innerHTML = render(false, '', true); return } // no auth calls, no repaint on sign-in/out
   const paint = (session) => { host.innerHTML = render(Boolean(session), session?.user?.email) }
   paint(await getSession())
   onAuthChange(paint) // update instantly on sign in / out
