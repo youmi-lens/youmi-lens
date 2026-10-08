@@ -1,10 +1,12 @@
 import { isTauri } from '@tauri-apps/api/core'
+import { PRODUCTION_AUTH_SCHEME, buildAuthCallbackUrl, getBuildAuthScheme, isProductionAuthScheme } from './authIdentity'
 
 /**
- * Custom scheme callback (production Tauri default). Must be listed in Supabase → Authentication → URL
- * Configuration → Redirect URLs, and must match `plugins.deep-link.desktop.schemes` in tauri.conf.json.
+ * Production custom scheme callback. Must be listed in Supabase → Authentication → URL Configuration →
+ * Redirect URLs. Other builds derive theirs from the Tauri config (see authIdentity.ts); QA builds use
+ * `lecturecompanion-qa<tag>://auth-callback`, covered by the `lecturecompanion-qa*://auth-callback` entry.
  */
-export const TAURI_AUTH_CALLBACK = 'lecturecompanion://auth-callback'
+export const TAURI_AUTH_CALLBACK = buildAuthCallbackUrl(PRODUCTION_AUTH_SCHEME)
 
 /**
  * HTTP(S) path on the web origin that forwards query + hash to the custom scheme (see TauriAuthBridge).
@@ -31,14 +33,21 @@ function bridgeOriginFromEnv(): string | null {
  * 2. Not Tauri (pure web) → same-origin (Supabase detectSessionInUrl handles callback).
  * 3. Tauri + DEV → localhost bridge (Vite dev server serves /tauri-auth-callback).
  * 4. Tauri + PROD → custom scheme direct (lecturecompanion://auth-callback).
+ * A non-Production build (QA) skips 1 and always returns its own `<scheme>://auth-callback`.
  *
  * NOTE: The envBridge check is intentionally FIRST — before isTauri() — so that production packaged
  * builds always use the Railway HTTPS bridge regardless of whether isTauri() resolves correctly
  * (window.location.origin in a packaged Tauri app is http://tauri.localhost, not a usable redirect).
  */
-export function getAuthRedirectUrl(): string {
+export async function getAuthRedirectUrl(): Promise<string> {
   if (typeof window === 'undefined') {
     return TAURI_AUTH_CALLBACK
+  }
+  // Non-Production desktop builds never use the HTTPS bridge: it forwards to the Production scheme only.
+  // They redirect straight to their own scheme, which no other installed build owns.
+  if (isTauri()) {
+    const scheme = await getBuildAuthScheme()
+    if (!isProductionAuthScheme(scheme)) return buildAuthCallbackUrl(scheme)
   }
   // If an explicit HTTPS bridge origin is configured, always use it — independent of isTauri().
   const envBridge = bridgeOriginFromEnv()

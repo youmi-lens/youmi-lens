@@ -44,43 +44,55 @@ describe('OAuth callback shapes', () => {
     expect(auth.setSession).not.toHaveBeenCalled()
   })
 
-  it('implicit `#access_token&refresh_token` → setSession (NOT exchangeCodeForSession)', async () => {
-    const { client, auth } = makeClient()
+  it('implicit `#access_token&refresh_token` is REJECTED: bearer tokens are never consumed (B2-B PKCE)', async () => {
+    const { client, auth, calls } = makeClient()
     const r = await applySessionFromSupabaseCallbackUrl(
       client,
       'lecturecompanion://auth-callback#access_token=AT&refresh_token=RT&token_type=bearer',
       SRC,
     )
-    expect(r.branch).toBe('set_session_implicit')
-    expect(r.session).toBeTruthy()
-    expect(auth.setSession).toHaveBeenCalledWith({ access_token: 'AT', refresh_token: 'RT' })
+    expect(r.branch).toBe('implicit_rejected')
+    expect(r.error).toBeTruthy()
+    expect(r.session).toBeNull()
+    expect(auth.setSession).not.toHaveBeenCalled()
     expect(auth.exchangeCodeForSession).not.toHaveBeenCalled()
+    expect(auth.verifyOtp).not.toHaveBeenCalled()
+    expect(calls).toEqual([]) // nothing touched Supabase at all
   })
 
-  it('`token_hash` + type → verifyOtp', async () => {
-    const { client, auth } = makeClient()
-    const r = await applySessionFromSupabaseCallbackUrl(
-      client,
-      'lecturecompanion://auth-callback?token_hash=TH&type=recovery',
-      SRC,
-    )
-    expect(r.branch).toBe('verify_token_hash')
-    expect(auth.verifyOtp).toHaveBeenCalledWith({ token_hash: 'TH', type: 'recovery' })
-  })
+  it.each(['signup', 'invite', 'magiclink', 'recovery', 'email_change', 'email'])(
+    '`token_hash` + type=%s is REJECTED: an emailed one-time token has no initiator binding (B2-B.1)',
+    async (type) => {
+      const { client, auth, calls } = makeClient()
+      const r = await applySessionFromSupabaseCallbackUrl(client, `lecturecompanion://auth-callback?token_hash=TH&type=${type}`, SRC)
+      expect(r.branch).toBe('otp_callback_rejected')
+      expect(r.error).toBeTruthy()
+      expect(r.session).toBeNull()
+      expect(auth.verifyOtp).not.toHaveBeenCalled()
+      expect(auth.setSession).not.toHaveBeenCalled()
+      expect(auth.exchangeCodeForSession).not.toHaveBeenCalled()
+      expect(calls).toEqual([])
+    },
+  )
 
-  it('`email` + `token` + type → verifyOtp', async () => {
-    const { client, auth } = makeClient()
+  it('`email` + `token` + type is REJECTED the same way (no silent PKCE bypass)', async () => {
+    const { client, auth, calls } = makeClient()
     const r = await applySessionFromSupabaseCallbackUrl(
       client,
       'lecturecompanion://auth-callback?email=a%40b.com&token=123456&type=email',
       SRC,
     )
-    expect(r.branch).toBe('verify_email_token')
-    expect(auth.verifyOtp).toHaveBeenCalledWith({
-      email: 'a@b.com',
-      token: '123456',
-      type: 'email',
-    })
+    expect(r.branch).toBe('otp_callback_rejected')
+    expect(r.session).toBeNull()
+    expect(auth.verifyOtp).not.toHaveBeenCalled()
+    expect(calls).toEqual([])
+  })
+
+  it('a typed-looking `token` alone (no email, no type) is rejected too', async () => {
+    const { client, calls } = makeClient()
+    const r = await applySessionFromSupabaseCallbackUrl(client, 'lecturecompanion://auth-callback?token=123456', SRC)
+    expect(r.branch).toBe('otp_callback_rejected')
+    expect(calls).toEqual([])
   })
 
   it('provider error short-circuits before any session call', async () => {

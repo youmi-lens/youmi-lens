@@ -36,9 +36,13 @@ async function loadWithEnv(opts: {
   dev: boolean
   tauri: boolean
   origin: string
+  scheme?: string
 }) {
   vi.resetModules()
-  vi.doMock('@tauri-apps/api/core', () => ({ isTauri: () => opts.tauri }))
+  vi.doMock('@tauri-apps/api/core', () => ({
+    isTauri: () => opts.tauri,
+    invoke: async () => opts.scheme ?? 'lecturecompanion',
+  }))
   vi.stubEnv('DEV', opts.dev)
   vi.stubEnv('VITE_AUTH_BRIDGE_ORIGIN', opts.bridgeOrigin ?? '')
   vi.stubGlobal('window', { location: { origin: opts.origin } })
@@ -79,6 +83,29 @@ describe('getAuthRedirectUrl', () => {
     expect(url).toBe('http://localhost:5173/tauri-auth-callback')
     // Not in the dashboard allow-list — OAuth would silently fall back to the Site URL.
     expect(ALLOWLISTED.has(url)).toBe(false)
+  })
+
+  it('QA build ignores the (Production-only) bridge and redirects straight to its own scheme', async () => {
+    for (const [scheme, expected] of [
+      ['lecturecompanion-qa1015', 'lecturecompanion-qa1015://auth-callback'],
+      ['lecturecompanion-qa1016', 'lecturecompanion-qa1016://auth-callback'],
+    ]) {
+      const url = await loadWithEnv({
+        bridgeOrigin: 'https://youmi-lens-production.up.railway.app',
+        dev: false,
+        tauri: true,
+        origin: 'http://tauri.localhost',
+        scheme,
+      })
+      expect(url).toBe(expected)
+      expect(url.startsWith('https://')).toBe(false)
+    }
+  })
+
+  it('a corrupt scheme from the runtime fails closed instead of falling back to Production', async () => {
+    await expect(
+      loadWithEnv({ dev: false, tauri: true, origin: 'http://tauri.localhost', scheme: 'evil' }),
+    ).rejects.toThrow('auth_identity_invalid')
   })
 
   it('plain web uses the page origin', async () => {

@@ -4,6 +4,7 @@ import { isTauri } from '@tauri-apps/api/core'
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link'
 import { AuthContext, type AuthContextValue, type AuthMethodResult } from './authContext'
 import { getAuthRedirectUrl } from './lib/authRedirect'
+import { filterAuthCallbackUrls, getBuildAuthScheme } from './lib/authIdentity'
 import { getSupabase, isSupabaseConfigured } from './lib/supabase'
 import {
   checkEmail as apiCheckEmail,
@@ -15,11 +16,22 @@ import {
   inspectAuthCallbackUrl,
 } from './lib/supabaseDeepLinkAuth'
 import { authTrace, redactUrl } from './lib/authTrace'
+import { signOutDesktop, type SignOutOptions } from './lib/authSignOut'
+import { checkPkceAuthorizeUrl } from './lib/authPkce'
 import {
   mapSignInError,
   mapUpdatePasswordError,
   mapVerifyCodeError,
 } from './lib/authErrors'
+
+/**
+ * What the user sees when a deep-link callback could not be turned into a session. Browser OAuth uses PKCE, so a failed
+ * code exchange (no verifier on this device, expired / already-used code, network error) or a rejected legacy callback
+ * shape is recoverable only by starting sign-in again FROM THIS APP. Never includes the code, the verifier or any token.
+ */
+function deepLinkFailureMessage(): string {
+  return 'Sign-in couldn’t be completed. Please start sign-in again from this app.'
+}
 
 /**
  * Tauri may deliver `deep-link://new-url` as a JSON array of strings, but if anything coerces it to a
@@ -37,6 +49,28 @@ function normalizeDeepLinkUrls(payload: unknown): string[] {
   }
   console.warn('[lc-auth deep-link] unexpected payload shape', typeof payload)
   return []
+}
+
+/**
+ * Deep-link URLs this build may act on: exactly `<this build's scheme>://auth-callback…`. Anything else
+ * (another Youmi Lens build's scheme, wrong host/path, arbitrary `://` strings) is dropped before any
+ * session code runs. Fails closed if the build identity cannot be resolved.
+ */
+async function acceptBuildCallbackUrls(payload: unknown): Promise<string[]> {
+  const candidates = normalizeDeepLinkUrls(payload)
+  if (candidates.length === 0) return []
+  try {
+    const accepted = filterAuthCallbackUrls(candidates, await getBuildAuthScheme())
+    if (accepted.length !== candidates.length) {
+      console.warn('[lc-auth deep-link] rejected callback URL(s) not addressed to this build', {
+        rejected: candidates.length - accepted.length,
+      })
+    }
+    return accepted
+  } catch (e) {
+    console.error('[lc-auth deep-link] build auth identity unresolved; callback dropped', e)
+    return []
+  }
 }
 
 function summarizeDeepLinkPayloadForLog(payload: unknown): {
@@ -132,8 +166,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       if (cancelled) return
       setSession(next)
-      // Supabase emits PASSWORD_RECOVERY after verifyOtp({type:'recovery'}) (typed code or deep
-      // link). The recovery session must not route into AuthenticatedApp until the user finishes
+      // Supabase emits PASSWORD_RECOVERY after verifyOtp({type:'recovery'}) (the typed code — a recovery
+      // deep link is no longer accepted, see supabaseDeepLinkAuth). The recovery session must not route into AuthenticatedApp until the user finishes
       // setting a new password; cleared on SIGNED_OUT which follows updateUser({password}).
       if (event === 'PASSWORD_RECOVERY') {
         setInPasswordRecovery(true)
@@ -187,7 +221,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (isTauri()) {
         try {
           const start = await getCurrent()
-          const urls = normalizeDeepLinkUrls(start)
+          const urls = await acceptBuildCallbackUrls(start)
           // Cold-start path: macOS launched the app FROM the deep link, so the URL is
           // waiting in getCurrent() rather than arriving via the onOpenUrl listener.
           authTrace('deeplink.received', {
@@ -227,6 +261,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 }
               } else {
                 console.error('[Auth] setSession failure:', applied.error, { branch: applied.branch })
+                if (!cancelled) setDeepLinkAuthError(deepLinkFailureMessage())
               }
             }
             if (anyOk) await afterDeepLinkAuthSucceededUiPolish()
@@ -279,7 +314,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         unlisten = await onOpenUrl((payload) => {
           void (async () => {
-            const urls = normalizeDeepLinkUrls(payload)
+            const urls = await acceptBuildCallbackUrls(payload)
             console.info('[lc-auth deep-link] onOpenUrl received', summarizeDeepLinkPayloadForLog(payload), {
               urls: urls.map((u) => inspectAuthCallbackUrl(u)),
             })
@@ -323,9 +358,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               } else {
                 console.error('[Auth] setSession failure:', applied.error, { branch: applied.branch })
                 console.error('[lc-auth deep-link] onOpenUrl apply failed', applied.error)
-                setDeepLinkAuthError(
-                  'Sign-in link expired or already used. Please request a new sign-in link.',
-                )
+                setDeepLinkAuthError(deepLinkFailureMessage())
               }
             }
             const { data } = await supabase.auth.getSession()
@@ -374,7 +407,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setDeepLinkAuthError(null)
       const desktop = typeof window !== 'undefined' && isTauri()
-      const redirectTo = getAuthRedirectUrl()
+      let redirectTo: string
+      try {
+        redirectTo = await getAuthRedirectUrl()
+      } catch (e) {
+        console.error('[Auth] build auth identity unresolved', e)
+        return { error: 'Could not start sign-in. Please try again.' }
+      }
       authTrace('oauth.click', { provider, desktop, redirectTo: redactUrl(redirectTo) })
       try {
         const { data, error } = await supabase.auth.signInWithOAuth({
@@ -399,6 +438,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (!data.url) {
             return { error: 'Could not start sign-in. Please try again.' }
           }
+          // PKCE must really be S256. supabase-js silently downgrades to `plain` when WebCrypto is missing, which would put
+          // the verifier itself in the browser URL — refuse to open the browser rather than start a weaker flow.
+          const pkce = checkPkceAuthorizeUrl(data.url)
+          if (!pkce.ok) {
+            console.error('[Auth] OAuth authorize URL is not S256 PKCE; sign-in not started', pkce.reason)
+            authTrace('oauth.pkce_guard', { provider, ok: false, reason: pkce.reason })
+            return { error: 'Could not start sign-in securely on this device. Please try again or use email and password.' }
+          }
+          authTrace('oauth.pkce_guard', { provider, ok: true })
           const { open } = await import('@tauri-apps/plugin-shell')
           await open(data.url)
           authTrace('oauth.browser_open', { provider, ok: true })
@@ -426,7 +474,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       const trimmed = email.trim()
       if (!trimmed) return { error: 'Enter your email address.' }
-      const redirectUrl = getAuthRedirectUrl()
+      let redirectUrl: string
+      try {
+        redirectUrl = await getAuthRedirectUrl()
+      } catch (e) {
+        console.error('[Auth] build auth identity unresolved', e)
+        return { error: 'Could not start sign-in. Please try again.' }
+      }
       console.info('[Auth] signInWithOtp redirectTo:', redirectUrl)
       console.info('[Auth] isTauri:', isTauri())
       console.info('[Auth] mode:', import.meta.env.MODE)
@@ -604,20 +658,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * the button's busy state cleared instantly, and the user was left looking at a
    * signed-in app with no indication anything had gone wrong.
    *
-   * Local state is cleared even when the network call fails: Supabase removes the
-   * persisted session before contacting the server, so the user is genuinely signed
-   * out on this device either way. `scope: 'local'` is NOT used — a normal sign-out
-   * should still revoke the refresh token server-side when reachable.
+   * Scope: a normal sign-out ends THIS Desktop session only (`scope: 'local'`, see
+   * lib/authSignOut.ts). `local` still revokes this session's refresh token on the
+   * server (POST /logout?scope=local) and leaves the account's other sessions alone;
+   * supabase-js's default `global` would sign the user out of every build and device.
+   * Only an explicit `{ scope: 'global' }` (password-reset confirmation) widens it.
+   *
+   * Local state is cleared even when the network call fails (network error, HTTP 5xx,
+   * expired token): supabase-js 2.101.1 still removes the persisted session and emits
+   * SIGNED_OUT, so the message returned on error is accurate. Pinned by
+   * lib/authSignOut.test.ts against the real client.
    */
-  const signOut = useCallback(async (): Promise<AuthMethodResult> => {
-    if (!supabase) return { error: null }
-    const { error } = await supabase.auth.signOut()
-    if (error) {
-      console.error('[Auth] signOut failed', error.message)
-      return { error: 'Could not reach the server, but you have been signed out on this device.' }
-    }
-    return { error: null }
-  }, [supabase])
+  const signOut = useCallback(
+    async (options?: SignOutOptions): Promise<AuthMethodResult> => signOutDesktop(supabase, options),
+    [supabase],
+  )
 
   const clearDeepLinkAuthError = useCallback(() => {
     setDeepLinkAuthError(null)

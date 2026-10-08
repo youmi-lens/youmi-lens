@@ -27,6 +27,7 @@ const INTERESTING = [
 export type AuthTraceStep =
   | 'oauth.click'
   | 'oauth.authorize_url'
+  | 'oauth.pkce_guard'
   | 'oauth.browser_open'
   | 'deeplink.received'
   | 'deeplink.apply.start'

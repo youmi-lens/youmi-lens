@@ -362,7 +362,8 @@ pub fn run() {
       focus_main_window,
       minimize_main_window,
       resize_overlay_compact,
-      resize_overlay_expanded
+      resize_overlay_expanded,
+      auth_callback_scheme
     ])
     .setup(|app| {
       #[cfg(all(not(target_os = "android"), not(target_os = "ios")))]
@@ -476,6 +477,29 @@ pub fn run() {
     });
 }
 
+/// This build's deep-link scheme: the single scheme in `plugins.deep-link.desktop.schemes` of the config it
+/// was packaged with (the same value the plugin registers in CFBundleURLSchemes). `None` unless exactly one.
+fn configured_auth_scheme<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+  let schemes = app
+    .config()
+    .plugins
+    .0
+    .get("deep-link")?
+    .get("desktop")?
+    .get("schemes")?
+    .as_array()?;
+  match schemes.as_slice() {
+    [only] => only.as_str().map(str::to_string),
+    _ => None,
+  }
+}
+
+/// Lets the frontend build its callback URL from the same source Rust uses (no duplicated constant).
+#[tauri::command]
+fn auth_callback_scheme<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+  configured_auth_scheme(&app).ok_or_else(|| "auth_scheme_not_configured".to_string())
+}
+
 /// Bring the main webview to the foreground after a deep link or second-instance handoff.
 ///
 /// On macOS, `RunEvent::Opened` delivers URLs to the **already-running** app without going through
@@ -501,7 +525,10 @@ fn activate_main_for_auth_callback<R: Runtime>(app: &tauri::AppHandle<R>) {
 #[cfg(target_os = "macos")]
 fn emit_forwarded_deep_link_urls<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) {
   use tauri::Emitter;
-  let urls = collect_lecturecompanion_urls_from_args(args);
+  let Some(scheme) = configured_auth_scheme(app) else {
+    return;
+  };
+  let urls = collect_scheme_urls_from_args(args, &scheme);
   if urls.is_empty() {
     return;
   }
@@ -512,16 +539,18 @@ fn emit_forwarded_deep_link_urls<R: tauri::Runtime>(app: &tauri::AppHandle<R>, a
   let _ = app.emit("deep-link://new-url", urls);
 }
 
+/// Collect only URLs of this build's own scheme (`<scheme>://`). Another build's scheme is never collected.
 #[cfg(target_os = "macos")]
-fn collect_lecturecompanion_urls_from_args(args: &[String]) -> Vec<String> {
+fn collect_scheme_urls_from_args(args: &[String], scheme: &str) -> Vec<String> {
+  let marker = format!("{scheme}://");
   let mut out = Vec::new();
   for arg in args {
     let arg = arg.trim();
-    if arg.starts_with("lecturecompanion://") {
+    if arg.starts_with(&marker) {
       out.push(arg.to_string());
       continue;
     }
-    if let Some(i) = arg.find("lecturecompanion://") {
+    if let Some(i) = arg.find(&marker) {
       let rest = arg[i..].trim_end();
       if !rest.is_empty() {
         out.push(rest.to_string());
@@ -529,4 +558,60 @@ fn collect_lecturecompanion_urls_from_args(args: &[String]) -> Vec<String> {
     }
   }
   out
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod auth_scheme_tests {
+  use super::collect_scheme_urls_from_args;
+
+  fn args(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+  }
+
+  #[test]
+  fn production_collects_only_its_own_scheme() {
+    let a = args(&[
+      "/app",
+      "lecturecompanion://auth-callback#access_token=x",
+      "lecturecompanion-qa1015://auth-callback#access_token=y",
+    ]);
+    assert_eq!(
+      collect_scheme_urls_from_args(&a, "lecturecompanion"),
+      vec!["lecturecompanion://auth-callback#access_token=x".to_string()]
+    );
+  }
+
+  #[test]
+  fn qa_collects_only_its_own_scheme() {
+    let a = args(&[
+      "lecturecompanion://auth-callback",
+      "lecturecompanion-qa1015://auth-callback?code=1",
+      "lecturecompanion-qa1016://auth-callback?code=2",
+      "lecturecompanion-qa10150://auth-callback",
+    ]);
+    assert_eq!(
+      collect_scheme_urls_from_args(&a, "lecturecompanion-qa1015"),
+      vec!["lecturecompanion-qa1015://auth-callback?code=1".to_string()]
+    );
+    assert_eq!(
+      collect_scheme_urls_from_args(&a, "lecturecompanion-qa1016"),
+      vec!["lecturecompanion-qa1016://auth-callback?code=2".to_string()]
+    );
+  }
+
+  #[test]
+  fn unrelated_and_empty_args_collect_nothing() {
+    let a = args(&["--flag", "https://evil.example/x", "evil://auth-callback", ""]);
+    assert!(collect_scheme_urls_from_args(&a, "lecturecompanion").is_empty());
+    assert!(collect_scheme_urls_from_args(&[], "lecturecompanion-qa1015").is_empty());
+  }
+
+  #[test]
+  fn embedded_marker_keeps_production_behaviour() {
+    let a = args(&["open lecturecompanion://auth-callback?x=1  "]);
+    assert_eq!(
+      collect_scheme_urls_from_args(&a, "lecturecompanion"),
+      vec!["lecturecompanion://auth-callback?x=1".to_string()]
+    );
+  }
 }

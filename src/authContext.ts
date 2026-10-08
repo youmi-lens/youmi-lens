@@ -1,6 +1,7 @@
 import { createContext } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import type { CheckEmailResult } from './lib/signupCodeApi'
+import type { SignOutOptions } from './lib/authSignOut'
 
 export type AuthMethodResult = { error: string | null }
 
@@ -57,8 +58,11 @@ export type AuthContextValue = {
   verifyPasswordResetCode: (email: string, code: string) => Promise<AuthMethodResult>
   /** Forgot Password step 3: update the password on the current (recovery) session. */
   updatePassword: (newPassword: string) => Promise<AuthMethodResult>
-  /** Always resolves (never throws), like the Website's signOut. */
-  signOut: () => Promise<AuthMethodResult>
+  /**
+   * Always resolves (never throws), like the Website's signOut. Signs out THIS Desktop session only; pass
+   * `{ scope: 'global' }` solely for security flows that must end every session of the account.
+   */
+  signOut: (options?: SignOutOptions) => Promise<AuthMethodResult>
   /** Non-null when a deep-link auth callback was received but the token exchange failed. */
   deepLinkAuthError: string | null
   clearDeepLinkAuthError: () => void

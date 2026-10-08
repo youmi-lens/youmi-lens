@@ -20,6 +20,14 @@ export function getSupabase(): SupabaseClient | null {
     const desktop = typeof window !== 'undefined' && isTauri()
     client = createClient(url!, anon!, {
       auth: {
+        /**
+         * PKCE, not the implicit default. The OAuth callback carries an authorization code, not access/refresh tokens, and
+         * only the instance holding the matching verifier can exchange it. supabase-js keeps that verifier in the default
+         * storage (this build's own WebView localStorage, key `sb-<ref>-auth-token-code-verifier`), so it survives an app
+         * restart (cold-start callback) and is NOT shared with other installed builds. Do not override `storage` /
+         * `storageKey`: that would sign every existing user out and could share a verifier between builds.
+         */
+        flowType: 'pkce',
         persistSession: true,
         autoRefreshToken: true,
         /** Deep-link auth uses `lecturecompanion://…`, not `window.location`; avoid init-time URL parsing fighting manual handlers. */

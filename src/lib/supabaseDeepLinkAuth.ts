@@ -1,17 +1,8 @@
 import type { Session, SupabaseClient } from '@supabase/supabase-js'
 import { authTrace, redactUrl } from './authTrace'
+import { isPlausibleAuthCode } from './authPkce'
 
 const LOG = '[lc-auth deep-link]'
-
-/** Supabase email-link redirects may use `verifyOtp({ token_hash, type })` instead of PKCE `code`. */
-const EMAIL_OTP_TYPES = new Set([
-  'signup',
-  'invite',
-  'magiclink',
-  'recovery',
-  'email_change',
-  'email',
-])
 
 function parseQueryOnly(href: string): Record<string, string> {
   const url = new URL(href)
@@ -111,9 +102,11 @@ export function inspectAuthCallbackUrl(href: string): {
 export type ApplySessionBranch =
   | 'oauth_error'
   | 'exchange_code'
-  | 'verify_token_hash'
-  | 'verify_email_token'
-  | 'set_session_implicit'
+  | 'invalid_code'
+  /** An implicit-flow callback (bearer access/refresh tokens in the URL). Never consumed: see applySessionInner. */
+  | 'implicit_rejected'
+  /** An emailed one-time-token callback (`token_hash`, or `email` + `token`). Never consumed: see applySessionInner. */
+  | 'otp_callback_rejected'
   | 'no_usable_params'
   | 'parse_error'
 
@@ -125,8 +118,22 @@ export type ApplySessionResult = {
 }
 
 /**
- * Completes Supabase auth from a redirect URL (magic link / OAuth) delivered via Tauri deep link.
- * Supports PKCE (`code`), email `token_hash` + `type`, `email` + `token` + `type`, and implicit hash tokens.
+ * Completes Supabase auth from a redirect URL delivered via Tauri deep link (Apple / Google browser OAuth).
+ *
+ * The ONLY credential a callback can carry is a PKCE authorization `code`. Accepted order:
+ *   1. a provider/Supabase `error`  → surfaced, nothing consumed
+ *   2. PKCE `code`                  → exchangeCodeForSession, which needs the verifier THIS build stored when it started
+ *                                      the flow; a code issued to any other build/instance fails without a session
+ * REJECTED (no session, no Supabase call of any kind):
+ *   - implicit bearer tokens (`access_token` / `refresh_token`)      → 'implicit_rejected'
+ *   - emailed one-time tokens (`token_hash`, or `email` + `token`)    → 'otp_callback_rejected'
+ * Those shapes carry no initiator binding: whichever installed build receives the URL could turn them into a session,
+ * so a forged or misrouted callback would sign it in as an arbitrary account. No Desktop flow generates them — password
+ * sign-in, signup (backend code, then password) and password recovery (typed code, no redirect) use no callback, and the
+ * typed email OTP is verified in-app by AuthProvider.verifyPasswordResetCode, never from a URL.
+ *
+ * A callback that carries a `code` is exchanged on that code alone — any other credential in the same URL is ignored,
+ * never consumed — so a mixed URL cannot steer us onto an unbound path.
  */
 export async function applySessionFromSupabaseCallbackUrl(
   supabase: SupabaseClient,
@@ -173,48 +180,13 @@ async function applySessionInner(
     }
   }
 
-  const token_hash = params.token_hash
-  const typeRaw = params.type
-  if (token_hash && typeRaw && EMAIL_OTP_TYPES.has(typeRaw)) {
-    console.info(`${LOG} branch: verifyOtp(token_hash) type=${typeRaw} [${meta.source}]`)
-    const { data, error } = await supabase.auth.verifyOtp({
-      token_hash,
-      type: typeRaw as 'signup' | 'invite' | 'magiclink' | 'recovery' | 'email_change' | 'email',
-    })
-    if (error) {
-      console.error(`${LOG} verifyOtp(token_hash) FAILED`, error.message)
-    } else {
-      console.info(`${LOG} verifyOtp(token_hash) OK hasSession=${Boolean(data.session)}`)
+  // PKCE. The code is exchanged against the verifier this build stored when it started the flow; a code issued to a
+  // different build/instance has no matching verifier here and the exchange fails without establishing a session.
+  if (params.code !== undefined) {
+    if (!isPlausibleAuthCode(params.code)) {
+      console.warn(`${LOG} branch: invalid_code (malformed code; not sent to Supabase) [${meta.source}]`)
+      return { error: 'Invalid sign-in callback', branch: 'invalid_code', session: null }
     }
-    return {
-      error: error?.message ?? null,
-      branch: 'verify_token_hash',
-      session: data?.session ?? null,
-    }
-  }
-
-  const email = params.email
-  const token = params.token
-  if (email && token && typeRaw && EMAIL_OTP_TYPES.has(typeRaw)) {
-    console.info(`${LOG} branch: verifyOtp(email+token) type=${typeRaw} [${meta.source}]`)
-    const { data, error } = await supabase.auth.verifyOtp({
-      email,
-      token,
-      type: typeRaw as 'signup' | 'invite' | 'magiclink' | 'recovery' | 'email_change' | 'email',
-    })
-    if (error) {
-      console.error(`${LOG} verifyOtp(email+token) FAILED`, error.message)
-    } else {
-      console.info(`${LOG} verifyOtp(email+token) OK hasSession=${Boolean(data.session)}`)
-    }
-    return {
-      error: error?.message ?? null,
-      branch: 'verify_email_token',
-      session: data?.session ?? null,
-    }
-  }
-
-  if (params.code) {
     console.info(`${LOG} branch: exchangeCodeForSession (PKCE code present) [${meta.source}]`)
     const { data, error } = await supabase.auth.exchangeCodeForSession(params.code)
     if (error) {
@@ -229,20 +201,23 @@ async function applySessionInner(
     }
   }
 
-  const access_token = params.access_token
-  const refresh_token = params.refresh_token
-  if (access_token && refresh_token) {
-    console.info(`${LOG} branch: setSession (implicit access_token + refresh_token) [${meta.source}]`)
-    const { data, error } = await supabase.auth.setSession({ access_token, refresh_token })
-    if (error) {
-      console.error(`${LOG} setSession FAILED`, error.message)
-    } else {
-      console.info(`${LOG} setSession OK hasSession=${Boolean(data.session)}`)
-    }
+  if (params.token_hash || params.token) {
+    // One-time email tokens in a URL: never consumed, never logged (`type` is only a hint and is not trusted either).
+    console.warn(`${LOG} branch: otp_callback_rejected (emailed-token callback not accepted) [${meta.source}]`)
     return {
-      error: error?.message ?? null,
-      branch: 'set_session_implicit',
-      session: data?.session ?? null,
+      error: 'This sign-in link is no longer supported',
+      branch: 'otp_callback_rejected',
+      session: null,
+    }
+  }
+
+  if (params.access_token || params.refresh_token) {
+    // Bearer tokens in a URL: never consumed, never logged. (Legacy implicit links sent before PKCE simply stop working.)
+    console.warn(`${LOG} branch: implicit_rejected (bearer-token callback not accepted) [${meta.source}]`)
+    return {
+      error: 'This sign-in link is no longer supported',
+      branch: 'implicit_rejected',
+      session: null,
     }
   }
 

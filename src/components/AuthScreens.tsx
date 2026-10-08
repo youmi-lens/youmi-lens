@@ -873,9 +873,11 @@ function ResetScreen({
       // without this the deep-link entry path would fall straight back to sign-in
       // instead of showing the confirmation.
       onClaimView()
-      // Clear the recovery session so the user must sign in with the new password.
+      // Clear the recovery session so the user must sign in with the new password. A password reset is
+      // security-sensitive, so this one deliberately keeps ending EVERY session of the account (global) —
+      // unlike a normal Sign out, which is local. Do not "unify" the two.
       try {
-        await auth.signOut()
+        await auth.signOut({ scope: 'global' })
       } catch {
         /* a failed signOut must not block the confirmation */
       }
