@@ -53,15 +53,19 @@ describe('LectureDetailPage distinguishes fetch failure from genuinely absent co
     expect(html).toContain('Try again')
   })
 
+  // A lecture the server finished with nothing to show (e.g. silent audio): there
+  // is no job left, so the tabs and their honest empty copy are the right body.
+  const finishedEmpty: Recording = { ...recording, aiStatus: 'done' }
+
   it('a lecture that genuinely has no summary yet still shows the existing not-generated copy', () => {
-    const html = render(null, { detailLoadFailed: false })
+    const html = render(null, { recording: finishedEmpty, detailLoadFailed: false })
     expect(html).toContain('No summary yet')
     expect(html).not.toContain('Couldn’t load this content')
   })
 
   it('recovers to normal empty-state rendering once detailLoadFailed clears (successful retry)', () => {
     const failed = render(null, { detailLoadFailed: true })
-    const recovered = render(null, { detailLoadFailed: false })
+    const recovered = render(null, { recording: finishedEmpty, detailLoadFailed: false })
     expect(failed).toContain('Couldn’t load this content')
     expect(recovered).not.toContain('Couldn’t load this content')
     expect(recovered).toContain('No summary yet')
@@ -75,10 +79,13 @@ describe('LectureDetailPage distinguishes fetch failure from genuinely absent co
   it('successfully loaded content with a real summary renders normally regardless of detailLoadFailed', () => {
     const detail: RecordingDetail = {
       ...recording,
+      aiStatus: 'done',
+      transcript: 'The lecture covered gradients.',
       summaryEn: '## Overview\nThe lecture covered gradients.',
       storagePath: 'u1/r1.webm',
     }
-    const html = render(detail, { detailLoadFailed: false })
+    // Persisted outputs win: even a failed row fetch must not hide a finished result.
+    const html = render(detail, { detailLoadFailed: true })
     expect(html).toContain('Overview')
     expect(html).not.toContain('Couldn’t load this content')
     expect(html).not.toContain('No summary yet')
@@ -124,5 +131,78 @@ describe('the audio section always reaches a truthful terminal state', () => {
     const html = render(detail, { audioUrl: 'https://example.com/signed.webm', detailLoadFailed: false })
     expect(html).not.toContain('Loading audio')
     expect(html).not.toContain('not available')
+  })
+})
+
+/**
+ * Production incident 2026-10-04 — lecture 4e606f1d…: 2:17 of audio saved,
+ * ai_status='pending', transcript NULL, summary NULL. The page read
+ * "Ready / No summary yet / A summary is written once the transcript is ready"
+ * while nothing was ever going to process it.
+ */
+describe('LectureDetailPage never says Ready over missing outputs (2026-10-04 incident)', () => {
+  const pendingDetail: RecordingDetail = {
+    ...recording,
+    aiStatus: 'pending',
+    transcript: null,
+    summaryEn: null,
+    summaryZh: null,
+  }
+
+  function badge(html: string): string {
+    return html.match(/<span class="v2-badge" data-status="([^"]+)">([^<]*)</)?.slice(1, 3).join('|') ?? ''
+  }
+
+  it('shows Processing — not Ready — for saved audio whose hosted AI is still pending', () => {
+    const html = render(pendingDetail)
+    expect(badge(html)).toBe('processing|Processing')
+    expect(html).not.toContain('data-status="ready"')
+  })
+
+  it('says the transcript is being made, instead of the stale "written once the transcript is ready"', () => {
+    const html = render(pendingDetail)
+    expect(html).not.toContain('A summary is written once the transcript is ready.')
+  })
+
+  it('shows Ready only once the transcript and a summary exist', () => {
+    const html = render({
+      ...pendingDetail,
+      aiStatus: 'done',
+      transcript: 'The lecture began.',
+      summaryEn: '## Overview\nGradients.',
+    })
+    expect(badge(html)).toBe('ready|Ready')
+  })
+
+  it('shows an explicit, retryable failure when processing could not be started', () => {
+    const html = render(pendingDetail, { processingFailed: true })
+    expect(badge(html)).toBe('failed|Processing failed')
+    expect(html).toContain('Your recording is safe. The transcript and summary couldn’t be generated.')
+    expect(html).toContain('Try again')
+    expect(html).not.toContain('data-status="ready"')
+  })
+
+  it('shows the same failure for a job the server marked failed', () => {
+    const html = render({ ...pendingDetail, aiStatus: 'failed' })
+    expect(badge(html)).toBe('failed|Processing failed')
+    expect(html).toContain('Try again')
+  })
+
+  it('keeps the audio player available while processing or failed — audio durability is independent of AI', () => {
+    for (const extra of [{}, { processingFailed: true }]) {
+      const html = render(pendingDetail, { audioUrl: 'blob:audio', ...extra })
+      expect(html).toContain('<audio')
+    }
+  })
+
+  it('does not apply to local-only / own-key lectures, where audio is the whole product', () => {
+    const html = render(pendingDetail, { aiExpected: false })
+    expect(badge(html)).toBe('ready|Ready')
+  })
+
+  it('in flight states are Processing, never Ready', () => {
+    for (const aiStatus of ['queued', 'transcribing', 'summarizing'] as const) {
+      expect(badge(render({ ...pendingDetail, aiStatus }))).toBe('processing|Processing')
+    }
   })
 })

@@ -1,3 +1,5 @@
+import { languageScript, type ContentLanguageCode } from './contentLanguages'
+
 /** Strip CJK / Japanese / Korean from EN caption source (same rules as LiveEngine translate path). */
 export function sanitizeEnglishForZhTranslate(text: string): string {
   return text
@@ -71,17 +73,57 @@ const REJECTED_TRANSLATION_PAYLOAD_HINTS = new Set([
   'youmi ai setup is not available yet.',
 ])
 
+/** A backend / client error token that must never be shown as translation text. */
+export function isRejectedTranslationToken(text: string): boolean {
+  return REJECTED_TRANSLATION_PAYLOAD_HINTS.has(text.trim().toLowerCase())
+}
+
 export function normalizeZhPayloadOrReject(raw: string, translateTarget: 'zh' | 'en' | 'off'): string | null {
   if (translateTarget === 'off') return raw.trim() || null
   const t = raw.trim()
   if (!t) return null
   const hintKey = t.toLowerCase()
   if (REJECTED_TRANSLATION_PAYLOAD_HINTS.has(hintKey)) return null
-  if (isGarbledMixedScriptLine(t)) return null
   if (translateTarget === 'zh') {
+    if (isGarbledMixedScriptLine(t)) return null
     if (!isZhTranslationSlotText(t)) return null
     return t
   }
-  if (!isEnTranslationSlotText(t)) return null
-  return t
+  // English target. This used to refuse ANY Han character, which was right while
+  // English was only ever the source. Now a Chinese lecture is translated INTO
+  // English, and a correct English line can still carry a Chinese proper noun
+  // ("Professor 李 said hello"); rejecting it would blank that sentence's
+  // translation. What must still be refused is a line that is mostly Chinese —
+  // the model handing the source back untranslated.
+  return isMostlyHan(t) ? null : t
+}
+
+/** More than a third of the letters are Han: not an English line with a name in it. */
+function isMostlyHan(text: string): boolean {
+  const han = (text.match(/\p{Script=Han}/gu) ?? []).length
+  if (han === 0) return false
+  const letters = (text.match(/[\p{L}]/gu) ?? []).length
+  return han / Math.max(letters, 1) > 0.34
+}
+
+/* ── Language-aware primary captions ─────────────────────────────────────────
+   The rules above were written for ONE spoken language: English captions may not
+   contain Han, kana or hangul, and a Latin word beside Han is "garbage". Applied
+   to a Chinese, Japanese or Korean lecture they would discard every caption, and
+   in a Chinese lecture an English term in the middle of a sentence ("用 gradient
+   descent 优化") is perfectly normal. So the checks follow the spoken language's
+   script. Latin-script languages keep EXACTLY the existing English behaviour. */
+
+
+/** A spoken-language caption payload: accepted, cleaned, or rejected. */
+export function normalizePrimaryPayloadOrReject(raw: string, source: ContentLanguageCode): string | null {
+  if (languageScript(source) === 'latin') return normalizeEnglishPrimaryPayloadOrReject(raw)
+  const t = raw.replace(/\s+/g, ' ').trim()
+  return t || null
+}
+
+/** The text sent to live translation. Latin sources strip stray CJK exactly as before. */
+export function sanitizeSourceForTranslate(text: string, source: ContentLanguageCode): string {
+  if (languageScript(source) === 'latin') return sanitizeEnglishForZhTranslate(text)
+  return text.replace(/\s+/g, ' ').trim()
 }

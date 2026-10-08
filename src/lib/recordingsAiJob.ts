@@ -11,19 +11,40 @@ type ProcessRecordingErrBody = {
   usingServiceRoleForRecordings?: boolean
 }
 
+/**
+ * How long the client waits for the enqueue answer. The server answers in 1–4s
+ * normally, but when its own database calls stall (seen 2026-10-04) the socket
+ * would otherwise hang indefinitely and the lecture would sit on "Processing"
+ * with nothing in flight. A timeout is thrown, which the caller treats as a
+ * transient failure worth retrying — the server dedupes a repeat.
+ */
+export const REQUEST_AI_TIMEOUT_MS = 45_000
+
 export async function requestHostedRecordingAi(opts: {
   accessToken: string
   recordingId: string
-}): Promise<{ ok: true } | { ok: false; message: string; debug?: ProcessRecordingErrBody }> {
+}): Promise<{ ok: true } | { ok: false; message: string; debug?: ProcessRecordingErrBody; status: number }> {
   console.warn('[process-recording] start', JSON.stringify({ recordingId: opts.recordingId }))
-  const res = await fetch(`${getAiApiBase()}/process-recording`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${opts.accessToken}`,
-    },
-    body: JSON.stringify({ recordingId: opts.recordingId }),
-  })
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), REQUEST_AI_TIMEOUT_MS)
+  let res: Response
+  try {
+    res = await fetch(`${getAiApiBase()}/process-recording`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${opts.accessToken}`,
+      },
+      body: JSON.stringify({ recordingId: opts.recordingId }),
+      signal: controller.signal,
+    })
+  } catch (err) {
+    throw err instanceof Error && err.name === 'AbortError'
+      ? new Error('Youmi AI did not answer in time.')
+      : err
+  } finally {
+    clearTimeout(timer)
+  }
 
   let bodySnippet: unknown
   try {
@@ -64,5 +85,5 @@ export async function requestHostedRecordingAi(opts: {
     /* use default */
   }
   console.warn('[process-recording] enqueue_failed', JSON.stringify({ recordingId: opts.recordingId, message }))
-  return { ok: false, message, debug }
+  return { ok: false, message, debug, status: res.status }
 }

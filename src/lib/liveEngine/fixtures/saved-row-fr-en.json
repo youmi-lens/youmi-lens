@@ -1,0 +1,13 @@
+{
+ "ai_status": "done",
+ "ai_error": null,
+ "source_language": "fr",
+ "translation_language": "en",
+ "transcript": "Aujourd'hui, nous allons étudier les algorithmes de tri，d'abord le triabul qui compare les éléments voisins，ensuite le tri rapide qui est généralement beaucoup plus efficace，enfin nous comparons la complexité des trois méthodes.",
+ "source_summary": "## Plan\nLe cours aborde les algorithmes de tri, en commençant par le tri à bulles, qui compare les éléments voisins, puis le tri rapide, généralement bien plus efficace, et enfin la comparaison de la complexité des trois méthodes.\n\n## Termes clés\n- Tri à bulles\n- Tri rapide\n- Complexité\n\n## Points clés\nLe tri à bulles est une méthode simple mais peu efficace. Le tri rapide est beaucoup plus performant. La comparaison des complexités permet d'évaluer l'efficacité relative des algorithmes.",
+ "translated_summary": "## Outline\nThe course covers sorting algorithms, starting with bubble sort, which compares adjacent elements, then quicksort, generally much more efficient, and finally comparing the complexity of the three methods.\n\n## Key terms\n- Bubble sort\n- Quicksort\n- Complexity\n\n## Takeaways\nBubble sort is a simple but inefficient method. Quicksort is significantly more efficient. Comparing complexities allows for evaluating the relative efficiency of algorithms.",
+ "translated_transcript": "Today, we will study sorting algorithms: first, bubble sort, which compares neighboring elements; then, quicksort, which is generally much more efficient; finally, we will compare the complexity of the three methods.",
+ "summary_en": "## Outline\nThe course covers sorting algorithms, starting with bubble sort, which compares adjacent elements, then quicksort, generally much more efficient, and finally comparing the complexity of the three methods.\n\n## Key terms\n- Bubble sort\n- Quicksort\n- Complexity\n\n## Takeaways\nBubble sort is a simple but inefficient method. Quicksort is significantly more efficient. Comparing complexities allows for evaluating the relative efficiency of algorithms.",
+ "summary_zh": null,
+ "transcript_zh": null
+}

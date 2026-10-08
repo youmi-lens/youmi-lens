@@ -1,9 +1,9 @@
-import { contentLanguageLabel } from '../lib/contentLanguages'
 import { NEUTRAL_COURSE_IDENTITY, type CourseIdentity } from '../lib/courses/coursePresets'
 import type { LanguagePreferences } from '../lib/languagePreferences'
 import { openRecordLanguageSettings, runRecordHomeStart } from '../lib/recordHomeActions'
 import { useLanguagePreferences } from '../languagePreferencesContext'
 import { CourseIconTile } from './CourseIconTile'
+import { LectureLanguageFields } from './LectureLanguageFields'
 
 export type RecentLectureItem = {
   id: string
@@ -70,9 +70,7 @@ export function RecordHome({
   onViewAll: () => void
   onOpenLecture: (id: string) => void
 }) {
-  const { t } = useLanguagePreferences()
-  const modeLabel =
-    preferences.languageMode === 'bilingual' ? t('record.bilingual') : t('record.captionsOnly')
+  const { t, setPreference } = useLanguagePreferences()
   const visibleRecent = recentLectures.slice(0, 3)
   // An empty `course` here means the account genuinely has zero Courses yet
   // (see reconcileCourseSelection's 'clear' action) — never a real lecture
@@ -141,20 +139,19 @@ export function RecordHome({
           </button>
         </div>
 
-        <div className="record-home-v2__summary" aria-label="Current language preferences">
-          {/* Read-only. Changing the source is Settings' job — no configuration
-              wall returns to Record Home. */}
-          {audioSourceLabel ? <strong>{audioSourceLabel}</strong> : null}
-          <span>
-            {audioSourceLabel ? '· ' : ''}
-            {contentLanguageLabel(preferences.captionLanguage)} →{' '}
-            {contentLanguageLabel(preferences.translationLanguage)}
-          </span>
-          <span>· {modeLabel}</span>
-          <button type="button" onClick={() => openRecordLanguageSettings(onOpenSettings)}>
-            {t('record.changeSettings')}
-          </button>
+        {/* The same rows as Settings → App language, not a second design. */}
+        <div className="settings-v2__group record-home-v2__languages">
+          <LectureLanguageFields preferences={preferences} onPreferenceChange={setPreference} />
         </div>
+
+        {audioSourceLabel ? (
+          <div className="record-home-v2__summary" aria-label="Audio source">
+            <strong>{audioSourceLabel}</strong>
+            <button type="button" onClick={() => openRecordLanguageSettings(onOpenSettings)}>
+              {t('record.changeSettings')}
+            </button>
+          </div>
+        ) : null}
       </section>
 
       {visibleRecent.length > 0 ? (

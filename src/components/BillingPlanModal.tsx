@@ -15,7 +15,12 @@ import {
   type BillingReturnRefreshFeedback,
 } from '../hooks/useBillingReturnRefresh'
 import type { BillingPlanCode } from '../lib/billing/billingClient'
-import type { BillingState, NormalizedBillingInterval, NormalizedQuota } from '../lib/billing/billingState'
+import type {
+  BillingState,
+  EntitlementSummary,
+  NormalizedBillingInterval,
+  NormalizedQuota,
+} from '../lib/billing/billingState'
 import { markExternalBillingAction } from '../lib/billing/billingReturnCoordinator'
 import { quotaTone, quotaUsedPercent } from '../lib/billing/quotaTone'
 import { STUDENT_BASIC_COMPARISON } from '../lib/billing/planPresentation'
@@ -186,6 +191,35 @@ function QuotaUsageRows({ quota }: { quota: NormalizedQuota }) {
         summary={tasksSummary}
         remainingText={tasksRemaining}
       />
+    </div>
+  )
+}
+
+/**
+ * Active Student Basic with nothing to manage here (no Stripe customer to open a Portal for): say who
+ * manages it. Provider-neutral wording; a date appears only when the backend exposes one, and it is an
+ * "access through" date, never an invented renewal date.
+ */
+function EntitlementManagedNote({
+  entitlement,
+  t,
+}: {
+  entitlement: EntitlementSummary | undefined
+  t: ReturnType<typeof useLanguagePreferences>['t']
+}) {
+  // Defensive: a state built without the summary reads as "active, provider unknown".
+  const provider = entitlement?.provider ?? 'other'
+  const key =
+    provider === 'apple'
+      ? 'billing.managedApple'
+      : provider === 'granted'
+        ? 'billing.managedGranted'
+        : 'billing.managedOther'
+  const through = formatDate(entitlement?.expiresAt)
+  return (
+    <div className="billing-plan-modal__managed" data-entitlement-provider={provider}>
+      <p className="billing-plan-modal__copy">{t(key)}</p>
+      {through ? <p className="billing-plan-modal__copy">{t('billing.accessThrough', { date: through })}</p> : null}
     </div>
   )
 }
@@ -545,9 +579,70 @@ export function BillingPlanContent({
           {renews ? <MetaRow label={t('billing.renews')} value={renews} /> : null}
         </div>
         <QuotaUsageRows quota={state.quota} />
+        {!showPortal ? <EntitlementManagedNote entitlement={state.entitlement} t={t} /> : null}
         {showPortal ? (
           <ManagePortalPanel
             label={portalActionLabel('active')}
+            onManage={() => onManage?.()}
+            portalBusy={portalBusy}
+            portalOpened={portalOpened}
+            disabled={checkoutBusy}
+            t={t}
+          />
+        ) : null}
+        {portalError ? (
+          <p className="billing-plan-modal__action-error" role="alert">
+            {portalError}
+          </p>
+        ) : null}
+        <ReturnRefreshFeedback feedback={returnFeedback} />
+        <RefreshPlanButton onRefreshPlan={showRefresh ? onRefreshPlan : undefined} disabled={actionBusy} />
+      </div>
+    )
+  }
+
+  if (state.status === 'trialing' || state.status === 'trial_canceling') {
+    // The date is the backend's `trialEnd` verbatim — never computed here. Price comes from the plan cadence the
+    // app already maps (monthly / annual), never from arbitrary subscription data.
+    const ends = formatDate(state.trialEnd)
+    const canceling = state.status === 'trial_canceling'
+    const cadence = state.interval
+    const trialCopy = canceling
+      ? ends
+        ? t('billing.trialCanceled', { date: ends })
+        : t('billing.trialCanceledNoDate')
+      : ends && cadence
+        ? t('billing.trialThen', {
+            date: ends,
+            price: `$${(cadence === 'monthly' ? STUDENT_BASIC_MONTHLY_USD : STUDENT_BASIC_ANNUAL_USD).toFixed(2)}`,
+            unit: cadence === 'monthly' ? t('billing.month') : t('billing.year'),
+          })
+        : ends
+          ? t('billing.trialEndsOnly', { date: ends })
+          : t('billing.trialNoDate')
+    return (
+      <div
+        className="billing-plan-modal__panel"
+        data-billing-status={state.status}
+        data-billing-interval={state.interval ?? 'unknown'}
+      >
+        <div className="billing-plan-modal__header-row">
+          <div>
+            <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
+            <h3 className="billing-plan-modal__headline">{planLabel(state.planCode)}</h3>
+          </div>
+          <StatusPill
+            label={canceling ? t('billing.cancellationScheduled') : t('billing.trialStatus')}
+            tone={canceling ? 'warn' : 'ok'}
+          />
+        </div>
+        <p className="billing-plan-modal__copy" data-trial-copy>
+          {trialCopy}
+        </p>
+        <QuotaUsageRows quota={state.quota} />
+        {showPortal ? (
+          <ManagePortalPanel
+            label={portalActionLabel(state.status)}
             onManage={() => onManage?.()}
             portalBusy={portalBusy}
             portalOpened={portalOpened}
@@ -606,8 +701,11 @@ export function BillingPlanContent({
 
   if (state.status === 'past_due') {
     const grace = formatDate(state.graceUntil)
+    // Access is claimed only when the backend says so (quota entitlement active AND, when reported, inGrace) and
+    // there is a date to state; after the grace window only the payment problem is shown.
+    const graceAccess = state.accessActive && state.inGrace !== false && Boolean(grace)
     return (
-      <div className="billing-plan-modal__panel" data-billing-status="past_due">
+      <div className="billing-plan-modal__panel" data-billing-status="past_due" data-billing-grace={graceAccess ? 'active' : 'ended'}>
         <div className="billing-plan-modal__header-row">
           <div>
             <p className="billing-plan-modal__eyebrow">{t('billing.currentPlan')}</p>
@@ -616,14 +714,11 @@ export function BillingPlanContent({
           <StatusPill label={t('settings.statusPastDue')} tone="danger" />
         </div>
         <p className="billing-plan-modal__copy">
-          {state.accessActive
-            ? t('billing.paymentActive')
-            : t('billing.paymentLimited')}
-          {grace ? ` ${t('billing.graceUntil')} ${grace}.` : null}
+          {graceAccess ? t('billing.paymentFailedGrace', { date: grace ?? '' }) : t('billing.paymentFailed')}
         </p>
         <div className="billing-plan-modal__meta">
-          <MetaRow label={t('billing.access')} value={state.accessActive ? t('settings.statusActive') : t('billing.limited')} />
-          {grace ? <MetaRow label={t('billing.graceUntil')} value={grace} /> : null}
+          <MetaRow label={t('billing.access')} value={graceAccess ? t('settings.statusActive') : t('billing.limited')} />
+          {graceAccess && grace ? <MetaRow label={t('billing.graceUntil')} value={grace} /> : null}
         </div>
         <QuotaUsageRows quota={state.quota} />
         {showPortal ? (

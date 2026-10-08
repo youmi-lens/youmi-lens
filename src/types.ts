@@ -40,6 +40,20 @@ export interface Recording {
   transcriptRaw?: string
   summaryEn?: string
   summaryZh?: string
+  /**
+   * The lecture's own languages, frozen when its recording started. Absent on a
+   * row that predates them or on a database without the columns: read through
+   * `lectureLanguagesFromRow`, which applies the legacy default.
+   * `translationLanguage === sourceLanguage` means "Original only".
+   */
+  sourceLanguage?: string
+  translationLanguage?: string
+  /** Summary written in the lecture's SPOKEN language (the generic, language-agnostic column). */
+  sourceSummary?: string
+  /** The same summary in the TRANSLATION language; absent when nothing was translated. */
+  translatedSummary?: string
+  /** The transcript translated into the translation language; absent when nothing was translated. */
+  translatedTranscript?: string
   /** Canonical in-class caption text. */
   liveTranscript?: string
   /** Assembled live caption stream before canonicalization. */

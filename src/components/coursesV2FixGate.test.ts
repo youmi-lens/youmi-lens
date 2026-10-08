@@ -31,6 +31,7 @@ import {
   translateDesktop,
   unresolvedPlaceholders,
 } from '../lib/desktopI18n'
+import { buildTextStack } from '../lib/bilingualCaptionStack'
 import { buildCaptionStack, splitCaptionSentences } from '../lib/recordingV2Captions'
 import {
   courseToRestoreWithLecture,
@@ -372,12 +373,13 @@ function renderRecording(overrides: Partial<Parameters<typeof RecordingV2>[0]> =
       lectureTitle: 'Lecture 13',
       elapsed: '12:04',
       languageLine: 'English → Chinese · Bilingual',
-      sourceCommitted: 'First sentence. Second sentence.',
-      sourceDraft: 'third in progress',
-      translationCommitted: '第一句。第二句。',
-      translationDraft: '第三句进行中',
+      captions: buildTextStack({
+        sourceCommitted: 'First sentence. Second sentence.',
+        sourceDraft: 'third in progress',
+        translationCommitted: '第一句。第二句。',
+        translationDraft: '第三句进行中',
+      }),
       translationEnabled: true,
-      translationPending: false,
       notice: null,
       failureMessage: null,
       busy: false,
@@ -970,7 +972,7 @@ describe('caption history scrolling', () => {
     // 'smooth' appears exactly once: the explicit Jump to latest call.
     const source = codeOnly('./RecordingV2.tsx')
     expect(source.match(/'smooth'/g)).toHaveLength(1)
-    expect(source).toContain("pinToBottom('smooth')")
+    expect(source).toContain("pinToBottom('smooth', true)")
   })
 
   it('listens to native scroll to learn the reader\'s intent', () => {
@@ -1114,11 +1116,49 @@ describe('Lecture Detail V2', () => {
   })
 
   it('renders the summary under the document\'s own headings', () => {
+    // An English → Chinese lecture opens on the TRANSLATED summary (the rule:
+    // translated when translation was on), under its own Chinese headings.
     const markup = renderDetail()
+    expect(markup).toContain('大纲')
+    expect(markup).toContain('关键术语')
+    expect(markup).toContain('要点')
+    expect(markup).toContain('快速排序。')
+  })
+
+  it('an Original-only lecture opens on the original summary, with no language switch', () => {
+    const markup = renderDetail({
+      detail: {
+        ...lectureA,
+        audioUrl: 'blob:x',
+        storagePath: 'u/r1.webm',
+        sourceLanguage: 'en',
+        translationLanguage: 'en',
+        transcript: 'The lecture began.',
+        summaryEn: '## Outline\nSorting.\n\n## Key terms\nQuicksort.\n\n## Takeaways\nKnow them.',
+      } as never,
+    })
     expect(markup).toContain('Outline')
-    expect(markup).toContain('Key terms')
-    expect(markup).toContain('Takeaways')
     expect(markup).toContain('Quicksort.')
+    expect(markup).not.toContain('lecture-v2__locale')
+  })
+
+  it('a Chinese → English lecture reads its summaries by the lecture\'s own languages, not today\'s preference', () => {
+    const markup = renderDetail({
+      detail: {
+        ...lectureA,
+        audioUrl: 'blob:x',
+        storagePath: 'u/r1.webm',
+        sourceLanguage: 'zh-Hans',
+        translationLanguage: 'en',
+        transcript: '今天我们讲排序。',
+        sourceSummary: '## 大纲\n排序。',
+        translatedSummary: '## Outline\nSorting.',
+      } as never,
+    })
+    // Translated (English) first; the original is one click away, labelled by name.
+    expect(markup).toContain('Outline')
+    expect(markup).toContain('>简体中文<')
+    expect(markup).toContain('>English<')
   })
 
   it('offers the language switch only when both summaries exist', () => {
@@ -1215,7 +1255,10 @@ describe('Lecture Detail V2', () => {
     it('typing marks the draft dirty and enables Save; an untouched draft cannot be saved twice', () => {
       const source = codeOnly('./LectureDetailPage.tsx')
       expect(source).toContain('const notesDirty = draft !== storedNotes')
-      expect(source).toContain("disabled={notesState === 'saving' || (!notesDirty && notesState !== 'failed')}")
+      // Save stays enabled after EITHER failure kind: Retry must always be possible.
+      expect(source).toMatch(
+        /disabled=\{\s*notesState === 'saving' \|\|\s*\(!notesDirty && notesState !== 'failed' && notesState !== 'unavailable'\)\s*\}/,
+      )
     })
 
     it('Save sends the draft through onSaveNotes and nothing else', () => {
@@ -1228,12 +1271,15 @@ describe('Lecture Detail V2', () => {
 
     it('a failed save keeps the text and states the failure, never a silent success', () => {
       const source = codeOnly('./LectureDetailPage.tsx')
-      expect(source).toContain(".catch(() => setNotesState('failed'))")
+      // A schema gap is told apart from a flaky network; both keep the text.
+      expect(source).toContain(".catch((err) => setNotesState(isNotesUnavailable(err) ? 'unavailable' : 'failed'))")
       expect(source).toContain("notesState === 'failed'")
+      expect(source).toContain("notesState === 'unavailable'")
       expect(source).toContain('notesSaveFailed')
+      expect(source).toContain('notesUnavailable')
       // Nothing clears `draft` in the failure branch — only success does.
-      const catchBlock = source.slice(source.indexOf('.catch(() => setNotesState'))
-      expect(catchBlock.slice(0, 40)).not.toContain('setDraft')
+      const catchBlock = source.slice(source.indexOf('.catch((err) => setNotesState'))
+      expect(catchBlock.slice(0, 120)).not.toContain('setDraft')
     })
 
     it('a confirmed save is what marks the field clean, not the keystroke', () => {

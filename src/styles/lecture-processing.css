@@ -1,0 +1,118 @@
+/* ============================================================================
+   Lecture processing panel — shared by the saved screen right after Stop & Save
+   and by a lecture opened while it is still processing (or has failed).
+
+   Same V2 tokens as the rest of the app; no new palette or type scale. There is
+   no progress bar and no percentage anywhere in this file ON PURPOSE: the backend
+   reports discrete stages, not a fraction, so the only honest display is the
+   stage list.
+   ============================================================================ */
+
+.lecture-processing {
+  padding: 40px 28px 34px;
+  border: 1px solid var(--v2-rule);
+  border-radius: var(--v2-radius-lg);
+  background: var(--v2-paper);
+  text-align: center;
+}
+
+.lecture-processing__spinner {
+  display: block;
+  width: 22px;
+  height: 22px;
+  margin: 0 auto 16px;
+  border: 2px solid var(--v2-rule);
+  border-top-color: var(--v2-navy);
+  border-radius: 50%;
+  animation: lecture-processing-spin 720ms linear infinite;
+}
+@keyframes lecture-processing-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .lecture-processing__spinner { animation-duration: 2.4s; }
+}
+
+.desktop-v2 .lecture-processing h2 {
+  margin: 0;
+  color: var(--v2-ink-2);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: normal;
+}
+.desktop-v2 .lecture-processing > p {
+  max-width: 46ch;
+  margin: 8px auto 0;
+  color: var(--v2-muted);
+  font-size: var(--v2-text-sm);
+  line-height: 1.6;
+}
+
+/* The checklist: left-aligned inside a centred card so the marks line up. */
+.lecture-processing__stages {
+  display: grid;
+  gap: 10px;
+  width: fit-content;
+  margin: 24px auto 0;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+.lecture-processing__stage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-sm);
+  font-weight: 560;
+}
+.lecture-processing__mark {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--v2-rule);
+  border-radius: 50%;
+  font-size: 11px;
+  line-height: 1;
+}
+.lecture-processing__stage[data-state='done'] { color: var(--v2-ink-2); }
+.lecture-processing__stage[data-state='done'] .lecture-processing__mark {
+  border-color: var(--v2-success-ink);
+  background: var(--v2-success-soft);
+  color: var(--v2-success-ink);
+}
+.lecture-processing__stage[data-state='active'] { color: var(--v2-ink-2); font-weight: 700; }
+.lecture-processing__stage[data-state='active'] .lecture-processing__mark {
+  border-color: var(--v2-navy);
+  border-top-color: transparent;
+  animation: lecture-processing-spin 900ms linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .lecture-processing__stage[data-state='active'] .lecture-processing__mark { animation: none; border-top-color: var(--v2-navy); }
+}
+
+.lecture-processing__note {
+  margin: 18px 0 0;
+  color: var(--v2-faint);
+  font-size: var(--v2-text-xs);
+}
+
+.lecture-processing__actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 22px;
+}
+.lecture-processing__actions:empty { margin-top: 0; }
+
+.lecture-processing[data-phase='failed'] h2 { color: var(--v2-danger-ink); }
+.lecture-processing[data-phase='done'] h2 { color: var(--v2-success-ink); }
+
+/* On the saved screen the panel sits where the old stage card did. */
+.lecture-processing-slot { margin-top: 32px; }
+.lecture-processing-slot .recording-v2__stage-actions { margin-top: 18px; }
+
+/* On Lecture Detail the panel replaces the tab strip, directly under the header. */
+.lecture-v2 > .lecture-processing { margin-top: 24px; }

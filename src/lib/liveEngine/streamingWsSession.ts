@@ -15,13 +15,37 @@
 import { getAiApiBase } from '../ai/apiBase'
 import { traceWsClosed } from '../liveCaptionTrace'
 
+/**
+ * A live translation from the server (`stream_translation`).
+ *
+ * Identity comes ONLY from the fields the server sets for that purpose:
+ *   · final   → `source_ids`: every `stream_final` id the text covers
+ *   · interim → `draft_of`:   the `stream_final` id the draft will become
+ * A message without them (an older server) carries `sourceIds`/`draftOf` = null and
+ * must be ignored by the caller — never attached to "the latest caption".
+ */
+export type StreamTranslation = {
+  final: boolean
+  text: string
+  sourceIds: string[] | null
+  draftOf: string | null
+  /** Monotonic request ticket for drafts (orders late responses); null when absent. */
+  revision: number | null
+  /** The source text the server translated (echoed for drafts and groups). */
+  sourceText: string | null
+  language: string | null
+}
+
 export type StreamingWsEvents = {
   /** WebSocket connection established; stream_start sent. ASR provider may not be ready yet. */
   onOpen?: () => void
   /** ASR provider confirmed live (stream_ready received). Safe to drain PCM queue now. */
   onReady?: () => void
-  onInterim?: (text: string) => void
-  onFinal?: (text: string) => void
+  /** `finalId`: the stream_final id this interim will become (server-assigned). */
+  onInterim?: (text: string, meta: { finalId: string | null }) => void
+  /** `id`: the server-assigned caption id (the one translations refer to). */
+  onFinal?: (text: string, meta: { id: string | null }) => void
+  onTranslation?: (translation: StreamTranslation) => void
   onError?: (reason: string) => void
   onClose?: () => void
 }
@@ -29,6 +53,14 @@ export type StreamingWsEvents = {
 export type StreamingWsOpts = {
   /** Called each time the WS opens to get a fresh JWT for the stream_start auth check. */
   tokenGetter?: () => Promise<string | null>
+  /**
+   * Canonical content-language ids for THIS recording, sent in `stream_start`. The
+   * server maps `sourceLanguage` to the live recogniser's language code; without it
+   * it assumes English. `translationLanguage` equal to `sourceLanguage` tells the
+   * server there is nothing for it to translate.
+   */
+  sourceLanguage?: string
+  translationLanguage?: string
 }
 
 function wsUrl(): string {
@@ -112,11 +144,13 @@ export class StreamingWsSession {
       let token: string | null = null
       try { token = await this.opts.tokenGetter?.() ?? null } catch { /* ignore */ }
       const streamStartMsg: Record<string, unknown> = { type: 'stream_start', sampleRate: this.sampleRate }
+      if (this.opts.sourceLanguage) streamStartMsg.sourceLanguage = this.opts.sourceLanguage
+      if (this.opts.translationLanguage) streamStartMsg.translationLanguage = this.opts.translationLanguage
       if (token) streamStartMsg.token = token
       ws.send(JSON.stringify(streamStartMsg))
       this.wsReady = true
       console.info('[StreamingWs] reconnect_success', JSON.stringify({ wsOpenMs: this.T_ws_open - this.T_connect }))
-      console.info('[StreamingWs] ws_open', JSON.stringify({ sampleRate: this.sampleRate, streamStartSent: true, hasToken: Boolean(token) }))
+      console.info('[StreamingWs] ws_open', JSON.stringify({ sampleRate: this.sampleRate, streamStartSent: true, hasToken: Boolean(token), sourceLanguage: this.opts.sourceLanguage ?? 'default' }))
       this.events.onOpen?.()
     }
 
@@ -146,7 +180,7 @@ export class StreamingWsSession {
             readyMs: this.T_stream_ready ? this.T_stream_ready - this.T_connect : -1,
           })
         }
-        this.events.onInterim?.(msg.text as string)
+        this.events.onInterim?.(msg.text as string, { finalId: typeof msg.final_id === 'string' ? msg.final_id : null })
       } else if (msg.type === 'stream_final' && typeof msg.text === 'string') {
         const now = Date.now()
         if (!this.T_first_final) {
@@ -164,7 +198,20 @@ export class StreamingWsSession {
             sinceConnectMs: now - this.T_connect,
           })
         }
-        this.events.onFinal?.(msg.text as string)
+        this.events.onFinal?.(msg.text as string, { id: typeof msg.id === 'string' ? msg.id : null })
+      } else if (msg.type === 'stream_translation' && typeof msg.translated_text === 'string' && msg.translated_text.trim()) {
+        const ids = Array.isArray(msg.source_ids) && msg.source_ids.every((x: unknown) => typeof x === 'string')
+          ? (msg.source_ids as string[])
+          : null
+        this.events.onTranslation?.({
+          final: msg.is_final !== false,
+          text: (msg.translated_text as string).trim(),
+          sourceIds: ids && ids.length > 0 ? ids : null,
+          draftOf: typeof msg.draft_of === 'string' ? msg.draft_of : null,
+          revision: typeof msg.revision === 'number' ? msg.revision : null,
+          sourceText: typeof msg.source_text === 'string' ? msg.source_text : null,
+          language: typeof msg.translation_language === 'string' ? msg.translation_language : null,
+        })
       } else if (msg.type === 'stream_error') {
         // Prefer structured code field for beta gate errors; fall back to message string
         const reason = typeof msg.code === 'string' ? msg.code

@@ -241,10 +241,14 @@ describe('Record Home', () => {
     expect(open).toHaveBeenCalledTimes(1)
   })
 
-  it('shows the read-only language summary for the current preferences', () => {
+  it('offers "Spoken language" and "Translate to" as human-readable selects, never raw codes', () => {
     const html = render(createElement(RecordHome, recordHomeProps))
+    expect(html).toContain('aria-label="Spoken language"')
+    expect(html).toContain('aria-label="Translate to"')
     expect(html).toContain('English')
-    expect(html).toContain('record-home-v2__summary')
+    expect(html).toContain('简体中文')
+    expect(html).toContain('Original only')
+    for (const code of ['en-US', 'zh-CN', 'zh-Hans</option>']) expect(html).not.toContain(code)
   })
 
   /**
@@ -288,23 +292,21 @@ describe('Settings', () => {
     expect(html).toContain('data-section="recording" aria-current="page"')
   })
 
-  it('keeps the four language preference fields independent', () => {
+  it('keeps app language, spoken language and translation language as three independent selects', () => {
     const html = render(
       createElement(SettingsLanguagePage, {
         preferences: DEFAULT_LANGUAGE_PREFERENCES,
         onPreferenceChange: () => undefined,
       }),
     )
-    for (const label of ['App language', 'Caption language', 'Translation language', 'Language mode']) {
+    for (const label of ['App language', 'Spoken language', 'Translate to']) {
       expect(html).toContain(label)
     }
-    // App/Caption/Translation stay real <select> dropdowns; Language mode
-    // (QA16) is a two-way segmented control instead of a third-option-less
-    // dropdown, so it is no longer one of the <select> elements.
+    // "Original only" is an option of Translate to — the old two-way mode
+    // switch is gone, so there is no second place that decides translation.
     expect(html.match(/<select/g)).toHaveLength(3)
-    expect(html).toContain('settings-v2__segmented')
-    expect(html).toContain('Captions only')
-    expect(html).toContain('Bilingual')
+    expect(html).toContain('Original only')
+    expect(html).not.toContain('settings-v2__segmented')
   })
 
   it('language row values are not doubly labelled ("App language English · Available")', () => {
@@ -334,7 +336,7 @@ describe('Settings', () => {
       (m) => m[1],
     )
     expect(controls).toHaveLength(3)
-    for (const [i, name] of ['App language', 'Caption language', 'Translation language'].entries()) {
+    for (const [i, name] of ['App language', 'Spoken language', 'Translate to'].entries()) {
       expect(visibleText(controls[i])).not.toContain(name)
     }
     // The values themselves are still shown by the select.
@@ -353,8 +355,8 @@ describe('Settings', () => {
     expect(html).toContain('<span class="v2-sr-only">App language</span>')
     // ...and the select still carries its own accessible name.
     expect(html).toContain('aria-label="App language"')
-    expect(html).toContain('aria-label="Caption language"')
-    expect(html).toContain('aria-label="Translation language"')
+    expect(html).toContain('aria-label="Spoken language"')
+    expect(html).toContain('aria-label="Translate to"')
     // The undefined class must never come back.
     expect(html).not.toContain('class="sr-only"')
   })
@@ -374,19 +376,6 @@ describe('Settings', () => {
     // The helper must not re-introduce a margin: `.settings-v2__help` is also
     // the nav row's trailing value, where a top margin pushes it off-centre.
     expect(v2Css.match(/\.settings-v2__help \{([^}]*)\}/)?.[1]).not.toContain('margin-top')
-  })
-
-  it('the selected Language mode segment renders "Bilingual" as visible text', () => {
-    const html = render(
-      createElement(SettingsLanguagePage, {
-        preferences: { ...DEFAULT_LANGUAGE_PREFERENCES, languageMode: 'bilingual' },
-        onPreferenceChange: () => undefined,
-      }),
-    )
-    const selected = html.slice(html.indexOf('settings-v2__segmented-btn--selected'))
-    const label = selected.slice(selected.indexOf('>') + 1, selected.indexOf('</button>'))
-    expect(visibleText(label)).toBe('Bilingual')
-    expect(html).toContain('aria-pressed="true"')
   })
 
   it('does not claim unsupported languages are live', () => {

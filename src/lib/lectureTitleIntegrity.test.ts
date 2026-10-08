@@ -339,7 +339,8 @@ describe('unrelated writes cannot touch title freshness', () => {
   it('the transcript / summary writer touches neither title nor its clock', () => {
     const fn = body('updateRecordingAi')
     expect(fn).not.toContain('title')
-    for (const col of ['transcript', 'transcript_raw', 'summary_en', 'summary_zh']) {
+    expect(fn).not.toContain('payload.transcript_raw')
+    for (const col of ['transcript', 'summary_en', 'summary_zh']) {
       expect(fn, col).toContain(col)
     }
   })

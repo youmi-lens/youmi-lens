@@ -1,8 +1,8 @@
-import { CONTENT_LANGUAGES, type LanguageAvailability } from '../lib/contentLanguages'
-import { hasLanguageLimitation } from '../lib/languageLimitation'
+import { CONTENT_LANGUAGES, isContentLanguageCode, type LanguageAvailability } from '../lib/contentLanguages'
 import type { LanguagePreferences } from '../lib/languagePreferences'
 import { useLanguagePreferences } from '../languagePreferencesContext'
 import { LanguageSelect, type LanguageSelectOption } from './LanguageSelect'
+import { LectureLanguageFields } from './LectureLanguageFields'
 import { SettingsRow } from './SettingsLayout'
 
 const APP_OPTIONS: LanguageSelectOption[] = CONTENT_LANGUAGES.map((language) => ({
@@ -11,31 +11,15 @@ const APP_OPTIONS: LanguageSelectOption[] = CONTENT_LANGUAGES.map((language) => 
   availability: 'available',
 }))
 
-const CAPTION_OPTIONS: LanguageSelectOption[] = CONTENT_LANGUAGES.map((language) => ({
-  value: language.code,
-  label: language.label,
-  availability: language.caption,
-}))
-
-const TRANSLATION_OPTIONS: LanguageSelectOption[] = CONTENT_LANGUAGES.map((language) => ({
-  value: language.code,
-  label: language.label,
-  availability: language.translation,
-}))
-
 /**
  * Language settings — the DETAIL pane only. The master list lives in
  * SettingsLayout, so this page can no longer be the whole Settings screen.
  *
- * The four preference fields stay independent (app locale, caption, translation,
- * mode) and the availability boundary is unchanged: caption is English-only and
- * translation is Simplified-Chinese-only today; everything else is disabled and
- * labelled, so nothing here claims six-language live captions already work.
- *
- * QA16: rows carry only the value in their trailing control (no repeated field
- * name / "· Available" — see LanguageSelect), helper copy is a single short
- * line, and the internal "verified live path" wording is not shown at all
- * unless the current selection actually has a limitation.
+ * App language is its own setting. The lecture languages — "Spoken language" and
+ * "Translate to" (including "Original only") — are the shared
+ * `LectureLanguageFields`, the same control Record Home shows, so the two can
+ * never disagree. Languages that cannot run yet are listed, disabled and
+ * labelled; nothing is silently swapped.
  */
 export function SettingsLanguagePage({
   preferences,
@@ -76,68 +60,15 @@ export function SettingsLanguagePage({
               value={preferences.appLocale}
               options={APP_OPTIONS}
               statusLabel={statusLabel}
-              onChange={(value) => onPreferenceChange('appLocale', value)}
+              onChange={(value) => isContentLanguageCode(value) && onPreferenceChange('appLocale', value)}
             />
-          }
-        />
-        <SettingsRow
-          name={t('settings.captionLanguage')}
-          help={t('settings.captionLanguageHelp')}
-          control={
-            <LanguageSelect
-              label={t('settings.captionLanguage')}
-              value={preferences.captionLanguage}
-              options={CAPTION_OPTIONS}
-              statusLabel={statusLabel}
-              onChange={(value) => onPreferenceChange('captionLanguage', value)}
-            />
-          }
-        />
-        <SettingsRow
-          name={t('settings.translationLanguage')}
-          help={t('settings.translationLanguageHelp')}
-          control={
-            <LanguageSelect
-              label={t('settings.translationLanguage')}
-              value={preferences.translationLanguage}
-              options={TRANSLATION_OPTIONS}
-              statusLabel={statusLabel}
-              onChange={(value) => onPreferenceChange('translationLanguage', value)}
-            />
-          }
-        />
-        <SettingsRow
-          name={t('settings.languageMode')}
-          control={
-            <div className="settings-v2__segmented" role="group" aria-label={t('settings.languageMode')}>
-              <button
-                type="button"
-                className={`settings-v2__segmented-btn${
-                  preferences.languageMode === 'captions-only' ? ' settings-v2__segmented-btn--selected' : ''
-                }`}
-                aria-pressed={preferences.languageMode === 'captions-only'}
-                onClick={() => onPreferenceChange('languageMode', 'captions-only')}
-              >
-                {t('record.captionsOnly')}
-              </button>
-              <button
-                type="button"
-                className={`settings-v2__segmented-btn${
-                  preferences.languageMode === 'bilingual' ? ' settings-v2__segmented-btn--selected' : ''
-                }`}
-                aria-pressed={preferences.languageMode === 'bilingual'}
-                onClick={() => onPreferenceChange('languageMode', 'bilingual')}
-              >
-                {t('record.bilingual')}
-              </button>
-            </div>
           }
         />
       </div>
 
-      {hasLanguageLimitation(preferences) ? (
-        <p className="settings-v2__note">{t('settings.languageLimitationNote')}</p>
-      ) : null}
+      <div className="settings-v2__group">
+        <LectureLanguageFields preferences={preferences} onPreferenceChange={onPreferenceChange} />
+      </div>
     </>
   )
 }

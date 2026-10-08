@@ -1,0 +1,13 @@
+{
+ "ai_status": "done",
+ "ai_error": null,
+ "source_language": "ko",
+ "translation_language": "en",
+ "transcript": "오늘은 정렬 알고리즘에 대해 배우겠습니다 먼저 법을 정렬부터 시작합니다 이것은 이웃 한 원소를 비교하는 방법입니다. 다음으로 퀵 정렬을 설명하겠습니다 퀵 정렬은 대부분의 경우 매우 빠릅니다 마지막으로 세 가지 방법의 시간 복잡도를 비교합니다.",
+ "source_summary": "## 개요\n오늘은 정렬 알고리즘에 대해 배웁니다. 먼저 버블 정렬을 소개하고, 이는 인접한 원소를 비교하는 방식입니다. 다음으로 퀵 정렬을 설명하며, 대부분의 경우 매우 빠릅니다. 마지막으로 세 가지 정렬 방법의 시간 복잡도를 비교합니다.\n\n## 핵심 용어\n- 버블 정렬: 인접한 원소를 비교하여 정렬하는 방법\n- 퀵 정렬: 대부분의 경우 빠른 성능을 보이는 정렬 알고리즘\n- 시간 복잡도: 알고리즘의 효율성을 나타내는 척도\n\n## 핵심 통찰\n버블 정렬은 간단하지만 느릴 수 있으며, 퀵 정렬은 평균적으로 더 빠릅니다. 시간 복잡도 비교를 통해 각 알고리즘의 성능 차이를 이해할 수 있습니다.",
+ "translated_summary": "## Outline\nToday we will learn about sorting algorithms. First, we introduce bubble sort, which works by comparing adjacent elements. Next, we explain quicksort, which is very fast in most cases. Finally, we compare the time complexities of these three sorting methods.\n\n## Key terms\n- Bubble sort: A sorting method that compares adjacent elements\n- Quicksort: A sorting algorithm that performs very quickly in most cases\n- Time complexity: A measure of algorithm efficiency\n\n## Takeaways\nBubble sort is simple but can be slow, while quicksort is generally faster on average. Comparing time complexities helps us understand the performance differences among these algorithms.",
+ "translated_transcript": "Today we'll learn about sorting algorithms. First, we'll start with bubble sort, which works by comparing adjacent elements. Next, I'll explain quicksort, which is very fast in most cases. Finally, we'll compare the time complexities of these three methods.",
+ "summary_en": "## Outline\nToday we will learn about sorting algorithms. First, we introduce bubble sort, which works by comparing adjacent elements. Next, we explain quicksort, which is very fast in most cases. Finally, we compare the time complexities of these three sorting methods.\n\n## Key terms\n- Bubble sort: A sorting method that compares adjacent elements\n- Quicksort: A sorting algorithm that performs very quickly in most cases\n- Time complexity: A measure of algorithm efficiency\n\n## Takeaways\nBubble sort is simple but can be slow, while quicksort is generally faster on average. Comparing time complexities helps us understand the performance differences among these algorithms.",
+ "summary_zh": null,
+ "transcript_zh": null
+}

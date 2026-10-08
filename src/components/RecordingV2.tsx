@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
 import type { CourseIdentity } from '../lib/courses/coursePresets'
 import type { DesktopI18nKey } from '../lib/desktopI18n'
-import { buildCaptionStack } from '../lib/recordingV2Captions'
+import type { BilingualStack, CaptionRow } from '../lib/bilingualCaptionStack'
 import {
   captionFollowReducer,
   INITIAL_CAPTION_FOLLOW,
-  isUserScrollUp,
+  classifyHistoryScroll,
+  nextFollowAnchor,
+  type FollowAnchor,
   shouldPinToBottom,
   shouldShowJumpToLatest,
   type ScrollSample,
@@ -17,7 +19,9 @@ import {
   type RecordingV2Stage,
 } from '../lib/recordingV2Stage'
 import { probeScrollerGeometry } from '../lib/captionDiagnostics'
+import type { ProcessingPhase } from '../lib/lectureLifecycle'
 import { CourseIconTile } from './CourseIconTile'
+import { LectureProcessingPanel } from './LectureProcessingPanel'
 import '../styles/recording-v2.css'
 
 /**
@@ -42,6 +46,22 @@ import '../styles/recording-v2.css'
 
 type T = (key: DesktopI18nKey, vars?: Record<string, string | number>) => string
 
+/**
+ * One settled caption row: the original and — directly under it — ITS translation.
+ * With translation off, or none yet for this row, only the original renders; a
+ * row never borrows a neighbour's translation to fill the gap.
+ */
+function CaptionPairRow({ row, translationEnabled }: { row: CaptionRow; translationEnabled: boolean }) {
+  return (
+    <div className="recording-v2__pair" data-translation={row.translationState}>
+      <p className="recording-v2__pair-source">{row.original}</p>
+      {translationEnabled && row.translation ? (
+        <p className="recording-v2__pair-translation">{row.translation}</p>
+      ) : null}
+    </div>
+  )
+}
+
 export function RecordingV2({
   t,
   stage,
@@ -50,14 +70,12 @@ export function RecordingV2({
   lectureTitle,
   elapsed,
   languageLine,
-  sourceCommitted,
-  sourceDraft,
-  translationCommitted,
-  translationDraft,
+  captions,
   translationEnabled,
-  translationPending,
   notice,
   failureMessage,
+  noticeAction,
+  failureAction,
   busy,
   canOpenOverlay,
   onOpenOverlay,
@@ -72,6 +90,8 @@ export function RecordingV2({
   onDiscardRecovery,
   onCancelRecoveryDiscard,
   recoveryDiscardConfirm,
+  processing = null,
+  onRetryProcessing = () => {},
   recoveryItems = [],
   selectedRecoveryId = null,
   selectedRecoveryNeedsCourse = false,
@@ -89,17 +109,19 @@ export function RecordingV2({
   elapsed: string
   /** e.g. "English → Chinese · Bilingual". */
   languageLine: string
-  sourceCommitted: string
-  sourceDraft: string
-  translationCommitted: string
-  translationDraft: string
+  /**
+   * The caption stack, built from caption IDENTITY: every row carries its own
+   * original and its own translation (`buildBilingualStack`).
+   */
+  captions: BilingualStack
   translationEnabled: boolean
-  /** True while a source phrase has no translation yet. */
-  translationPending: boolean
   /** Live-caption banner from the existing session surface, if any. */
   notice: { tier: 'info' | 'fatal'; text: string } | null
   /** The real message from a failed save. */
   failureMessage: string | null
+  /** Optional follow-up for a limit notice / failure (e.g. open the plan view). */
+  noticeAction?: { label: string; onClick: () => void } | null
+  failureAction?: { label: string; onClick: () => void } | null
   busy: boolean
   canOpenOverlay: boolean
   onOpenOverlay: () => void
@@ -117,6 +139,14 @@ export function RecordingV2({
   onDiscardRecovery: () => void
   onCancelRecoveryDiscard: () => void
   recoveryDiscardConfirm: boolean
+  /**
+   * Authoritative processing state of the lecture that was just saved (from
+   * `lectureLifecycle`). Drives the Processing screen and, once `done`, the
+   * explicit "View lecture" completion. Null when no hosted pipeline applies.
+   */
+  processing?: { phase: ProcessingPhase; stalled: boolean } | null
+  /** Retry processing the SAME lecture and audio through the existing endpoint. */
+  onRetryProcessing?: () => void
   recoveryItems?: Array<{ id: string; label: string }>
   selectedRecoveryId?: string | null
   selectedRecoveryNeedsCourse?: boolean
@@ -127,12 +157,21 @@ export function RecordingV2({
 }) {
   const live = stage === 'recording' || stage === 'paused'
   const terminal = isTerminalRecordingStage(stage)
+  // The Processing screen: while the server works, when it failed, and the
+  // completed state (with the explicit View lecture) once it is done.
+  const showProcessingPanel =
+    stage === 'ai_processing' ||
+    stage === 'ai_failed' ||
+    (stage === 'ready' && processing?.phase === 'done')
 
-  const { history: sourceHistory, current: sourceLine } = buildCaptionStack(
-    sourceCommitted,
-    sourceDraft,
-  )
-  const { current: translationLine } = buildCaptionStack(translationCommitted, translationDraft)
+  const sourceHistory = captions.history
+  const sourceLine = captions.current?.original ?? ''
+  // THIS caption's translation, or nothing yet. Never the previous caption's.
+  const translationLine = captions.current?.translation ?? ''
+  // While the speaker is mid-caption a missing translation is simply not there yet — a standing
+  // "Translating…" under every new phrase is more distracting than the short gap. Only a SETTLED
+  // caption that is still waiting gets the quiet hint (and it fades in late, so a sub-second wait never flashes).
+  const translationWaiting = Boolean(sourceLine) && !translationLine && !captions.current?.live
 
   /* ── Caption history scrolling ──────────────────────────────────────────────
      A plain `overflow-y: auto` container, so a two-finger trackpad gesture,
@@ -145,11 +184,32 @@ export function RecordingV2({
   const contentRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef(0)
 
-  const pinToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+  /** Latest follow state, readable from a callback that was queued earlier. */
+  const followRef = useRef(follow)
+  useEffect(() => {
+    followRef.current = follow
+  }, [follow])
+  /** Where the reader was last genuinely at the bottom — slow drags accumulate against it. */
+  const followAnchor = useRef<FollowAnchor>(null)
+
+  const pinToBottom = useCallback((behavior: ScrollBehavior = 'auto', force = false) => {
     const write = () => {
       const node = historyRef.current
       if (!node) return
+      // A pin queued while following can land a frame AFTER the reader began
+      // scrolling away and silently undo the first pixels of the drag. Re-check
+      // at write time. Only "Jump to latest" bypasses this.
+      if (!force && !shouldPinToBottom(followRef.current)) return
       node.scrollTo({ top: node.scrollHeight, behavior })
+      // Seed the anchor even before any scroll event has fired, so the very
+      // first drag from a freshly pinned bottom already has a reference.
+      if (behavior === 'auto') {
+        followAnchor.current = nextFollowAnchor(followAnchor.current, {
+          scrollTop: node.scrollTop,
+          scrollHeight: node.scrollHeight,
+          clientHeight: node.clientHeight,
+        })
+      }
     }
     // Written synchronously first. A rAF-only pin silently stops working
     // whenever the window is not being painted — and Open Overlay minimises the
@@ -209,7 +269,11 @@ export function RecordingV2({
     const metrics = readMetrics()
     if (!metrics) return
     const sample: ScrollSample = { scrollTop: metrics.scrollTop, scrollHeight: metrics.scrollHeight }
-    const up = isUserScrollUp(lastSample.current, sample)
+    // Consecutive-event comparison alone ignores a move of 1px or less, so a
+    // slow two-finger drag was never read as intent and the next caption pinned
+    // the reader back down. See `classifyHistoryScroll`.
+    const { up, anchor } = classifyHistoryScroll(lastSample.current, followAnchor.current, metrics)
+    followAnchor.current = anchor
     lastSample.current = sample
     // Upward intent suspends follow immediately. Reporting it as a plain
     // position ('scrolled') instead keeps `following` true for the first
@@ -253,6 +317,14 @@ export function RecordingV2({
       if (shouldPinToBottom(follow)) pinToBottom()
     })
     observer.observe(el)
+    // The scroller's OWN box as well. Its height is now bounded by the window
+    // (and moves with the live line below it), while the text inside does not
+    // change when only the height of the window changes — so a following reader
+    // whose window shrank was left with the newest line out of view until the
+    // next caption. Pinning here is gated by `follow`, so a reader who has
+    // scrolled away is never moved.
+    const viewport = historyRef.current
+    if (viewport) observer.observe(viewport)
     return () => observer.disconnect()
     // Rebuilding on a follow change is cheap: `follow` flips only when the
     // reader crosses the near-bottom threshold, a handful of times a lecture.
@@ -260,8 +332,9 @@ export function RecordingV2({
 
   const jumpToLatest = useCallback(() => {
     dispatchFollow({ type: 'jump-to-latest' })
-    pinToBottom('smooth')
+    pinToBottom('smooth', true)
   }, [pinToBottom])
+
 
   /* ── Header ─────────────────────────────────────────────────────────────── */
 
@@ -305,12 +378,34 @@ export function RecordingV2({
       <section className="recording-v2 recording-v2--after" aria-labelledby="recording-v2-title">
         {header}
 
+        {showProcessingPanel ? (
+          <div className="lecture-processing-slot" data-stage={stage}>
+            <LectureProcessingPanel
+              t={t}
+              phase={stage === 'ai_failed' ? 'failed' : (processing?.phase ?? 'waiting')}
+              stalled={processing?.stalled ?? false}
+              busy={busy}
+              onRetry={onRetryProcessing}
+              onViewLecture={onViewLecture}
+            />
+            <div className="recording-v2__stage-actions">
+              <button type="button" className="v2-btn" onClick={onRecordAnother} disabled={busy}>
+                {t('recording.recordAnother')}
+              </button>
+            </div>
+          </div>
+        ) : (
         <div className="recording-v2__stage" data-stage={stage} role="status" aria-live="polite">
           {terminal ? null : <span className="recording-v2__spinner" aria-hidden="true" />}
           <h2>{titleKey ? t(titleKey) : ''}</h2>
           <p>{bodyKey ? t(bodyKey) : ''}</p>
           {/* The real reason, from the existing save pipeline. */}
           {failureMessage ? <p className="recording-v2__failure">{failureMessage}</p> : null}
+          {failureMessage && failureAction ? (
+            <button type="button" className="recording-v2__notice-action" onClick={failureAction.onClick}>
+              {failureAction.label}
+            </button>
+          ) : null}
 
           <div className="recording-v2__stage-actions">
             {stage === 'upload_failed' ? (
@@ -381,6 +476,7 @@ export function RecordingV2({
             ) : null}
           </div>
         </div>
+        )}
 
         {/* Captions from the session stay readable while it saves. */}
         {sourceHistory.length > 0 || sourceLine ? (
@@ -393,10 +489,12 @@ export function RecordingV2({
               role="log"
               aria-label={t('recording.sourceLabel')}
             >
-              {sourceHistory.map((line, index) => (
-                <p key={`${index}-${line.slice(0, 24)}`}>{line}</p>
+              {sourceHistory.map((row) => (
+                <CaptionPairRow key={row.key} row={row} translationEnabled={translationEnabled} />
               ))}
-              {sourceLine ? <p>{sourceLine}</p> : null}
+              {captions.current ? (
+                <CaptionPairRow row={captions.current} translationEnabled={translationEnabled} />
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -419,6 +517,11 @@ export function RecordingV2({
           {notice.text}
         </p>
       ) : null}
+      {notice && noticeAction ? (
+        <button type="button" className="recording-v2__notice-action" onClick={noticeAction.onClick}>
+          {noticeAction.label}
+        </button>
+      ) : null}
 
       <div className="recording-v2__captions">
         <div className="recording-v2__history-wrap">
@@ -437,8 +540,8 @@ export function RecordingV2({
             aria-label={t('recording.sourceLabel')}
           >
             <div ref={contentRef}>
-              {sourceHistory.map((line, index) => (
-                <p key={`${index}-${line.slice(0, 24)}`}>{line}</p>
+              {sourceHistory.map((row) => (
+                <CaptionPairRow key={row.key} row={row} translationEnabled={translationEnabled} />
               ))}
             </div>
           </div>
@@ -460,8 +563,12 @@ export function RecordingV2({
             {sourceLine || t('recording.waiting')}
           </p>
           {translationEnabled ? (
-            <p className="recording-v2__translation" data-empty={translationLine ? undefined : 'true'}>
-              {translationLine || (translationPending ? t('recording.translating') : '')}
+            <p
+              className="recording-v2__translation"
+              data-empty={translationLine ? undefined : 'true'}
+              data-pending={translationWaiting ? 'true' : undefined}
+            >
+              {translationLine || (translationWaiting ? t('recording.translating') : '')}
             </p>
           ) : null}
         </div>

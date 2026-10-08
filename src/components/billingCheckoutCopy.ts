@@ -32,6 +32,17 @@ export function formatCheckoutError(error: BillingHookError | null | undefined):
   if (kind === 'auth' || code === 'auth_required') {
     return 'Please sign in again before upgrading.'
   }
+  // Closed on purpose (public release switch): say so honestly, never as a payment or network failure.
+  if (code === 'commercialization_not_available') {
+    return 'Desktop subscriptions aren’t available for purchase yet.'
+  }
+  // The backend found active Student Basic access from another source (Apple, admin gift, Stripe).
+  if (code === 'entitlement_already_active' || code === 'subscription_already_exists') {
+    return 'You already have an active Student Basic plan. Refresh your plan status to see it.'
+  }
+  if (code === 'entitlement_check_failed') {
+    return 'We couldn’t confirm your plan right now. Please try again in a moment.'
+  }
   if (code === 'plan_not_configured' || code === 'stripe_not_configured') {
     return 'Checkout is temporarily unavailable.'
   }
@@ -89,6 +100,8 @@ export function canStartCheckout(status: string): boolean {
 export function canOpenPortal(state: BillingState): boolean {
   switch (state.status) {
     case 'active':
+    case 'trialing':
+    case 'trial_canceling':
     case 'canceling':
     case 'past_due':
     case 'expired':
@@ -125,6 +138,10 @@ export function billingSummaryLabel(state: BillingState, t: (key: DesktopI18nKey
       return t('settings.statusFree')
     case 'active':
       return `Student Basic · ${t('settings.statusActive')}`
+    case 'trialing':
+      return `Student Basic · ${t('billing.trialStatus')}`
+    case 'trial_canceling':
+      return `Student Basic · ${t('settings.statusCanceling')}`
     case 'canceling':
       return `Student Basic · ${t('settings.statusCanceling')}`
     case 'past_due':

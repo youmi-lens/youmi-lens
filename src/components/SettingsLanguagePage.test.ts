@@ -1,46 +1,99 @@
 import { readFileSync } from 'node:fs'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { hasLanguageLimitation } from '../lib/languageLimitation'
-import type { LanguagePreferences } from '../lib/languagePreferences'
+import { DEFAULT_LANGUAGE_PREFERENCES, type LanguagePreferences } from '../lib/languagePreferences'
+import { LanguagePreferencesContext } from '../languagePreferencesContext'
+import { translateDesktop } from '../lib/desktopI18n'
+import { LectureLanguageFields } from './LectureLanguageFields'
 
 const src = readFileSync(new URL('./SettingsLanguagePage.tsx', import.meta.url), 'utf8')
 
-const base: LanguagePreferences = {
-  appLocale: 'en',
-  captionLanguage: 'en',
-  translationLanguage: 'zh-Hans',
-  languageMode: 'bilingual',
+function render(preferences: LanguagePreferences): string {
+  return renderToStaticMarkup(
+    createElement(
+      LanguagePreferencesContext.Provider,
+      {
+        value: {
+          preferences,
+          setPreference: () => undefined,
+          t: (key, vars) => translateDesktop(preferences.appLocale, key, vars),
+        },
+      },
+      createElement(LectureLanguageFields, { preferences, onPreferenceChange: () => undefined }),
+    ),
+  )
 }
 
-describe('hasLanguageLimitation — when the "verified live path" note should show', () => {
-  it('is hidden for the one fully-verified combination: English captions + Simplified Chinese translation, bilingual', () => {
-    expect(hasLanguageLimitation(base)).toBe(false)
+const selected = (html: string, label: string): string => {
+  const select = html.slice(html.indexOf(`aria-label="${label}"`))
+  const end = select.indexOf('</select>')
+  const chosen = select.slice(0, end).match(/<option value="([^"]*)"[^>]*selected/)
+  return chosen?.[1] ?? ''
+}
+
+describe('LectureLanguageFields', () => {
+  it('shows the default as English → 简体中文, independently selectable', () => {
+    const html = render(DEFAULT_LANGUAGE_PREFERENCES)
+    expect(selected(html, 'Spoken language')).toBe('en')
+    expect(selected(html, 'Translate to')).toBe('zh-Hans')
   })
 
-  it('is hidden for the verified combination in captions-only mode too (translation is irrelevant then)', () => {
-    expect(hasLanguageLimitation({ ...base, translationLanguage: 'ja', languageMode: 'captions-only' })).toBe(false)
+  it('Original only is its own choice and is what the control shows in captions-only mode', () => {
+    const html = render({ ...DEFAULT_LANGUAGE_PREFERENCES, languageMode: 'captions-only' })
+    expect(selected(html, 'Translate to')).toBe('original')
+    // The remembered target survives, so switching translation back on restores it.
   })
 
-  it('shows when captions are not fully available regardless of mode', () => {
-    expect(hasLanguageLimitation({ ...base, captionLanguage: 'zh-Hans' })).toBe(true)
+  it('never offers the spoken language as its own translation target', () => {
+    const html = render({ ...DEFAULT_LANGUAGE_PREFERENCES, captionLanguage: 'zh-Hans', translationLanguage: 'en' })
+    const translate = html.slice(html.indexOf('aria-label="Translate to"'))
+    expect(translate).not.toContain('value="zh-Hans"')
+    expect(translate).toContain('value="en"')
   })
 
-  it('shows when bilingual mode picks a translation language that is not fully available', () => {
-    expect(hasLanguageLimitation({ ...base, translationLanguage: 'ja' })).toBe(true)
+  it('a target equal to the spoken language reads as Original only, with a note — not a silent translation', () => {
+    const html = render({ ...DEFAULT_LANGUAGE_PREFERENCES, captionLanguage: 'zh-Hans', translationLanguage: 'zh-Hans' })
+    expect(selected(html, 'Translate to')).toBe('original')
+    expect(html).toContain('Same as the spoken language')
   })
 
-  it('does not show for an unsupported translation choice while in captions-only mode', () => {
-    expect(hasLanguageLimitation({ ...base, translationLanguage: 'fr', languageMode: 'captions-only' })).toBe(false)
+  it('Spanish as a SPOKEN language is listed, disabled, and says exactly why (final transcription)', () => {
+    const html = render(DEFAULT_LANGUAGE_PREFERENCES)
+    const spoken = html.slice(html.indexOf('aria-label="Spoken language"'), html.indexOf('aria-label="Translate to"'))
+    expect(spoken).toMatch(/<option value="es" disabled="">Español · transcription not supported yet<\/option>/)
+    expect(spoken).not.toContain('Not yet enabled')
+  })
+
+  it('every language is selectable as a TRANSLATION target (Español included), with no "not enabled" label', () => {
+    const html = render({ ...DEFAULT_LANGUAGE_PREFERENCES, captionLanguage: 'zh-Hans', translationLanguage: 'en' })
+    const target = html.slice(html.indexOf('aria-label="Translate to"'))
+    for (const value of ['original', 'en', 'ja', 'fr', 'es', 'ko']) expect(target).toContain(`<option value="${value}"`)
+    expect(target).not.toMatch(/disabled=""/)
+    expect(target).not.toContain('Not yet enabled')
+    // the spoken language itself is never offered as its own target
+    expect(target).not.toContain('<option value="zh-Hans"')
+  })
+
+  it('shows human names only — never raw codes', () => {
+    const html = render({ ...DEFAULT_LANGUAGE_PREFERENCES, captionLanguage: 'zh-Hans', translationLanguage: 'en' })
+    expect(html).not.toContain('en-US')
+    expect(html).not.toContain('zh-CN')
+    expect(html).toContain('>English<')
+    expect(html).toContain('>简体中文<')
   })
 })
 
-describe('SettingsLanguagePage source — QA16 language-mode value wiring unchanged', () => {
-  it('the segmented control still writes the exact stored values captions-only/bilingual', () => {
-    expect(src).toContain("onPreferenceChange('languageMode', 'captions-only')")
-    expect(src).toContain("onPreferenceChange('languageMode', 'bilingual')")
+describe('SettingsLanguagePage source', () => {
+  it('uses the shared fields, so Settings and Record Home cannot disagree', () => {
+    expect(src).toContain('LectureLanguageFields')
   })
 
-  it('the internal "verified live path" wording no longer renders unconditionally', () => {
+  it('has no second, competing control for translation (the old language-mode switch is gone)', () => {
+    expect(src).not.toContain("onPreferenceChange('languageMode'")
+  })
+
+  it('the internal "verified live path" wording no longer renders', () => {
     expect(src).not.toContain('settings.runtimeNote')
     expect(src).not.toContain('settings.preferenceNote')
   })

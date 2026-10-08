@@ -215,13 +215,53 @@ describe('readiness', () => {
     expect(lectureReadiness({ transcript: 'x', aiStatus: 'transcript_ready' })).toBe('transcript_only')
   })
 
-  it('reports a failed AI job', () => {
-    expect(lectureReadiness({ aiStatus: 'failed', transcript: 'x', summaryEn: 'y' })).toBe('failed')
+  it('reports a failed AI job that produced nothing', () => {
+    expect(lectureReadiness({ aiStatus: 'failed' })).toBe('failed')
+    expect(lectureReadiness({ aiStatus: 'failed', transcript: 'x' })).toBe('failed')
   })
 
-  it('treats persisted audio as ready even while AI is pending or failed', () => {
-    expect(lectureReadiness({ hasAudio: true, aiStatus: 'pending' })).toBe('ready')
-    expect(lectureReadiness({ hasAudio: true, aiStatus: 'failed' })).toBe('ready')
+  // Round 4 (2026-10-04): persisted outputs win over EVERY status. A regeneration
+  // that failed after a successful run leaves the earlier result on the row; the
+  // lecture must keep showing it, never read as unfinished.
+  it('persisted transcript + summary make a lecture ready whatever the status says', () => {
+    for (const aiStatus of ['failed', 'pending', 'queued', 'transcribing', 'summarizing', 'done']) {
+      expect(lectureReadiness({ aiStatus, transcript: 'x', summaryEn: 'y' })).toBe('ready')
+    }
+  })
+
+  // Regression for the 2026-10-04 production incident: a 2:17 lecture was
+  // shown as "Ready" with "No transcript yet / No summary yet" because saved
+  // audio alone used to short-circuit readiness to 'ready' — while the row sat
+  // at ai_status='pending' and nothing was ever going to process it.
+  it('does NOT report ready on saved audio alone while hosted AI is pending, in flight or failed', () => {
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'pending' })).toBe('processing')
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'queued' })).toBe('processing')
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'transcribing' })).toBe('processing')
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'summarizing' })).toBe('processing')
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'failed' })).toBe('failed')
+  })
+
+  it('treats a saved row with audio but no ai_status at all as processing, not ready', () => {
+    expect(lectureReadiness({ hasAudio: true })).toBe('processing')
+  })
+
+  it('is ready with audio once the transcript AND a summary actually exist', () => {
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'done', transcript: 'x', summaryEn: 'y' })).toBe('ready')
+  })
+
+  it('reports transcript-only with audio rather than ready', () => {
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'transcript_ready', transcript: 'x' })).toBe(
+      'transcript_only',
+    )
+  })
+
+  it('a failed enqueue is an explicit failure even though the row still says pending', () => {
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'pending', requestFailed: true })).toBe('failed')
+  })
+
+  it('keeps audio-is-ready where no hosted AI pipeline applies (local-only / own-key)', () => {
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'pending', aiExpected: false })).toBe('ready')
+    expect(lectureReadiness({ hasAudio: true, aiStatus: 'failed', aiExpected: false })).toBe('ready')
   })
 
   it('reports processing while a job is in flight', () => {

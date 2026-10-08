@@ -29,9 +29,9 @@ const uploadAudioSrc = readFileSync(new URL('../../server/uploadAudio.mjs', impo
 const viteConfigSrc = readFileSync(new URL('../../vite.config.ts', import.meta.url), 'utf8')
 
 describe('1 · existing course → lecture saves with the canonical course id', () => {
-  it('the main upload call sends the live selected course id, not a re-derived one', () => {
+  it('the main upload call sends the course id captured by the durable recording session', () => {
     expect(appSrc).toMatch(
-      /uploadLectureAudioViaServer\(supabase!, recordingId, blob, mime, durationSec, \{\s*course: courseVal,\s*courseId: recordingCourseId,/,
+      /uploadLectureAudioViaServer\(supabase!, recordingId, blob, mime, durationSec, \{\s*course: courseVal,\s*courseId: saveCourseId,/,
     )
   })
 
@@ -72,10 +72,12 @@ describe('2 · a newly created course → the save uses that new course id', () 
 })
 
 describe('3 · transcription unavailable → the lecture still saves successfully', () => {
-  it('the AI/transcription trigger after a successful retry-upload is isolated in its own try/catch', () => {
-    expect(appSrc).toMatch(
-      /if \(tok\) await requestHostedRecordingAi\(\{ accessToken: tok, recordingId: id \}\)\s*\n\s*\} catch \{\s*\n\s*\/\* processing can be started later/,
-    )
+  it('the AI hand-over after a successful retry-upload is fire-and-forget and durable, so it can never fail the save', () => {
+    // It used to be a single awaited attempt whose failure was swallowed in a bare
+    // catch — and then nothing would ever process the lecture. It now records a
+    // durable intent and retries itself (see processingIntents / lectureProcessing).
+    expect(appSrc).toMatch(/await deletePendingUpload\(id\)\s*\n(?:\s*\/\/.*\n)*\s*void startProcessingRef\.current\(id\)/)
+    expect(appSrc).not.toMatch(/if \(tok\) await requestHostedRecordingAi/)
   })
 
   it('no save-success path is gated on a transcription/summary API call succeeding first', () => {
@@ -89,9 +91,10 @@ describe('4 · downstream processing failure leaves the lecture durably saved', 
     expect(appSrc).toContain('void completeRecordingSessionPersist(recordingId).catch(() => { /* best-effort */ })')
   })
 
-  it('a pending-upload retry drops the local fallback copy only after cloud persistence is confirmed, and treats AI dispatch as separately best-effort', () => {
-    expect(appSrc).toMatch(/await deletePendingUpload\(id\)/)
-    expect(appSrc).toMatch(/\/\* processing can be started later from the lecture; upload already safe \*\//)
+  it('a pending-upload retry drops the local fallback copy only after cloud persistence is confirmed, and hands over separately', () => {
+    const retry = appSrc.slice(appSrc.indexOf('const handleRetryPendingUpload'), appSrc.indexOf('const handleDeletePendingUpload'))
+    expect(retry.indexOf('await deletePendingUpload(id)')).toBeGreaterThan(retry.indexOf('insertLectureRecordingRow('))
+    expect(retry.indexOf('void startProcessingRef.current(id)')).toBeGreaterThan(retry.indexOf('await deletePendingUpload(id)'))
   })
 })
 
@@ -101,7 +104,7 @@ describe('5 · a save that only reaches local pending-upload is a visible, recov
   })
 
   it('the pending-upload save always carries the canonical course id forward, so a later retry cannot lose it', () => {
-    expect(appSrc).toMatch(/savePendingUpload\(\{\s*id: recordingId,\s*userId: userId!,\s*course: courseVal,\s*courseId: recordingCourseId,/)
+    expect(appSrc).toMatch(/savePendingUpload\(\{\s*id: recordingId,\s*userId: userId!,\s*course: courseVal,\s*courseId: saveCourseId,/)
   })
 
   it('a recovered crash recording enters the same canonical course-aware upload and insert path', () => {

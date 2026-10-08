@@ -1,3 +1,4 @@
+import { lectureLifecycle } from './lectureLifecycle'
 /**
  * Parser for the production lecture summary.
  *
@@ -92,19 +93,40 @@ export function transcriptParagraphs(transcript: string | null | undefined): str
 export type LectureReadiness = 'processing' | 'transcript_only' | 'ready' | 'failed' | 'none'
 
 export function lectureReadiness(input: {
-  /** Persisted audio is usable even while AI enrichment is pending or failed. */
+  /** Persisted audio. Keeps the lecture playable regardless of AI state — it
+   *  does NOT, by itself, make the lecture "ready" (see `aiExpected`). */
   hasAudio?: boolean
   aiStatus?: string | null
   transcript?: string | null
   summaryEn?: string | null
   summaryZh?: string | null
+  sourceSummary?: string | null
+  translatedSummary?: string | null
+  /**
+   * Whether a hosted AI pipeline is expected to produce this lecture's
+   * transcript and summary. Default true. When true, "ready" means those
+   * outputs exist — saved audio alone must not read as ready, or the lecture
+   * shows "Ready" over "No transcript yet" while nothing is processing it
+   * (the 2026-10-04 production incident). False for local-only and own-key
+   * lectures, where no hosted pipeline applies and audio is the whole product.
+   */
+  aiExpected?: boolean
+  /** The attempt to start processing was rejected or never reached the server.
+   *  The row still says `pending`, so without this it would read as processing
+   *  forever. */
+  requestFailed?: boolean
 }): LectureReadiness {
-  if (input.hasAudio) return 'ready'
-  if (input.aiStatus === 'failed') return 'failed'
-  const hasSummary = Boolean(input.summaryEn?.trim() || input.summaryZh?.trim())
-  const hasTranscript = Boolean(input.transcript?.trim())
-  if (hasSummary && hasTranscript) return 'ready'
-  if (hasTranscript) return 'transcript_only'
-  if (input.aiStatus && !['done', 'transcript_ready'].includes(input.aiStatus)) return 'processing'
-  return 'none'
+  // One lifecycle for every surface: see `lectureLifecycle`. Persisted outputs
+  // win over every status, and the status is read exactly as the server states it.
+  return lectureLifecycle({
+    hasAudio: input.hasAudio,
+    aiStatus: input.aiStatus,
+    transcript: input.transcript,
+    summaryEn: input.summaryEn,
+    summaryZh: input.summaryZh,
+    sourceSummary: input.sourceSummary,
+    translatedSummary: input.translatedSummary,
+    aiExpected: input.aiExpected,
+    requestFailed: input.requestFailed,
+  }).kind
 }

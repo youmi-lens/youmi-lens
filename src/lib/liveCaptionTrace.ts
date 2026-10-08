@@ -9,6 +9,12 @@
  * filter by "CaptionTrace" to see the full audit.
  */
 
+import { captionDiagnosticsEnabled } from './captionDiagnostics'
+
+function tracingEnabled(): boolean {
+  return import.meta.env.DEV || captionDiagnosticsEnabled()
+}
+
 type ChangeKind =
   | 'new_segment'
   | 'exact_same'
@@ -74,6 +80,7 @@ function getOrCreateHist(map: Map<string, SegHistory>, segId: string): SegHistor
 }
 
 function out(tag: string, fields: Record<string, unknown>) {
+  if (!tracingEnabled()) return
   console.info(`[CaptionTrace] ${tag}`, JSON.stringify(fields, null, 0))
 }
 
@@ -149,6 +156,7 @@ export function traceWsClosed(reason?: string) {
 }
 
 export function traceEnInterim(segmentId: string, rev: number, text: string) {
+  if (!tracingEnabled()) return
   const h = getOrCreateHist(segHistoryEn, segmentId)
   const kind = classifyChange(h.prevText, text)
   const now = elapsed()
@@ -174,6 +182,7 @@ export function traceEnInterim(segmentId: string, rev: number, text: string) {
 }
 
 export function traceEnFinal(segmentId: string, text: string) {
+  if (!tracingEnabled()) return
   const h = getOrCreateHist(segHistoryEn, segmentId)
   const kind = classifyChange(h.prevText, text)
   const now = elapsed()
@@ -202,6 +211,7 @@ export function traceZhInterim(
   sourceEn: string,
   dropped: string | null,
 ) {
+  if (!tracingEnabled()) return
   const h = getOrCreateHist(segHistoryZh, segmentId)
   const now = elapsed()
   h.interimCount++
@@ -227,6 +237,7 @@ export function traceZhFinal(
   sourceEn: string,
   dropped: string | null,
 ) {
+  if (!tracingEnabled()) return
   const h = getOrCreateHist(segHistoryZh, segmentId)
   const now = elapsed()
 
@@ -298,4 +309,13 @@ export function traceView(view: {
     grayEnHead: head(view.primaryGray, 80),
     grayZhHead: head(view.secondaryGray, 80),
   })
+}
+
+/**
+ * How long after an ORIGINAL caption was finalized its own translation arrived.
+ * The number the pairing contract is judged on: it is the window in which the
+ * view must show "pending" (never another caption's translation).
+ */
+export function tracePairLag(segmentId: string, translationLagMs: number) {
+  out('pair_translation_lag', { ms: elapsed(), segmentId, translationLagMs })
 }

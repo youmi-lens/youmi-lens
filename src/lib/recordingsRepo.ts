@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AiJobStatus, Recording, RecordingDetail } from '../types'
 import { getAiApiBase } from './ai/apiBase'
 import { buildLectureMetadataPatch } from './lectureTitleIntegrity'
+import { CloudAnnotationsUnavailableError } from './lectureNotes'
 
 const BUCKET = 'lecture-audio'
 
@@ -74,6 +75,12 @@ export type RecordingDbRow = {
   transcript_raw: string | null
   summary_en: string | null
   summary_zh: string | null
+  /** Present once the content-language migration has run; absent before it. */
+  source_language?: string | null
+  translation_language?: string | null
+  source_summary?: string | null
+  translated_summary?: string | null
+  translated_transcript?: string | null
   live_transcript: string | null
   live_transcript_raw: string | null
   ai_status: string | null
@@ -126,6 +133,11 @@ export function mapDbRowToRecording(r: RecordingDbRow): Recording {
     transcriptRaw: r.transcript_raw ?? undefined,
     summaryEn: r.summary_en ?? undefined,
     summaryZh: r.summary_zh ?? undefined,
+    sourceLanguage: r.source_language ?? undefined,
+    translationLanguage: r.translation_language ?? undefined,
+    sourceSummary: r.source_summary ?? undefined,
+    translatedSummary: r.translated_summary ?? undefined,
+    translatedTranscript: r.translated_transcript ?? undefined,
     liveTranscript: r.live_transcript ?? undefined,
     liveTranscriptRaw: r.live_transcript_raw ?? undefined,
     aiStatus: parseAiJobStatus(r.ai_status),
@@ -257,6 +269,58 @@ export async function getRecordingDetail(
   return { ...detail, audioUrl: await getRecordingAudioUrl(supabase, row.storage_path) }
 }
 
+/** The server-owned progress columns — everything needed to follow a job, no text. */
+export type ProcessingStatusRow = {
+  id: string
+  aiStatus: Recording['aiStatus']
+  aiError?: string
+  aiUpdatedAt?: number
+  transcriptReady?: boolean
+  summaryReady?: boolean
+  translationReady?: boolean
+}
+
+const STATUS_COLUMNS =
+  'id, ai_status, ai_error, ai_updated_at, transcript_ready, summary_ready, translation_ready'
+
+function mapStatusRow(r: Pick<RecordingDbRow, 'id' | 'ai_status' | 'ai_error' | 'ai_updated_at' | 'transcript_ready' | 'summary_ready' | 'translation_ready'>): ProcessingStatusRow {
+  return {
+    id: r.id,
+    aiStatus: parseAiJobStatus(r.ai_status),
+    aiError: r.ai_error ?? undefined,
+    aiUpdatedAt: r.ai_updated_at ? new Date(r.ai_updated_at).getTime() : undefined,
+    transcriptReady: r.transcript_ready === true ? true : r.transcript_ready === false ? false : undefined,
+    summaryReady: r.summary_ready === true ? true : r.summary_ready === false ? false : undefined,
+    translationReady: r.translation_ready === true ? true : r.translation_ready === false ? false : undefined,
+  }
+}
+
+/**
+ * Authoritative status of a few lectures in ONE small query.
+ *
+ * Polling a job must not drag the transcript and summary text through the wire
+ * every few seconds, nor read the whole library: on 2026-10-04 the database was
+ * answering writes in 8–25s, and a heavy poll only makes that worse. Text is
+ * fetched once, by `getRecordingDetail`, when a row first reports it is done.
+ *
+ * Throws on a failed read — the caller treats that as "unknown", never as
+ * "finished" or "failed".
+ */
+export async function getProcessingStatuses(
+  supabase: SupabaseClient,
+  userId: string,
+  ids: readonly string[],
+): Promise<ProcessingStatusRow[]> {
+  if (ids.length === 0) return []
+  const { data, error } = await supabase
+    .from('recordings')
+    .select(STATUS_COLUMNS)
+    .eq('user_id', userId)
+    .in('id', [...ids])
+  if (error) throw error
+  return ((data ?? []) as Array<Parameters<typeof mapStatusRow>[0]>).map(mapStatusRow)
+}
+
 /** Resolves playback separately so a signer delay cannot block Lecture Detail. */
 export async function getRecordingAudioUrl(supabase: SupabaseClient, storagePath: string): Promise<string> {
   const { data: signed, error: signErr } = await supabase.storage
@@ -384,6 +448,10 @@ export async function uploadLectureAudioViaServer(
     title: string
     liveTranscript: string
     liveTranscriptRaw: string
+    /** The lecture's languages, frozen at record start. Stored on the row so processing
+     *  — and any retry — uses THESE, never today's preference. */
+    sourceLanguage?: string
+    translationLanguage?: string
   },
 ): Promise<{ storagePath: string; recording?: RecordingDbRow }> {
   const { data: sessData, error: sessErr } = await supabase.auth.getSession()
@@ -407,6 +475,8 @@ export async function uploadLectureAudioViaServer(
     form.append('title', metadata.title)
     form.append('live_transcript', metadata.liveTranscript)
     form.append('live_transcript_raw', metadata.liveTranscriptRaw)
+    if (metadata.sourceLanguage) form.append('source_language', metadata.sourceLanguage)
+    if (metadata.translationLanguage) form.append('translation_language', metadata.translationLanguage)
   }
 
   const apiBase = getAiApiBase()
@@ -477,6 +547,9 @@ export function lectureRecordingInsertPayload(input: {
   liveTranscript: string
   /** Raw assembled live text before canonicalization. */
   liveTranscriptRaw: string
+  /** Frozen at record start. Omitted ⇒ the column defaults (legacy en → zh-Hans) apply. */
+  sourceLanguage?: string
+  translationLanguage?: string
   /** @internal fixed clock for tests */
   nowIso?: string
 }) {
@@ -492,6 +565,8 @@ export function lectureRecordingInsertPayload(input: {
     storage_path: input.storagePath,
     live_transcript: input.liveTranscript || null,
     live_transcript_raw: input.liveTranscriptRaw || null,
+    ...(input.sourceLanguage ? { source_language: input.sourceLanguage } : {}),
+    ...(input.translationLanguage ? { translation_language: input.translationLanguage } : {}),
     ai_status: 'pending' as const,
     ai_error: null,
     ai_updated_at: nowIso,
@@ -514,6 +589,8 @@ export async function insertLectureRecordingRow(input: {
   storagePath: string
   liveTranscript: string
   liveTranscriptRaw: string
+  sourceLanguage?: string
+  translationLanguage?: string
 }): Promise<'inserted' | 'already_exists'> {
   const { error: insErr } = await input.supabase
     .from('recordings')
@@ -529,6 +606,8 @@ export async function insertLectureRecordingRow(input: {
         storagePath: input.storagePath,
         liveTranscript: input.liveTranscript,
         liveTranscriptRaw: input.liveTranscriptRaw,
+        sourceLanguage: input.sourceLanguage,
+        translationLanguage: input.translationLanguage,
       }),
     )
 
@@ -610,7 +689,9 @@ export async function updateRecordingAi(
 ): Promise<void> {
   const payload: Record<string, string | undefined> = {}
   if (patch.transcript !== undefined) payload.transcript = patch.transcript
-  if (patch.transcriptRaw !== undefined) payload.transcript_raw = patch.transcriptRaw
+  // Raw ASR is optional diagnostic evidence; production has no transcript_raw
+  // column. Persist the canonical result and summaries against its supported
+  // schema rather than rejecting the entire update for an unused raw field.
   if (patch.summaryEn !== undefined) payload.summary_en = patch.summaryEn
   if (patch.summaryZh !== undefined) payload.summary_zh = patch.summaryZh
 
@@ -755,7 +836,13 @@ export async function updateRecordingNotesMarks(
   }
   if (Object.keys(payload).length === 0) return
   const { error } = await supabase.from('recordings').update(payload).eq('id', id).eq('user_id', userId)
-  if (error) throw error
+  if (error) {
+    // A database that predates Cloud Library Stage 4 has no `notes` / `marked_timestamps`
+    // column and CANNOT store these fields at all (production, 2026-10-04). Say so with
+    // a type the UI can tell apart from a flaky network — "try again" cannot fix it.
+    if (isMissingColumn(error)) throw new CloudAnnotationsUnavailableError()
+    throw error
+  }
 }
 
 /**

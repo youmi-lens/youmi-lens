@@ -1,17 +1,20 @@
 /**
- * LiveEngine — consumes **streaming ASR text** from `YoumiLiveAdapter` (`en_interim` / `en_final`), then
- * **translation-from-text** via HTTP. Post-class transcription/summary stay out of this module.
+ * LiveEngine — consumes **streaming ASR text** from `YoumiLiveAdapter` (`en_interim` / `en_final`) and
+ * the server's live **translation** of that same stream (`translation_interim` / `translation_final`).
+ * Post-class transcription/summary stay out of this module.
+ *
+ * There is exactly ONE live translation path: the server translates on the persistent live WebSocket
+ * (the path the iPad has always used) and names, by id, the captions each translation belongs to. This
+ * module no longer calls any HTTP translation route, so a caption is never translated (or paid for) twice.
+ * Original captions are emitted the instant they arrive; translations follow whenever the server
+ * delivers them and carry the caption identity the model needs to attach them correctly.
  */
+import { deOverlapForLanguage } from '../liveCaptionDeOverlap'
+import { isSpaceDelimited, languageScript, type ContentLanguageCode } from '../contentLanguages'
 import {
-  translateLiveCaption,
-  TranslateCaptionAuthError,
-  TranslateCaptionTransientError,
-} from '../aiClient'
-import { deOverlapEnglish } from '../liveCaptionDeOverlap'
-import {
-  normalizeEnglishPrimaryPayloadOrReject,
+  isRejectedTranslationToken,
+  normalizePrimaryPayloadOrReject,
   normalizeZhPayloadOrReject,
-  sanitizeEnglishForZhTranslate,
 } from '../liveCaptionSanitize'
 import {
   bumpEnFinalArrivalWall,
@@ -23,24 +26,28 @@ import {
   traceReset,
 } from '../liveCaptionTrace'
 import { YoumiLiveAdapter, type YoumiAdapterOpts } from './adapters/youmiAdapter'
+import type { TranslationLagTracker } from './translationLag'
 import type { LiveEngineEvent, LiveEngineListener } from './types'
 
 type StartOptions = {
-  translateTarget: 'zh' | 'en' | 'off'
+  /**
+   * The language being SPOKEN, frozen for this recording. It decides how captions
+   * are validated and de-duplicated and what the live socket is told to recognise.
+   * Defaults to English (the legacy behaviour).
+   */
+  sourceLanguage?: ContentLanguageCode
+  /**
+   * The lecture's translation language. Equal to `sourceLanguage` (or omitted) means
+   * Original only: the server is told there is nothing to translate and performs no
+   * translation work at all.
+   */
+  translationLanguage?: ContentLanguageCode
 }
 
 function log(tag: string, fields?: Record<string, unknown>) {
   if (fields) console.info(`[LiveEngine] ${tag}`, JSON.stringify(fields))
   else console.info(`[LiveEngine] ${tag}`)
 }
-
-// ─── Translation queue ────────────────────────────────────────────────────────
-// translateFinal is fire-and-forget. Without rate-limiting, a slow Qwen API can
-// cause 10+ concurrent fetches after 20+ minutes, degrading the event loop.
-// Cap at MAX_CONCURRENT translations; silently drop oldest when backlog exceeds
-// MAX_QUEUE_SIZE so the queue never grows unboundedly during a long lecture.
-const MAX_CONCURRENT_TRANSLATIONS = 2
-const MAX_QUEUE_SIZE = 5
 
 export type LiveEngineOpts = Pick<YoumiAdapterOpts, 'tokenGetter'>
 
@@ -49,35 +56,21 @@ export class LiveEngine {
   private listener: LiveEngineListener | null = null
   private adapter: YoumiLiveAdapter | null = null
   private running = false
-  /** Last successful `warmUpstream()` probe rate — used to re-warm after idle TTL teardown. */
-  private lastWarmSampleRate: number | null = null
-  private translateTarget: 'zh' | 'en' | 'off' = 'off'
-  private zhRevBySeg = new Map<string, number>()
-  /** Monotonic per segmentId so stale translateFinal completions are dropped when a newer final supersedes. */
-  private translateRevBySeg = new Map<string, number>()
-  /**
-   * Bumped on each en_final for a segment so in-flight translateInterim HTTP completions
-   * (same segment, older EN draft) never emit zh_interim after the segment has finalized.
-   */
-  private zhInterimGenBySeg = new Map<string, number>()
-  /** Latest EN interim text per segment (timer reads this, not a stale closure). */
+  private sourceLanguage: ContentLanguageCode = 'en'
+  private translationLanguage: ContentLanguageCode = 'en'
+  /** False for Original only / same language: the server is told there is nothing to translate. */
+  private translationEnabled = false
+  /** Latest EN interim text per segment (de-duplicates identical interims). */
   private latestEnInterimBySeg = new Map<string, string>()
-  /** Last EN source we actually translated for zh_interim (phrase-aligned; avoids micro-retranslate). */
-  private lastZhInterimChunkEnBySeg = new Map<string, string>()
-  private lastZhInterimChunkAtMsBySeg = new Map<string, number>()
 
   /** Monotonic: only grows via appending de-overlapped novelText from en_final events. */
   private committedEnFull = ''
 
-  // Debounce interim translation: latest interim only, keep secondary line snappy without spamming API.
-  private interimTranslateTimer: ReturnType<typeof setTimeout> | null = null
-  /** Debounced so zh_interim tracks phrase-level EN, not every ASR partial. Lower = snappier secondary line. */
-  private static readonly INTERIM_TRANSLATE_DEBOUNCE_MS = 120
-
-  // Translation queue state
-  private translationQueue: Array<{ segmentId: string; text: string; enqueuedAt: number; rev: number }> =
-    []
-  private activeTranslations = 0
+  /**
+   * Finalized captions still waiting for the translation that covers them. Lets the
+   * Stop flow wait for the tail translation instead of guessing a delay.
+   */
+  private awaitingTranslation = new Set<string>()
 
   // Session-level timing for long-run diagnostics: ms since engine.start()
   private sessionStartMs = 0
@@ -93,24 +86,32 @@ export class LiveEngine {
     this.listener = listener
   }
 
+  /** Client-measured original → translation lag (median / p90), for the acceptance gate. */
+  get translationLag(): TranslationLagTracker | null {
+    return this.adapter?.lag ?? null
+  }
+
   start(opts: StartOptions) {
     if (this.running) this.stop()
     this.running = true
-    this.translateTarget = opts.translateTarget
-    this.zhRevBySeg.clear()
-    this.translateRevBySeg.clear()
-    this.zhInterimGenBySeg.clear()
+    this.sourceLanguage = opts.sourceLanguage ?? 'en'
+    this.translationLanguage = opts.translationLanguage ?? this.sourceLanguage
+    this.translationEnabled = this.translationLanguage !== this.sourceLanguage
     this.latestEnInterimBySeg.clear()
-    this.lastZhInterimChunkEnBySeg.clear()
-    this.lastZhInterimChunkAtMsBySeg.clear()
+    this.awaitingTranslation.clear()
     this.committedEnFull = ''
-    this.translationQueue = []
-    this.activeTranslations = 0
     this.sessionStartMs = Date.now()
     traceReset()
-    log('start')
+    log('start', { translation: this.translationEnabled })
     this.emit({ type: 'status', status: 'starting' })
-    const adapter = new YoumiLiveAdapter({ tokenGetter: this.engineOpts.tokenGetter })
+    const adapter = new YoumiLiveAdapter({
+      tokenGetter: this.engineOpts.tokenGetter,
+      sourceLanguage: this.sourceLanguage,
+      // The REAL target: the server translates on this same socket and tells us, by id,
+      // which captions each translation belongs to. Equal to the source = Original only,
+      // and the server then does no translation work at all.
+      translationLanguage: this.translationLanguage,
+    })
     this.adapter = adapter
     adapter.onEvent((ev) => {
       if (!this.running) return
@@ -120,8 +121,9 @@ export class LiveEngine {
         return
       }
       if (ev.type === 'warm_idle_teardown') {
-        log('warm_idle_teardown — re-warming DashScope session')
-        void this.rewarmAfterIdleTeardown()
+        // Intentional TTL expiry ends this idle warm lifecycle. Keep the adapter
+        // ready for demand-driven PCM, but do not open another paid idle session.
+        log('warm_idle_teardown — waiting for recording')
         return
       }
       if (ev.type === 'reconnecting') {
@@ -140,14 +142,14 @@ export class LiveEngine {
         return
       }
       if (ev.type === 'en_interim') {
-        const clean = normalizeEnglishPrimaryPayloadOrReject(ev.text)
+        const clean = normalizePrimaryPayloadOrReject(ev.text, this.sourceLanguage)
         if (!clean) return
         traceEnInterim(ev.segmentId, ev.rev, clean)
         const prev = this.latestEnInterimBySeg.get(ev.segmentId) ?? ''
         if (clean === prev) return
         this.latestEnInterimBySeg.set(ev.segmentId, clean)
 
-        const deo = deOverlapEnglish(this.committedEnFull, clean)
+        const deo = deOverlapForLanguage(this.committedEnFull, clean, languageScript(this.sourceLanguage))
         traceDeOverlap('en_interim', ev.segmentId, clean.length, deo)
         const rawTok = clean.split(/\s+/).filter(Boolean).length
         traceInterimPipeline(ev.segmentId, ev.rev, {
@@ -155,59 +157,17 @@ export class LiveEngine {
           novelTok: deo.novelTokenCount,
           shrink6to2: rawTok >= 6 && deo.novelTokenCount <= 2,
         })
+        // The original goes out IMMEDIATELY — nothing here waits on translation.
         this.emit({ type: 'en_interim', segmentId: ev.segmentId, rev: ev.rev, text: deo.novelText })
         bumpEnInterimArrivalWall()
-        console.info(
-          '[live-latency] en_interim_ui_update',
-          JSON.stringify({
-            segmentId: ev.segmentId,
-            rev: ev.rev,
-            translateTarget: this.translateTarget,
-            len: deo.novelText.length,
-            sessionMs: this.elapsed(),
-          }),
-        )
-
-        if (this.interimTranslateTimer) {
-          clearTimeout(this.interimTranslateTimer)
-          this.interimTranslateTimer = null
-        }
-        const capturedId = ev.segmentId
-        const gen = this.zhInterimGenBySeg.get(capturedId) ?? 0
-        this.interimTranslateTimer = setTimeout(() => {
-          this.interimTranslateTimer = null
-          if (this.translateTarget !== 'off') {
-            console.info(
-              '[live-latency] zh_interim_debounce_fired',
-              JSON.stringify({
-                segmentId: capturedId,
-                debounceMs: LiveEngine.INTERIM_TRANSLATE_DEBOUNCE_MS,
-                sessionMs: this.elapsed(),
-              }),
-            )
-          }
-          const rawLatest = this.latestEnInterimBySeg.get(capturedId) ?? ''
-          if (!rawLatest) return
-          const latestDeo = deOverlapEnglish(this.committedEnFull, rawLatest)
-          if (!latestDeo.novelText.trim()) return
-          void this.translateInterim(capturedId, latestDeo.novelText, gen)
-        }, LiveEngine.INTERIM_TRANSLATE_DEBOUNCE_MS)
         return
       }
       if (ev.type === 'en_final') {
-        if (this.interimTranslateTimer) {
-          clearTimeout(this.interimTranslateTimer)
-          this.interimTranslateTimer = null
-        }
-        const sid = ev.segmentId
-        this.zhInterimGenBySeg.set(sid, (this.zhInterimGenBySeg.get(sid) ?? 0) + 1)
-        this.lastZhInterimChunkEnBySeg.delete(sid)
-        this.lastZhInterimChunkAtMsBySeg.delete(sid)
-        const cleanFinal = normalizeEnglishPrimaryPayloadOrReject(ev.text)
+        const cleanFinal = normalizePrimaryPayloadOrReject(ev.text, this.sourceLanguage)
         if (!cleanFinal) return
         traceEnFinal(ev.segmentId, cleanFinal)
 
-        const deo = deOverlapEnglish(this.committedEnFull, cleanFinal)
+        const deo = deOverlapForLanguage(this.committedEnFull, cleanFinal, languageScript(this.sourceLanguage))
         traceDeOverlap('en_final', ev.segmentId, cleanFinal.length, deo)
 
         if (!deo.novelText.trim()) {
@@ -220,22 +180,67 @@ export class LiveEngine {
           return
         }
 
-        this.committedEnFull += (this.committedEnFull ? ' ' : '') + deo.novelText
+        this.committedEnFull += (this.committedEnFull && isSpaceDelimited(this.sourceLanguage) ? ' ' : '') + deo.novelText
         log('en_final', {
           segmentId: ev.segmentId,
           novelLen: deo.novelText.length,
           committedLen: this.committedEnFull.length,
           overlapTokens: deo.overlapTokenCount,
           sessionMs: this.elapsed(),
-          translationQueueDepth: this.translationQueue.length,
-          activeTranslations: this.activeTranslations,
+          awaitingTranslation: this.awaitingTranslation.size,
         })
+        if (this.translationEnabled) this.awaitingTranslation.add(ev.segmentId)
         this.emit({ type: 'en_final', segmentId: ev.segmentId, text: deo.novelText })
         bumpEnFinalArrivalWall()
-        this.enqueueTranslation(ev.segmentId, deo.novelText)
+        return
+      }
+      if (ev.type === 'translation_interim') {
+        if (!this.translationEnabled) return
+        const text = this.acceptTranslationText(ev.text, ev.sourceText)
+        if (!text) return
+        this.emit({
+          type: 'zh_interim',
+          segmentId: ev.segmentId,
+          rev: ev.revision,
+          text,
+          sourceEn: ev.sourceText ?? '',
+        })
+        return
+      }
+      if (ev.type === 'translation_final') {
+        if (!this.translationEnabled) return
+        const text = this.acceptTranslationText(ev.text, ev.sourceText)
+        for (const id of ev.segmentIds) this.awaitingTranslation.delete(id)
+        if (!text) return
+        this.emit({
+          type: 'zh_final',
+          segmentId: ev.segmentIds[ev.segmentIds.length - 1],
+          segmentIds: ev.segmentIds,
+          text,
+          sourceEn: ev.sourceText ?? '',
+        })
       }
     })
     adapter.start()
+  }
+
+  /**
+   * The translation text, or null when it must not be shown.
+   *
+   * Chinese and English targets keep their script guards (an error token, a mostly-Han "English" line,
+   * a Latin-garbled "Chinese" line). Every other target — Japanese, French, Spanish, Korean — gets only
+   * the generic checks: not empty, not a server error token, and not the source handed back unchanged.
+   * No Chinese assumption is applied to them: Latin terms inside Japanese or Korean are legitimate.
+   */
+  private acceptTranslationText(raw: string, sourceText: string | null): string | null {
+    const text = raw.trim()
+    if (!text) return null
+    if (isRejectedTranslationToken(text)) return null
+    const norm = (v: string) => v.replace(/\s+/g, ' ').trim().toLowerCase()
+    if (sourceText && norm(text) === norm(sourceText)) return null // the source echoed back is not a translation
+    if (this.translationLanguage === 'zh-Hans') return normalizeZhPayloadOrReject(text, 'zh')
+    if (this.translationLanguage === 'en') return normalizeZhPayloadOrReject(text, 'en')
+    return text
   }
 
   /**
@@ -243,42 +248,24 @@ export class LiveEngine {
    */
   async warmUpstream(sampleRate: number): Promise<void> {
     if (!this.running || !this.adapter) return
-    this.lastWarmSampleRate = sampleRate
     this.emit({ type: 'status', status: 'warming' })
     await this.adapter.warmSession(sampleRate)
-  }
-
-  private async rewarmAfterIdleTeardown() {
-    if (!this.running || !this.adapter || this.lastWarmSampleRate === null) return
-    try {
-      this.emit({ type: 'status', status: 'warming' })
-      await this.adapter.warmSession(this.lastWarmSampleRate)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      log('rewarm_after_idle_teardown_failed', { message: msg })
-      this.emit({
-        type: 'error',
-        code: 'warm_idle_rewarm_failed',
-        message: msg,
-        recoverable: true,
-      })
-    }
   }
 
   /**
    * Call after local microphone capture has stopped so the ASR provider can emit
    * trailing finals. Does not tear down the adapter (still receives WS messages).
+   * `stream_stop` also makes the server translate the trailing phrase immediately.
    */
   notifyAudioCaptureEnded() {
     if (!this.running) return
     log('notifyAudioCaptureEnded')
-    this.flushPendingInterimTranslation()
     this.adapter?.notifyAudioEnd()
   }
 
   /**
-   * Wait for trailing stream_final events and translation jobs after capture end.
-   * `minTailMs` gives ASR time to flush; exit early once translation queue is idle.
+   * Wait for trailing stream_final events and the translation that covers them after capture end.
+   * `minTailMs` gives ASR time to flush; exit early once every finalized caption has its translation.
    */
   async waitAfterCaptureEnd(opts: { minTailMs: number; maxMs: number }): Promise<void> {
     if (!this.running) return
@@ -286,43 +273,20 @@ export class LiveEngine {
     while (Date.now() - t0 < opts.maxMs) {
       await new Promise((r) => setTimeout(r, 120))
       const elapsed = Date.now() - t0
-      const qIdle = this.translationQueue.length === 0 && this.activeTranslations === 0
-      if (elapsed >= opts.minTailMs && qIdle) break
+      if (elapsed >= opts.minTailMs && this.awaitingTranslation.size === 0) break
     }
     log('waitAfterCaptureEnd', {
       waitedMs: Date.now() - t0,
-      queueDepth: this.translationQueue.length,
-      activeTranslations: this.activeTranslations,
+      awaitingTranslation: this.awaitingTranslation.size,
     })
-  }
-
-  private flushPendingInterimTranslation() {
-    if (this.interimTranslateTimer) {
-      clearTimeout(this.interimTranslateTimer)
-      this.interimTranslateTimer = null
-    }
-    if (this.translateTarget === 'off' || !this.running) return
-    for (const segId of this.latestEnInterimBySeg.keys()) {
-      const raw = this.latestEnInterimBySeg.get(segId) ?? ''
-      if (!raw.trim()) continue
-      const deo = deOverlapEnglish(this.committedEnFull, raw)
-      if (!deo.novelText.trim()) continue
-      const gen = this.zhInterimGenBySeg.get(segId) ?? 0
-      void this.translateInterim(segId, deo.novelText, gen)
-    }
   }
 
   stop() {
     if (!this.running) return
     this.running = false
-    if (this.interimTranslateTimer) {
-      clearTimeout(this.interimTranslateTimer)
-      this.interimTranslateTimer = null
-    }
-    this.translationQueue = []
-    this.lastWarmSampleRate = null
     this.adapter?.stop()
     this.adapter = null
+    this.awaitingTranslation.clear()
     this.emit({ type: 'status', status: 'closed' })
     log('stop', { totalSessionMs: this.elapsed() })
   }
@@ -346,157 +310,6 @@ export class LiveEngine {
     if (!this.running || !this.adapter) return
     this.adapter.markRecordingPcmActivity()
     this.adapter.pushPcm(buffer, sampleRate)
-  }
-
-  // ─── Translation queue management ──────────────────────────────────────────
-
-  private enqueueTranslation(segmentId: string, text: string) {
-    if (this.translateTarget === 'off') return
-    if (!text.trim()) return
-
-    const rev = (this.translateRevBySeg.get(segmentId) ?? 0) + 1
-    this.translateRevBySeg.set(segmentId, rev)
-    this.translationQueue = this.translationQueue.filter((j) => j.segmentId !== segmentId)
-
-    this.translationQueue.push({ segmentId, text, enqueuedAt: Date.now(), rev })
-
-    // Drop oldest entries when backlogged — prevents unbounded growth during long sessions
-    if (this.translationQueue.length > MAX_QUEUE_SIZE) {
-      const dropped = this.translationQueue.splice(0, this.translationQueue.length - MAX_QUEUE_SIZE)
-      log('translation queue backlog — dropped stale jobs', {
-        dropped: dropped.length,
-        sessionMs: this.elapsed(),
-      })
-    }
-
-    this.drainTranslationQueue()
-  }
-
-  private drainTranslationQueue() {
-    while (
-      this.activeTranslations < MAX_CONCURRENT_TRANSLATIONS &&
-      this.translationQueue.length > 0
-    ) {
-      const job = this.translationQueue.shift()!
-      const waitMs = Date.now() - job.enqueuedAt
-      if (waitMs > 8000) {
-        // Discard jobs that sat in queue too long — avoids stale translations appearing after zh_final
-        log('translation job expired in queue', { segmentId: job.segmentId, waitMs, sessionMs: this.elapsed() })
-        continue
-      }
-      this.activeTranslations++
-      this.translateFinal(job.segmentId, job.text, job.enqueuedAt, job.rev).finally(() => {
-        this.activeTranslations--
-        this.drainTranslationQueue()
-      })
-    }
-  }
-
-  /** Only translate when EN moved enough for a phrase chunk (aligned with App phrase display). */
-  private shouldEmitZhInterimForChunk(segmentId: string, en: string): boolean {
-    const last = this.lastZhInterimChunkEnBySeg.get(segmentId) ?? ''
-    if (en === last) return false
-    const trim = en.trimEnd()
-    const endsClause = /[.!?,;:\u2026]\s*$/.test(trim)
-    if (endsClause) return true
-    if (last.length === 0) {
-      return en.trim().length >= 6 || endsClause
-    }
-    if (en.length - last.length >= 14) return true
-    const now = Date.now()
-    const prevAt = this.lastZhInterimChunkAtMsBySeg.get(segmentId) ?? 0
-    if (now - prevAt >= 520 && en.length > last.length + 4) return true
-    return false
-  }
-
-  private async translateInterim(segmentId: string, text: string, expectedGen: number) {
-    if (this.translateTarget === 'off') return
-    let t = text.trim()
-    if (!t) return
-    if (this.translateTarget === 'zh') t = sanitizeEnglishForZhTranslate(t)
-    if (!t) return
-    if (!this.shouldEmitZhInterimForChunk(segmentId, t)) return
-    try {
-      const tHttp0 = Date.now()
-      const zhRaw = (
-        await translateLiveCaption(t, {
-          target: this.translateTarget,
-          getAccessToken: this.engineOpts.tokenGetter,
-        })
-      ).trim()
-      const zh = normalizeZhPayloadOrReject(zhRaw, this.translateTarget)
-      if (!zh || !this.running) return
-      if ((this.zhInterimGenBySeg.get(segmentId) ?? 0) !== expectedGen) return
-      console.info(
-        '[live-latency] zh_interim_http_complete',
-        JSON.stringify({ segmentId, httpMs: Date.now() - tHttp0, gen: expectedGen }),
-      )
-      const rev = (this.zhRevBySeg.get(segmentId) ?? 0) + 1
-      this.zhRevBySeg.set(segmentId, rev)
-      this.lastZhInterimChunkEnBySeg.set(segmentId, t)
-      this.lastZhInterimChunkAtMsBySeg.set(segmentId, Date.now())
-      log('zh_interim', { segmentId, rev, len: zh.length })
-      this.emit({ type: 'zh_interim', segmentId, rev, text: zh, sourceEn: t })
-    } catch (e) {
-      const friendly =
-        e instanceof TranslateCaptionAuthError || e instanceof TranslateCaptionTransientError
-          ? e.message
-          : 'Translation temporarily unavailable.'
-      this.emit({
-        type: 'error',
-        code: 'zh_interim_failed',
-        message: friendly,
-        recoverable: true,
-      })
-    }
-  }
-
-  private async translateFinal(
-    segmentId: string,
-    text: string,
-    enqueuedAt?: number,
-    rev?: number,
-  ) {
-    if (this.translateTarget === 'off') return
-    let t = text.trim()
-    if (!t) return
-    if (this.translateTarget === 'zh') t = sanitizeEnglishForZhTranslate(t)
-    if (!t) return
-    const t0 = Date.now()
-    try {
-      const zhRaw = (
-        await translateLiveCaption(t, {
-          target: this.translateTarget,
-          getAccessToken: this.engineOpts.tokenGetter,
-        })
-      ).trim()
-      const zh = normalizeZhPayloadOrReject(zhRaw, this.translateTarget)
-      const latencyMs = Date.now() - t0
-      const queueWaitMs = enqueuedAt ? t0 - enqueuedAt : 0
-      if (rev !== undefined) {
-        const latest = this.translateRevBySeg.get(segmentId)
-        if (latest !== rev) {
-          log('zh_final dropped (stale rev)', { segmentId, rev, latest, sessionMs: this.elapsed() })
-          return
-        }
-      }
-      // Timing log: visible in Console over time to spot Qwen API degradation
-      log('zh_final', { segmentId, len: zh?.length ?? 0, latencyMs, queueWaitMs, sessionMs: this.elapsed() })
-      if (!zh || !this.running) return
-      this.emit({ type: 'zh_final', segmentId, text: zh, sourceEn: t })
-    } catch (e) {
-      log('zh_final_failed', { segmentId, ms: Date.now() - t0, sessionMs: this.elapsed() })
-      const friendly =
-        e instanceof TranslateCaptionAuthError || e instanceof TranslateCaptionTransientError
-          ? e.message
-          : 'Translation temporarily unavailable.'
-      this.emit({
-        type: 'error',
-        code: 'zh_final_failed',
-        message: friendly,
-        recoverable: true,
-      })
-    }
   }
 
   private emit(ev: LiveEngineEvent) {

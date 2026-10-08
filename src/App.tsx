@@ -99,6 +99,37 @@ import {
   type HostedHealthSnapshot,
 } from './lib/ai/runtimeMode'
 import { requestHostedRecordingAi } from './lib/recordingsAiJob'
+import { createNotesSaver, resolveNotesForOpen } from './lib/lectureNotes'
+import { contentLanguageLabelOr, isSpaceDelimited, languageScript } from './lib/contentLanguages'
+import {
+  isTranslationEnabled,
+  liveTranslateRouteTarget,
+  languageEnglishName,
+  lectureLanguagesFromRow,
+  resolveLectureLanguages,
+  type LectureLanguages,
+} from './lib/lectureLanguages'
+import {
+  hasAnySummary,
+  lectureLifecycle,
+  mergeServerAiFields,
+  preferNewerAiState,
+  provisionalForOpen,
+} from './lib/lectureLifecycle'
+import { applyStatusRows, selectTrackedIds } from './lib/processingTracker'
+import { useProcessingTracker } from './lib/useProcessingTracker'
+import {
+  addProcessingIntent,
+  listProcessingIntents,
+  reconcileIntents,
+  removeProcessingIntent,
+} from './lib/processingIntents'
+import {
+  createProcessingRequester,
+  isRetryableEnqueueStatus,
+  lectureListStatus,
+  shouldRequestProcessing,
+} from './lib/lectureProcessing'
 import {
   fetchProfile,
   markFirstShellSeen,
@@ -149,6 +180,7 @@ import {
   downloadRecordingBlob,
   getRecordingAudioUrl,
   getRecordingDetail,
+  getProcessingStatuses,
   getRecordingMeta,
   insertLectureRecordingRow,
   listLectures,
@@ -181,13 +213,15 @@ import {
 import {
   LiveCaptionSessionModel,
   liveCaptionEventFromEngine,
+  type LiveCaptionPair,
   type LiveCaptionView,
 } from './lib/liveCaptionSessionModel'
 import { LIVE_PCM_SAMPLE_RATE } from './lib/livePcmCapture'
 import { getEnArrivalWalls, traceCaptionStop } from './lib/liveCaptionTrace'
 import { canonicalizeLectureTranscript } from './lib/transcriptCanonical'
 import { youmiLiveLog } from './lib/youmiLiveDebug'
-import { getOverlayLiveText } from './lib/overlayCaption'
+import { tailForOverlay } from './lib/overlayCaption'
+import { buildBilingualStack, buildTextStack, type BilingualStack } from './lib/bilingualCaptionStack'
 import type { Recording, RecordingDetail } from './types'
 import type { CloudTrashedMeta } from './lib/cloudLectureTrash'
 import { loadCloudTrashRegistry, saveCloudTrashRegistry } from './lib/cloudLectureTrash'
@@ -220,6 +254,7 @@ import {
   lectureIdentity,
   lecturesInCourse,
   reconcileCourseSelection,
+  recordingCourseContext,
   type Course,
 } from './lib/courses/courseModel'
 import {
@@ -667,13 +702,9 @@ function trashConfirmPrimaryLine(scope: TrashDeletionScope, count: number): stri
   return `Delete ${count} lecture${n} across the entire library?`
 }
 
-const KEY_LIVE_LANG = 'lc_live_lang'
-const KEY_TRANSLATE = 'lc_translate_target'
 const LC_USE_LOCAL_KEY = 'lc_use_local_without_cloud'
 
 type LiveTranslateTarget = 'zh' | 'en' | 'off'
-const SUPPORTED_LIVE_LANG = 'en-US'
-const SUPPORTED_TRANSLATE_TARGET: LiveTranslateTarget = 'zh'
 
 const SAVE_UPLOAD_TIMEOUT_MS = 180_000
 const SAVE_DB_TIMEOUT_MS = 45_000
@@ -683,8 +714,6 @@ const AI_DOWNLOAD_TIMEOUT_MS = 120_000
 const AI_TRANSCRIBE_TIMEOUT_MS = 420_000
 const AI_SUMMARIZE_TIMEOUT_MS = 180_000
 const AI_PERSIST_TIMEOUT_MS = 45_000
-/** Stop polling after-class Youmi AI job status after this (server Paraformer max ~10m + margin). */
-const HOSTED_AI_POLL_MAX_MS = 12 * 60 * 1000
 
 async function getRecordingMetaWithRetry(
   supabase: NonNullable<ReturnType<typeof getSupabase>>,
@@ -702,11 +731,6 @@ async function getRecordingMetaWithRetry(
   }
   return null
 }
-
-/** Current beta support: English lecture input, Chinese translation output. */
-const LIVE_LANG_OPTIONS: { value: string; label: string }[] = [
-  { value: SUPPORTED_LIVE_LANG, label: 'English' },
-]
 
 const LIVE_WHISPER_SLICE_SEC = LIVE_WHISPER_SLICE_MS / 1000
 
@@ -744,8 +768,31 @@ type LiveRouteState =
   | 'v2_streaming'
   | 'v2_error'
 
+/** Same caption, same translation, same state — nothing for React to redo. */
+function samePair(a: LiveCaptionPair | null, b: LiveCaptionPair | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.id === b.id &&
+    a.original === b.original &&
+    a.translation === b.translation &&
+    a.translationState === b.translationState
+  )
+}
+
 function spokenLanguageLabel(value: string): string {
-  return LIVE_LANG_OPTIONS.find((o) => o.value === value)?.label ?? value
+  return contentLanguageLabelOr(value, value)
+}
+
+/**
+ * "English → 简体中文", or "English · Original only". Always the LECTURE's own
+ * languages — never today's preference — so reopening an old lecture cannot
+ * reinterpret it.
+ */
+function languageLineFor(languages: LectureLanguages, originalOnly: string): string {
+  const from = contentLanguageLabelOr(languages.sourceLanguage, languages.sourceLanguage)
+  if (!isTranslationEnabled(languages)) return `${from} · ${originalOnly}`
+  return `${from} → ${contentLanguageLabelOr(languages.translationLanguage, languages.translationLanguage)}`
 }
 
 function formatClock(totalSec: number): string {
@@ -1486,6 +1533,9 @@ function RecordingWorkspace({
   /** Which Settings detail is open. Starts on the Settings page itself. */
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(DEFAULT_SETTINGS_SECTION)
   const { preferences: languagePreferences, setPreference: setLanguagePreference, t: tDesktop } = useLanguagePreferences()
+  /** For handlers inside long-lived effects that must not re-run when the UI language changes. */
+  const tDesktopRef = useRef(tDesktop)
+  tDesktopRef.current = tDesktop
   const hostedConfigured = isHostedAiConfigured(hostedHealth)
   const stubMode = isStubAiEnabled(hostedHealth)
   /** Cloud Youmi: health not fetched yet — treat pipeline as available until /health proves otherwise (avoids dead UI on login). */
@@ -1614,7 +1664,6 @@ function RecordingWorkspace({
     liveTranscribePiecesRef.current.clear()
   }, [])
   /** When hosted post-class job is queued/transcribing/summarizing — for max poll duration. */
-  const hostedAiPollStartedAtRef = useRef<number | null>(null)
   /** Local A/B: set `VITE_EXPERIMENT_SKIP_YOUMI_LIVE_SLICE=true` to disable only the live slice loop in Youmi AI mode (main track unchanged). */
   const experimentSkipYoumiLiveSlice =
     import.meta.env.VITE_EXPERIMENT_SKIP_YOUMI_LIVE_SLICE === 'true'
@@ -1633,7 +1682,11 @@ function RecordingWorkspace({
     // Skip the MediaRecorder blob-slice cycle when PCM streaming drives the live engine (v2 path).
     experimentalSkipLiveSlice: useLiveEngineV2ForHosted || (experimentSkipYoumiLiveSlice && usesHosted),
     getOwnerKey: getRecordingOwnerKey,
-    getSessionContext: () => ({ course: course.trim(), courseId: recordingCourseId, title: title.trim() }),
+    getSessionContext: () => ({
+      ...recordingCourseContext({ course, courseId: recordingCourseId }, coursesState.courses),
+      title: title.trim(),
+      ...(recordingLanguagesRef.current ?? {}),
+    }),
   })
 
   const [flow, dispatchFlow] = useReducer(recordingFlowReducer, initialRecordingFlow)
@@ -1753,16 +1806,52 @@ function RecordingWorkspace({
     devCredentialsUi,
   ])
 
-  const liveLang = SUPPORTED_LIVE_LANG
-  const translateTarget = SUPPORTED_TRANSLATE_TARGET
-
-  useEffect(() => {
-    localStorage.setItem(KEY_LIVE_LANG, SUPPORTED_LIVE_LANG)
-    localStorage.setItem(KEY_TRANSLATE, SUPPORTED_TRANSLATE_TARGET)
-  }, [])
+  /**
+   * SPOKEN language and TRANSLATE-TO are two independent settings (see
+   * `lectureLanguages`). The live path used to be hard-wired to English → Chinese
+   * (and re-wrote the stored keys to say so on every launch); it now follows the
+   * stored preference, resolved to what can actually run.
+   *
+   * A recording FREEZES its languages when it starts, so changing a setting
+   * mid-lecture, during Stop & Save, or while processing can never alter it.
+   */
+  const resolvedPreference = useMemo(
+    () =>
+      resolveLectureLanguages({
+        captionLanguage: languagePreferences.captionLanguage,
+        translationLanguage: languagePreferences.translationLanguage,
+        languageMode: languagePreferences.languageMode,
+      }),
+    [languagePreferences.captionLanguage, languagePreferences.translationLanguage, languagePreferences.languageMode],
+  )
+  const [recordingLanguages, setRecordingLanguages] = useState<LectureLanguages | null>(null)
+  /** The same snapshot, readable synchronously from a handler that outlives a render. */
+  const recordingLanguagesRef = useRef<LectureLanguages | null>(null)
+  const activeLanguages: LectureLanguages = recordingLanguages ?? resolvedPreference.languages
+  const liveLang = activeLanguages.sourceLanguage
+  const liveTranslationLanguage = activeLanguages.translationLanguage
+  /**
+   * Legacy (own-key / dev, non-hosted) pipeline only: its HTTP route can serve just zh and en.
+   * It is NOT the authority for hosted translation any more.
+   */
+  const translateTarget: LiveTranslateTarget = liveTranslateRouteTarget(activeLanguages)
+  /**
+   * Is a translation being produced and shown? Hosted (the persistent live socket): any target that
+   * differs from the spoken language. The server translates into whatever the lecture asked for, so
+   * the answer must not depend on which targets the old HTTP route happened to support.
+   */
+  const translationOn = useLiveEngineV2 ? isTranslationEnabled(activeLanguages) : translateTarget !== 'off'
 
   const [secondaryCaption, setSecondaryCaption] = useState('')
   const [secondaryCaptionDraft, setSecondaryCaptionDraft] = useState('')
+  /**
+   * The caption model's own view, by caption IDENTITY: settled captions each with
+   * their own translation, plus the open caption with ITS translation. The
+   * Recording screen renders from these — never from the joined strings above,
+   * which cannot say which translation belongs to which caption.
+   */
+  const [captionPairs, setCaptionPairs] = useState<LiveCaptionPair[]>([])
+  const [captionDraft, setCaptionDraft] = useState<LiveCaptionPair | null>(null)
   const onFinalPhraseRef = useRef<((phrase: string) => void) | null>(null)
   const onDraftPhraseRef = useRef<((phrase: string) => void) | null>(null)
   const liveEngineRef = useRef<LiveEngine | null>(null)
@@ -1777,6 +1866,35 @@ function RecordingWorkspace({
 
   const [primaryCaption, setPrimaryCaption] = useState('')
   const [primaryCaptionDraft, setPrimaryCaptionDraft] = useState('')
+  const captionStack: BilingualStack = useMemo(
+    () =>
+      useLiveEngineV2
+        ? buildBilingualStack(captionPairs, captionDraft, {
+            sourceScript: languageScript(liveLang),
+            translationScript: languageScript(liveTranslationLanguage),
+            sourceSpaced: isSpaceDelimited(liveLang),
+            translationSpaced: isSpaceDelimited(liveTranslationLanguage),
+            translationEnabled: translationOn,
+          })
+        : buildTextStack({
+            sourceCommitted: primaryCaption,
+            sourceDraft: primaryCaptionDraft,
+            translationCommitted: secondaryCaption,
+            translationDraft: secondaryCaptionDraft,
+          }),
+    [
+      useLiveEngineV2,
+      captionPairs,
+      captionDraft,
+      liveLang,
+      liveTranslationLanguage,
+      translationOn,
+      primaryCaption,
+      primaryCaptionDraft,
+      secondaryCaption,
+      secondaryCaptionDraft,
+    ],
+  )
   const primaryCaptionRef = useRef('')
   /** Full zh transcript for live v2 (state is windowed to 150 words). */
   const secondaryCaptionFullRef = useRef('')
@@ -1810,16 +1928,13 @@ function RecordingWorkspace({
     setPrimaryCaptionDraft(v.primaryGray)
     setSecondaryCaption(v.secondaryBlack)
     setSecondaryCaptionDraft(v.secondaryGray)
-    const enText = getOverlayLiveText({
-      committed: v.primaryBlack,
-      draft: v.primaryGray,
-      maxChars: 55,
-    })
-    const zhText = getOverlayLiveText({
-      committed: v.secondaryBlack,
-      draft: v.secondaryGray,
-      maxChars: 28,
-    })
+    setCaptionPairs(v.pairs)
+    setCaptionDraft((prev) => (samePair(prev, v.draft) ? prev : v.draft))
+    // The HUD shows ONE caption and its own translation — the same pairing rule
+    // as the Recording screen, so the two can never disagree.
+    const hud = v.draft ?? v.pairs[v.pairs.length - 1] ?? null
+    const enText = tailForOverlay(hud?.original ?? '', 55)
+    const zhText = tailForOverlay(hud?.translation ?? '', 28)
     emitOverlayCaptions({
       primaryBlack: enText,
       primaryGray: '',
@@ -1840,15 +1955,17 @@ function RecordingWorkspace({
   useEffect(() => {
     emitOverlayStatus({
       recorderStatus: recorder.status as 'idle' | 'recording' | 'paused',
-      translateActive: SUPPORTED_TRANSLATE_TARGET !== 'off',
+      translateActive: translationOn,
       elapsedSec: recorder.elapsedSec,
     })
-  }, [recorder.status, recorder.elapsedSec])
+  }, [recorder.status, recorder.elapsedSec, translationOn])
 
   /** Session-level banners are derived in `liveCaptionSessionSurface`; this is only for per-chunk issues. */
   const [liveCaptionChunkNotice, setLiveCaptionChunkNotice] = useState<{
     kind: 'soft' | 'fatal'
     message: string
+    /** A limit notice leads somewhere useful: the plan / usage view. */
+    action?: 'open_plan'
   } | null>(null)
   const liveChunkFailStreakRef = useRef(0)
   const [liveCaptionPendingSlices, setLiveCaptionPendingSlices] = useState(0)
@@ -1934,7 +2051,7 @@ function RecordingWorkspace({
 
   useEffect(() => {
     resetLiveCaptionSessionUi()
-  }, [translateTarget, resetLiveCaptionSessionUi])
+  }, [translationOn, resetLiveCaptionSessionUi])
 
   useEffect(() => {
     if (liveCaptionSessionActive) return
@@ -2513,10 +2630,14 @@ function RecordingWorkspace({
           'quota_suspended', 'auth_required', 'session_limit_reached',
         ])
         if (BETA_CODES.has(ev.code)) {
-          const betaMsg = ev.code === 'auth_required'
-            ? 'Sign in again to use live captions.'
-            : 'Free access limit reached. Please contact Youmi Lens for more access.'
-          setLiveCaptionChunkNotice({ kind: 'fatal', message: betaMsg })
+          // Server-side enforcement is unchanged; this only decides what the user is TOLD and offered.
+          // No purchase is promised here — whether Upgrade exists is the plan view's business.
+          const isAuth = ev.code === 'auth_required'
+          setLiveCaptionChunkNotice({
+            kind: 'fatal',
+            message: isAuth ? 'Sign in again to use live captions.' : tDesktopRef.current('limit.reached'),
+            ...(isAuth ? {} : { action: 'open_plan' as const }),
+          })
           setLiveRouteState('v2_error')
           return
         }
@@ -2565,7 +2686,12 @@ function RecordingWorkspace({
       }
     })
 
-    engine.start({ translateTarget })
+    liveCaptionSessionRef.current.setSourceLanguage(liveLang)
+    liveCaptionSessionRef.current.setTranslationLanguage(liveTranslationLanguage)
+    engine.start({
+      sourceLanguage: liveLang,
+      translationLanguage: liveTranslationLanguage,
+    })
 
     let warmCancelled = false
     void (async () => {
@@ -2636,6 +2762,8 @@ function RecordingWorkspace({
     liveCaptionsPipelineEnabled,
     usesHosted,
     translateTarget,
+    liveLang,
+    liveTranslationLanguage,
     syncLiveCaptionViewFromModel,
   ])
 
@@ -2644,6 +2772,10 @@ function RecordingWorkspace({
    *  screen without making itself depend on — and re-run for — every change. */
   const recordingsRef = useRef<Recording[]>([])
   recordingsRef.current = recordings
+  /** Lets handlers declared BEFORE `startHostedProcessing` (pending-upload retry) call it. */
+  const startProcessingRef = useRef<(id: string, mode?: 'request' | 'retry') => Promise<unknown>>(
+    async () => undefined,
+  )
   /** Lectures carrying `deleted_at` from the cloud; the Recently Deleted source. */
   const [cloudDeletedLectures, setCloudDeletedLectures] = useState<Recording[]>([])
   /** True once a fetched row proved this database has the deletion columns. */
@@ -2676,7 +2808,7 @@ function RecordingWorkspace({
     ['queued', 'transcribing', 'summarizing', 'transcript_ready'].includes(detail.aiStatus ?? '')
 
   const hostedPostClassOutputsComplete = Boolean(
-    detail?.transcript?.trim() && detail?.summaryEn?.trim() && detail?.summaryZh?.trim(),
+    detail?.transcript?.trim() && detail && hasAnySummary(detail),
   )
 
   const showHostedReadyToGenerateHint =
@@ -2943,6 +3075,9 @@ const [editLectureModal, setEditLectureModal] = useState<{
     // unsaved Notes edit or a mark just added on this Mac must not be undone by
     // a row read before either write landed.
     list = reconcileLectureAnnotations(recordingsRef.current, list)
+    // A list read that began before a newer status landed must not drag a lecture
+    // back to "transcribing" (and drop its freshly fetched transcript).
+    list = preferNewerAiState(recordingsRef.current, list)
     setRecordings(list)
     // Durable pending/failed cloud uploads for THIS user, de-duped against cloud
     // (so a successfully-retried recording never shows twice). Best-effort: never
@@ -2981,6 +3116,9 @@ const [editLectureModal, setEditLectureModal] = useState<{
       if (pendingUploadNeedsCourseChoice(rec)) return
       await updatePendingUpload(id, { state: 'uploading', updatedAt: Date.now() })
       setPendingUploads((prev) => prev.map((p) => (p.id === id ? { ...p, state: 'uploading' } : p)))
+      // The lecture's own languages (or the legacy default for an old entry) —
+      // never today's preference.
+      const retryLanguages = lectureLanguagesFromRow(rec)
       try {
         let saveResult: Awaited<ReturnType<typeof uploadLectureAudioViaServer>> | undefined
         for (let attempt = 1; ; attempt++) {
@@ -2992,6 +3130,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 title: rec.title,
                 liveTranscript: rec.liveTranscript ?? '',
                 liveTranscriptRaw: rec.liveTranscriptRaw ?? '',
+                ...retryLanguages,
               }),
               SAVE_UPLOAD_TIMEOUT_MS,
               'Retry upload',
@@ -3016,17 +3155,15 @@ const [editLectureModal, setEditLectureModal] = useState<{
             storagePath: saveResult!.storagePath,
             liveTranscript: rec.liveTranscript ?? '',
             liveTranscriptRaw: rec.liveTranscriptRaw ?? '',
+            ...retryLanguages,
           })
         }
         // Cloud persistence confirmed → the local fallback copy is now safe to drop.
         await deletePendingUpload(id)
-        try {
-          const { data } = await supabase.auth.getSession()
-          const tok = data.session?.access_token
-          if (tok) await requestHostedRecordingAi({ accessToken: tok, recordingId: id })
-        } catch {
-          /* processing can be started later from the lecture; upload already safe */
-        }
+        // Durable hand-over (recorded intent, retried on transient failure). It used
+        // to be a single attempt whose failure was swallowed — the lecture then sat
+        // at `pending` with nothing left that would ever process it.
+        void startProcessingRef.current(id)
         await refreshList()
         // Do not preselect the lecture here. The terminal recovery UI owns the
         // subsequent View lecture action; preselecting the same id makes that
@@ -3134,17 +3271,188 @@ const [editLectureModal, setEditLectureModal] = useState<{
         : null,
     [courseDialog, coursesState.courses],
   )
+  /**
+   * Hosted AI processing for saved lectures. Stop & Save uploads the audio and
+   * the server records `ai_status='pending'`, but `/api/upload-audio` never
+   * enqueues work — only `POST /api/process-recording` does. Nothing in the V2
+   * flow called it, so a saved lecture sat at `pending` forever while reading
+   * "Ready" (production incident 2026-10-04). This requester is the one place
+   * that asks, exactly once per lecture, and remembers a rejection so the UI can
+   * show an honest, retryable failure instead of an endless "Processing".
+   * See `lib/lectureProcessing.ts`.
+   */
+  const aiProcessingExpected = !localOnly && usesHosted
+  const processingRequester = useMemo(
+    () =>
+      createProcessingRequester(
+        async (recordingId) => {
+          if (!supabase) return { ok: false, message: 'Not signed in.' }
+          const { data } = await supabase.auth.getSession()
+          const token = data.session?.access_token
+          if (!token) return { ok: false, message: 'Sign in again to process recordings.' }
+          const out = await requestHostedRecordingAi({ accessToken: token, recordingId })
+          return out.ok
+            ? { ok: true }
+            : { ok: false, message: out.message, retryable: isRetryableEnqueueStatus(out.status) }
+        },
+        {
+          // Asked before every automatic RE-attempt: if the first request landed and
+          // only its answer was lost, the lecture has moved past `pending` and asking
+          // again would at best be wasted — at worst a billable regeneration.
+          stillPending: async (recordingId) => {
+            if (!supabase || !userId) return true
+            const [row] = await getProcessingStatuses(supabase, userId, [recordingId])
+            return !row || row.aiStatus === 'pending'
+          },
+        },
+      ),
+    [supabase, userId],
+  )
+  const [processingTick, bumpProcessingTick] = useReducer((n: number) => n + 1, 0)
+  useEffect(() => processingRequester.subscribe(bumpProcessingTick), [processingRequester])
+  /** Lectures this session has already auto-reconciled, so a changing `detail`
+   *  object can never re-trigger (or loop) the refresh below. */
+  const reconciledProcessingRef = useRef(new Set<string>())
+  /**
+   * Hand a saved lecture to the server for processing, and keep it handed over.
+   *
+   * It does not live on any screen: it is called from App-level handlers, records
+   * a DURABLE intent first (so a quit, an exception or a failed verification read
+   * cannot lose it), retries transient failures itself, and clears the intent only
+   * once the server acknowledged. Then it pulls the authoritative row (`queued`,
+   * …) so the tracker takes over. Idempotent: the requester collapses repeats and
+   * the server dedupes a lecture that is already queued or running.
+   */
+  const startHostedProcessing = useCallback(
+    async (recordingId: string, mode: 'request' | 'retry' = 'request') => {
+      reconciledProcessingRef.current.add(recordingId)
+      if (userId) addProcessingIntent(userId, recordingId)
+      const out =
+        mode === 'retry'
+          ? await processingRequester.retry(recordingId)
+          : await processingRequester.request(recordingId)
+      if (out.ok && userId) removeProcessingIntent(userId, recordingId)
+      if (out.ok && supabase && userId) {
+        try {
+          const next = await getRecordingDetail(supabase, userId, recordingId, { signAudio: false })
+          if (next) {
+            setRecordings((cur) => cur.map((r) => (r.id === recordingId ? mergeServerAiFields(r, next) : r)))
+            setDetail((cur) => (cur && cur.id === recordingId ? { ...cur, ...mergeServerAiFields(cur, next) } : cur))
+          }
+        } catch {
+          /* the tracker reads the status next; opening the lecture refetches it */
+        }
+      }
+      return out
+    },
+    [processingRequester, supabase, userId],
+  )
+  useEffect(() => {
+    startProcessingRef.current = startHostedProcessing
+  }, [startHostedProcessing])
+
+  // Launch / list-load reconcile: lectures this app saved but never got to hand
+  // over (quit mid-save, a failed verification read, an outage) are retried from
+  // the durable intent. Bounded to what THIS app recorded — never the whole library.
+  useEffect(() => {
+    if (!aiProcessingExpected || !userId) return
+    const intents = listProcessingIntents(userId)
+    if (intents.length === 0) return
+    const { request, clear } = reconcileIntents(intents, recordings, reconciledProcessingRef.current)
+    for (const id of clear) removeProcessingIntent(userId, id)
+    for (const id of request) void startHostedProcessing(id)
+  }, [recordings, aiProcessingExpected, userId, startHostedProcessing])
+
+  /**
+   * Follow every lecture that is mid-processing — not just the one that is open.
+   * Saved screen, list badges and a reopened lecture all move to Ready on their
+   * own, and a status read that fails or stalls only widens the wait.
+   */
+  const trackedProcessingIds = useMemo(
+    () =>
+      selectTrackedIds({
+        library: recordings,
+        aiExpected: aiProcessingExpected,
+        requested: (id) => processingRequester.requesting(id) || processingRequester.accepted(id),
+        pinned: [selectedId, recentCapture?.recordingId],
+      }),
+    // `processingTick` re-derives this when a request starts, is accepted or fails.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [recordings, aiProcessingExpected, processingRequester, processingTick, selectedId, recentCapture],
+  )
+  const fullFetchInFlightRef = useRef(new Set<string>())
+  const adoptFullLecture = useCallback(
+    async (recordingId: string) => {
+      if (!supabase || !userId || fullFetchInFlightRef.current.has(recordingId)) return
+      fullFetchInFlightRef.current.add(recordingId)
+      try {
+        for (const delay of [0, 1500, 4000, 10_000]) {
+          if (delay) await new Promise((r) => window.setTimeout(r, delay))
+          try {
+            const full = await withTimeout(
+              getRecordingDetail(supabase, userId, recordingId, { signAudio: false }),
+              SAVE_META_TIMEOUT_MS,
+              'Load finished lecture',
+            )
+            if (!full) return
+            setRecordings((cur) => cur.map((r) => (r.id === recordingId ? mergeServerAiFields(r, full) : r)))
+            setDetail((cur) => (cur && cur.id === recordingId ? { ...cur, ...mergeServerAiFields(cur, full) } : cur))
+            return
+          } catch {
+            /* try again — the database may be slow, the result is already persisted */
+          }
+        }
+      } finally {
+        fullFetchInFlightRef.current.delete(recordingId)
+      }
+    },
+    [supabase, userId],
+  )
+  const handleStatusRows = useCallback(
+    (rows: Parameters<typeof applyStatusRows>[1]) => {
+      const applied = applyStatusRows(recordingsRef.current, rows)
+      if (applied.changed) setRecordings(applied.library)
+      const byId = new Map(rows.map((r) => [r.id, r]))
+      setDetail((cur) => {
+        const fresh = cur ? byId.get(cur.id) : undefined
+        return cur && fresh ? { ...cur, ...mergeServerAiFields(cur, fresh) } : cur
+      })
+      for (const id of applied.needFull) void adoptFullLecture(id)
+    },
+    [adoptFullLecture],
+  )
+  useProcessingTracker({
+    enabled: aiProcessingExpected && Boolean(supabase && userId),
+    ids: trackedProcessingIds,
+    readStatuses: (ids) => getProcessingStatuses(supabase!, userId!, ids),
+    onRows: handleStatusRows,
+  })
+
   /** Status shown on a lecture row, derived from the real AI job state. */
   const lectureStatusOf = useCallback(
     (recording: Recording): LectureStatus =>
-      // Audio persistence is the readiness boundary. AI is enrichment and must
-      // never make a saved lecture look unavailable.
-      recording.storagePath || recording.durationSec > 0
-        ? 'Ready'
-        : recording.aiStatus === 'failed'
-          ? 'Failed'
-          : 'Processing',
-    [],
+      // "Ready" means the transcript and summary exist — NOT merely that audio
+      // was saved. Audio durability is protected separately (it never gates
+      // playback); this badge reports the lecture's real processing lifecycle.
+      lectureListStatus(
+        {
+          hasAudio: Boolean(recording.storagePath || recording.durationSec > 0),
+          aiStatus: recording.aiStatus,
+          aiUpdatedAt: recording.aiUpdatedAt,
+          transcript: recording.transcript,
+          summaryEn: recording.summaryEn,
+          summaryZh: recording.summaryZh,
+          sourceSummary: recording.sourceSummary,
+          translatedSummary: recording.translatedSummary,
+        },
+        {
+          aiExpected: aiProcessingExpected,
+          requestFailed: processingRequester.failed(recording.id),
+        },
+      ),
+    // `processingTick` re-derives the badge when a request is rejected or retried.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [aiProcessingExpected, processingRequester, processingTick],
   )
 
   /**
@@ -3259,11 +3567,45 @@ const [editLectureModal, setEditLectureModal] = useState<{
     }
   }, [recentCapture, recordings, detail])
 
+  /**
+   * The server's word on the lecture that was just saved: waiting, transcribing,
+   * summarizing, failed, or done. From the SAME lifecycle as the list badge and
+   * the Lecture Detail, so the saved screen can never disagree with them. Null
+   * where no hosted pipeline applies (local-only / own key).
+   */
+  const savedLectureAi = useMemo(() => {
+    const id = recentCapture?.recordingId ?? null
+    if (!id || !aiProcessingExpected) return null
+    if (recentCapture?.kind !== 'success' && recentCapture?.kind !== 'list_refresh_warn') return null
+    const row = recordings.find((r) => r.id === id) ?? (detail?.id === id ? detail : null)
+    // Not in the list yet (a read a moment behind): the hand-over is being made.
+    if (!row) return { phase: 'waiting' as const, stalled: false }
+    const life = lectureLifecycle({
+      hasAudio: true,
+      aiStatus: row.aiStatus,
+      aiUpdatedAt: row.aiUpdatedAt,
+      transcript: row.transcript,
+      summaryEn: row.summaryEn,
+      summaryZh: row.summaryZh,
+      sourceSummary: row.sourceSummary,
+      translatedSummary: row.translatedSummary,
+      aiExpected: true,
+      requestFailed: processingRequester.failed(id),
+    })
+    if (life.kind === 'ready') return { phase: 'done' as const, stalled: false }
+    if (life.kind === 'failed') return { phase: 'failed' as const, stalled: false }
+    if (life.phase) return { phase: life.phase, stalled: life.stalled }
+    return null
+    // `processingTick` re-derives this when a request is rejected, retried or accepted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recentCapture, recordings, detail, aiProcessingExpected, processingRequester, processingTick])
+
   const recordingStage = resolveRecordingV2Stage({
     recorderStatus: recorder.status as 'idle' | 'recording' | 'paused',
     flowPhase: flow.phase,
     recentCapture,
     recentAi,
+    ai: savedLectureAi?.phase ?? null,
     saved: savedRecording,
     // Recovery is the EXISTING durable-session prompt. This only reports that
     // it is pending; the existing handlers still own Save / Keep / Delete.
@@ -3447,52 +3789,69 @@ const [editLectureModal, setEditLectureModal] = useState<{
           return
         }
 
-        // The list is already refreshed before Save reports success (see
-        // handleStopAndSave / refreshList), so a freshly saved recording's
-        // canonical row — storagePath included — is already sitting in
-        // `recordingsInLibrary` by the time this effect can possibly run.
-        // Using it directly skips a redundant single-row re-fetch that raced
-        // the just-completed INSERT often enough to matter in practice: a
-        // null result from that race used to be swallowed silently
-        // (`if (!row) return`), leaving the audio section on "Loading
-        // audio…" forever with no error and no Retry — the exact "new
-        // lecture never becomes playable" Owner QA report.
-        const cachedRow = recordingsRef.current.find((r) => r.id === selectedId)
-        let row: RecordingDetail | null =
-          cachedRow?.storagePath ? { ...cachedRow, storagePath: cachedRow.storagePath } : null
+        // OPEN IS AUTHORITATIVE. The cached list row used to be adopted here as the
+        // lecture itself, with no refetch. A snapshot taken before a job finished
+        // therefore came back as "no transcript / no summary" on reopen — even
+        // though the database held the result — and while the database was slow
+        // (8–25s reads on 2026-10-04) it stayed that way. Now the cached row may
+        // only be shown EARLY, and only when it is already a finished lecture (its
+        // persisted outputs are never wrong); everything else waits for the server.
+        const provisional = provisionalForOpen<RecordingDetail>(
+          recordingsRef.current.find((r) => r.id === selectedId) as RecordingDetail | undefined,
+        )
+        if (provisional) setDetail(provisional)
 
-        if (!row) {
-          // Render the lecture row first. Storage signing is independent and
-          // may be slow or fail; it must never keep the whole lecture in
-          // Loading. The row fetch itself is bounded too — a stalled/queued
-          // request here (e.g. contention with the background AI-status
-          // poll) must reach the same failure/Retry path below rather than
-          // leaving the audio section on "Loading audio…" with no way out.
-          row = await withTimeout(
-            getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false }),
-            SAVE_META_TIMEOUT_MS,
-            'Load lecture detail',
-          )
+        const loadAudio = async (storagePath: string) => {
+          try {
+            const signed = await withTimeout(
+              getRecordingAudioUrl(supabase!, storagePath),
+              SAVE_META_TIMEOUT_MS,
+              'Load audio playback',
+            )
+            if (!cancelled) setAudioUrl(signed)
+          } catch (error) {
+            if (!cancelled) setAudioLoadError(error instanceof Error ? error.message : 'Audio could not load')
+          }
+        }
+        if (provisional) void loadAudio(provisional.storagePath)
+
+        // The row fetch is bounded and retried: a transient stall must reach the
+        // Retry state below, not leave the lecture on a spinner — but one slow
+        // read must not be the end of it either.
+        let row: RecordingDetail | null = null
+        for (const delay of [0, 1500, 4000]) {
+          if (delay) await new Promise((r) => window.setTimeout(r, delay))
+          if (cancelled) return
+          try {
+            // A null row is retried too: a lecture saved a moment ago can be read
+            // before its insert is visible. That race is why this loop exists.
+            const fetched = await withTimeout(
+              getRecordingDetail(supabase!, userId!, selectedId, { signAudio: false }),
+              SAVE_META_TIMEOUT_MS,
+              'Load lecture detail',
+            )
+            if (fetched) {
+              row = fetched
+              break
+            }
+          } catch {
+            /* try again — then surface an explicit failure with Retry */
+          }
         }
         if (cancelled) return
         if (!row) {
-          // Genuinely not found (or a still-propagating write a manual Retry
-          // can recover from) — a real terminal failure, never a silent
-          // forever-Loading with no way out.
-          setDetailLoadFailed(true)
+          // A finished lecture we already hold keeps showing; otherwise the
+          // failure is explicit (load error + Retry) — never an empty lecture.
+          if (!provisional) {
+            setDetail(null)
+            setDetailLoadFailed(true)
+          }
           return
         }
         setDetail(row)
-        try {
-          const signed = await withTimeout(
-            getRecordingAudioUrl(supabase!, row.storagePath),
-            SAVE_META_TIMEOUT_MS,
-            'Load audio playback',
-          )
-          if (!cancelled) setAudioUrl(signed)
-        } catch (error) {
-          if (!cancelled) setAudioLoadError(error instanceof Error ? error.message : 'Audio could not load')
-        }
+        // Keep the list row (badge, Courses) in step with what the server just said.
+        setRecordings((cur) => cur.map((r) => (r.id === row!.id ? mergeServerAiFields(r, row!) : r)))
+        if (!provisional) void loadAudio(row.storagePath)
       } catch {
         // The row fetch itself failed — not the same as a row with no
         // summary/transcript yet. `detailLoadFailed` is how the detail page
@@ -3526,43 +3885,32 @@ const [editLectureModal, setEditLectureModal] = useState<{
     }
   }, [recordingsInLibrary, selectedId])
 
-  useEffect(() => {
-    if (!selectedId) hostedAiPollStartedAtRef.current = null
-  }, [selectedId])
+  // Following a job is no longer tied to the open lecture: `useProcessingTracker`
+  // (above) reads the status of EVERY lecture that is mid-processing.
 
+  // Reconcile on open: a saved lecture still at `pending` with no outputs has
+  // never been handed to the server for processing (the 2026-10-04 incident
+  // lecture, anything saved by an older build, or an enqueue that failed while
+  // offline). Ask once; the polling effect above then follows it to completion.
   useEffect(() => {
-    if (localOnly || !usesHosted || !selectedId || !supabase || !userId) return
-    const st = detail?.aiStatus
-    if (!st || !['queued', 'transcribing', 'summarizing', 'transcript_ready'].includes(st)) {
-      hostedAiPollStartedAtRef.current = null
+    if (!detail || !aiProcessingExpected) return
+    if (reconciledProcessingRef.current.has(detail.id)) return
+    if (
+      !shouldRequestProcessing({
+        aiExpected: true,
+        hasAudio: Boolean(detail.storagePath || detail.durationSec > 0),
+        aiStatus: detail.aiStatus,
+        transcript: detail.transcript,
+        summaryEn: detail.summaryEn,
+        summaryZh: detail.summaryZh,
+        sourceSummary: detail.sourceSummary,
+        translatedSummary: detail.translatedSummary,
+      })
+    ) {
       return
     }
-    if (hostedAiPollStartedAtRef.current === null) {
-      hostedAiPollStartedAtRef.current = Date.now()
-    }
-
-    const id = window.setInterval(() => {
-      void (async () => {
-        try {
-          const started = hostedAiPollStartedAtRef.current
-          if (started !== null && Date.now() - started > HOSTED_AI_POLL_MAX_MS) {
-            window.clearInterval(id)
-            hostedAiPollStartedAtRef.current = null
-            const next = await getRecordingDetail(supabase, userId, selectedId)
-            if (next) setDetail(next)
-            await refreshList()
-            return
-          }
-          const next = await getRecordingDetail(supabase, userId, selectedId)
-          if (next) setDetail(next)
-          await refreshList()
-        } catch {
-          /* ignore */
-        }
-      })()
-    }, 2800)
-    return () => clearInterval(id)
-  }, [localOnly, usesHosted, selectedId, supabase, userId, detail?.aiStatus, refreshList])
+    void startHostedProcessing(detail.id)
+  }, [detail, aiProcessingExpected, startHostedProcessing])
 
   // Phase 2D-4: detect unfinished durable recording sessions on startup / owner change.
   // Never auto-resume mic, never auto-upload — user chooses Save / Keep / Delete.
@@ -3583,6 +3931,15 @@ const [editLectureModal, setEditLectureModal] = useState<{
   }, [userId, localOnly])
 
   const startRecording = (sessionContext?: { course?: string; courseId?: string | null; title?: string }) => {
+    const captureCourse = recordingCourseContext(
+      { course: sessionContext?.course ?? course, courseId: sessionContext ? sessionContext.courseId : recordingCourseId },
+      coursesState.courses,
+    )
+    // Freeze the lecture's languages NOW. Everything after this — live captions,
+    // upload, recovery, retry — uses this snapshot, never the live preference.
+    const languageSnapshot: LectureLanguages = { ...resolvedPreference.languages }
+    recordingLanguagesRef.current = languageSnapshot
+    setRecordingLanguages(languageSnapshot)
     if (!localOnly && usesHosted) {
       void refreshHostedHealth()
     }
@@ -3612,9 +3969,9 @@ const [editLectureModal, setEditLectureModal] = useState<{
     setLiveCaptionChunkNotice(null)
     resetLiveCaptionSessionUi()
     if (typeof document !== 'undefined') {
-      document.documentElement.lang = liveLang
+      document.documentElement.lang = languageSnapshot.sourceLanguage
     }
-    void recorder.start(sessionContext)
+    void recorder.start({ ...captureCourse, title: sessionContext?.title ?? title.trim(), ...languageSnapshot })
   }
 
   const discardRecording = () => {
@@ -3634,6 +3991,8 @@ const [editLectureModal, setEditLectureModal] = useState<{
     lastFinalTimestampRef.current = 0
     setLiveCaptionChunkNotice(null)
     resetLiveCaptionSessionUi()
+    recordingLanguagesRef.current = null
+    setRecordingLanguages(null)
   }
 
   const pauseRecording = () => {
@@ -3649,6 +4008,10 @@ const [editLectureModal, setEditLectureModal] = useState<{
   const endCapture = useCallback((outcome: RecentCaptureOutcome) => {
     setRecentCapture(outcome)
     dispatchFlow({ type: 'CAPTURE_FINISHED' })
+    // The lecture is saved (or has failed into a pending/recoverable state that
+    // stored its own copy of the languages): release the frozen snapshot.
+    recordingLanguagesRef.current = null
+    setRecordingLanguages(null)
   }, [])
 
   const formatRecoveryDuration = (sec: number) => {
@@ -3711,6 +4074,10 @@ const [editLectureModal, setEditLectureModal] = useState<{
         const { blob, mime } = fin.assembled
         const courseVal = fresh.course?.trim() || 'Course'
         const recoveryCourseId = fresh.courseId
+        // The languages this lecture was recorded in (frozen in its durable
+        // session at Start); a session from before language selection existed
+        // falls back to the legacy default.
+        const recoveryLanguages = lectureLanguagesFromRow(fresh)
         const titleVal = fresh.title?.trim() || `Lecture ${formatDate(fresh.startedAt)}`
         // The 15s heartbeat may never fire before a quick crash, leaving
         // `approxDurationSec` at (or near) 0 even though several 5-second
@@ -3775,6 +4142,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                   title: titleVal,
                   liveTranscript: '',
                   liveTranscriptRaw: '',
+                  ...recoveryLanguages,
                 }),
                 SAVE_UPLOAD_TIMEOUT_MS,
                 'Audio upload (recovered)',
@@ -3800,11 +4168,16 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 storagePath: saveResult!.storagePath,
                 liveTranscript: '',
                 liveTranscriptRaw: '',
+                ...recoveryLanguages,
               }),
               SAVE_DB_TIMEOUT_MS,
               'Database write (recovered)',
             )
           }
+          // A recovered lecture is a saved lecture: hand it to the server too. This
+          // path never did, so every recovered recording sat at `pending` until it
+          // happened to be opened.
+          if (usesYoumiHosted()) void startProcessingRef.current(recordingId)
           await completeRecordingSessionPersist(recordingId)
           setRecoveredSessions((prev) => prev.filter((s) => s.id !== recordingId))
           try {
@@ -3821,8 +4194,9 @@ const [editLectureModal, setEditLectureModal] = useState<{
               title: titleVal,
               durationSec,
               mime,
-              lang: liveLang,
-              translateTarget,
+              lang: recoveryLanguages.sourceLanguage,
+              translateTarget: liveTranslateRouteTarget(recoveryLanguages),
+              ...recoveryLanguages,
               createdAt: fresh.startedAt,
               updatedAt: Date.now(),
               state: 'upload_failed',
@@ -3883,8 +4257,6 @@ const [editLectureModal, setEditLectureModal] = useState<{
       localOnly,
       supabase,
       userId,
-      liveLang,
-      translateTarget,
       refreshList,
       endCapture,
     ],
@@ -3946,6 +4318,11 @@ const [editLectureModal, setEditLectureModal] = useState<{
     }
 
     saveInFlightRef.current = true
+    // The languages this lecture was RECORDED in (frozen at Start). Upload,
+    // pending-save and the fallback row insert all use this — never the
+    // preference as it is now.
+    const saveLanguages: LectureLanguages = recordingLanguagesRef.current ?? resolvedPreference.languages
+    const saveTranslateTarget = liveTranslateRouteTarget(saveLanguages)
     // One table per run, printed without a debugger attached.
     reportLatencySummary()
     setRecentCapture((prev) => nextRecentCaptureForNewSave(prev))
@@ -3957,6 +4334,13 @@ const [editLectureModal, setEditLectureModal] = useState<{
 
     let liveDrainLatched = false
     try {
+      // The durable Start snapshot owns identity throughout save, recovery and
+      // retries. A later Record Home selection cannot move this recording.
+      const capturedSession = await getRecordingSession(recordingId)
+      const saveCourse = capturedSession
+        ? { course: capturedSession.course ?? '', courseId: capturedSession.courseId ?? null }
+        : recordingCourseContext({ course, courseId: recordingCourseId }, coursesState.courses)
+      const saveCourseId = saveCourse.courseId
       const useLiveDrain =
         useLiveEngineV2 && liveCaptionsPipelineEnabled && usesHosted
       if (useLiveDrain) {
@@ -4021,13 +4405,13 @@ const [editLectureModal, setEditLectureModal] = useState<{
         traceCaptionStop('drain_phase_off', { ...getEnArrivalWalls() })
       }
       const liveText =
-        translateTarget === 'off'
+        saveTranslateTarget === 'off'
           ? primary
           : [
-              `[Track A — speech ${liveLang}]`,
+              `[Track A — speech ${languageEnglishName(saveLanguages.sourceLanguage)}]`,
               primary || '(empty)',
               '',
-              `[Track B — ${translateTarget === 'zh' ? 'Simplified Chinese' : 'English'}]`,
+              `[Track B — ${languageEnglishName(saveLanguages.translationLanguage)}]`,
               secondary || '(empty)',
             ].join('\n')
       const liveTranscriptRaw = liveText
@@ -4041,7 +4425,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
       // not be lost". Size is a downstream transcription concern (BYOK OpenAI
       // Whisper only), handled after the audio is safely persisted.
 
-      const courseVal = course.trim() || 'Course'
+      const courseVal = saveCourse.course.trim() || 'Course'
       const titleVal = title.trim() || `Lecture ${formatDate(Date.now())}`
       const durationSec = uiElapsedSecBeforeStop
 
@@ -4129,10 +4513,11 @@ const [editLectureModal, setEditLectureModal] = useState<{
               saveResult = await withTimeout(
                 uploadLectureAudioViaServer(supabase!, recordingId, blob, mime, durationSec, {
                   course: courseVal,
-                  courseId: recordingCourseId,
+                  courseId: saveCourseId,
                   title: titleVal,
                   liveTranscript: liveTranscriptCanonical,
                   liveTranscriptRaw,
+                  ...saveLanguages,
                 }),
                 SAVE_UPLOAD_TIMEOUT_MS,
                 'Audio upload',
@@ -4191,7 +4576,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 kind: 'list_refresh_warn',
                 recordingId,
                 message:
-                  'Recording saved locally (too long for cloud processing). Free access limit reached. Please contact Youmi Lens for more access.',
+                  `Recording saved locally (too long for cloud processing). ${tDesktopRef.current('limit.reached')}`,
                 at: Date.now(),
               })
               void completeRecordingSessionPersist(recordingId).catch(() => { /* best-effort */ })
@@ -4200,7 +4585,7 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 kind: 'failure',
                 recordingId,
                 outcome: 'storage_failed',
-                message: 'Free access limit reached. Please contact Youmi Lens for more access.',
+                message: tDesktopRef.current('limit.reached'),
                 at: Date.now(),
               })
             }
@@ -4227,12 +4612,13 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 id: recordingId,
                 userId: userId!,
                 course: courseVal,
-                courseId: recordingCourseId,
+                courseId: saveCourseId,
                 title: titleVal,
                 durationSec,
                 mime,
-                lang: liveLang,
-                translateTarget,
+                lang: saveLanguages.sourceLanguage,
+                translateTarget: saveTranslateTarget,
+                ...saveLanguages,
                 liveTranscript: liveTranscriptCanonical || undefined,
                 liveTranscriptRaw: liveTranscriptRaw || undefined,
                 createdAt: Date.now(),
@@ -4285,13 +4671,14 @@ const [editLectureModal, setEditLectureModal] = useState<{
                 userId: userId!,
                 id: recordingId,
                 course: courseVal,
-                courseId: recordingCourseId,
+                courseId: saveCourseId,
                 title: titleVal,
                 durationSec,
                 mime,
                 storagePath: path,
                 liveTranscript: liveTranscriptCanonical,
                 liveTranscriptRaw,
+                ...saveLanguages,
               }),
               SAVE_DB_TIMEOUT_MS,
               'Database write',
@@ -4315,6 +4702,16 @@ const [editLectureModal, setEditLectureModal] = useState<{
           }
         }
         ledgerMarkDbCommitted(recordingId, userId!)
+
+        // The audio is uploaded and its row is written (the server confirmed the
+        // insert, or ours just succeeded). THAT is the moment to hand the lecture
+        // over — not after the client-side verification reads below. Those reads
+        // can time out or fail (Supabase answered in 8–25s on 2026-10-04) and they
+        // return early; with the request behind them, a perfectly saved lecture
+        // was simply never processed. The request is fire-and-forget and durable
+        // (see `startHostedProcessing`): it can neither delay nor fail the save,
+        // and a lost attempt is retried from its recorded intent.
+        if (usesHosted) void startHostedProcessing(recordingId)
 
         dispatchFlow({ type: 'CAPTURE_VERIFY' })
         let listOk = true
@@ -5041,17 +5438,87 @@ const openEditLectureModal = useCallback(() => {
    * Rejects on failure so the editor can say so and keep the unsaved text; it
    * never optimistically marks the row saved before the write is confirmed.
    */
-  const saveLectureNotes = useCallback(
-    async (recordingId: string, notes: string): Promise<void> => {
-      if (!supabase || !userId) throw new Error('Not signed in.')
-      const now = Date.now()
-      await updateRecordingNotesMarks(supabase, userId, recordingId, { notes })
-      setRecordings((prev) =>
-        prev.map((r) => (r.id === recordingId ? { ...r, notes, notesUpdatedAt: now } : r)),
-      )
-    },
+  /**
+   * ONE persistence model for Notes: the cloud row is the authority, and a
+   * per-lecture draft on this Mac is a write-ahead buffer in front of it (see
+   * `lectureNotes`). The saver orders writes (one in flight per lecture) and sends
+   * the draft's EDIT time as the clock, so a retry is idempotent and a late answer
+   * can never mark a newer edit clean.
+   */
+  const notesSaver = useMemo(
+    () =>
+      supabase && userId
+        ? createNotesSaver({
+            userId,
+            write: (recordingId, text, editedAt) =>
+              updateRecordingNotesMarks(supabase, userId, recordingId, { notes: text }, new Date(editedAt).toISOString()),
+          })
+        : null,
     [supabase, userId],
   )
+
+  const saveLectureNotes = useCallback(
+    async (recordingId: string, notes: string): Promise<void> => {
+      if (!notesSaver) throw new Error('Not signed in.')
+      // Durable on this Mac BEFORE any network: a failure, a navigation or a quit
+      // cannot lose what was typed.
+      notesSaver.edit(recordingId, notes)
+      const out = await notesSaver.save(recordingId)
+      if (out.kind === 'failed') throw out.error
+      if (out.kind !== 'saved') return
+      // Applied to THIS lecture only, and never over a newer local note.
+      setRecordings((prev) =>
+        prev.map((r) =>
+          r.id === recordingId && !((r.notesUpdatedAt ?? 0) > out.editedAt)
+            ? { ...r, notes: out.text, notesUpdatedAt: out.editedAt }
+            : r,
+        ),
+      )
+    },
+    [notesSaver],
+  )
+
+  /** What the Notes editor opens with: the cloud note, or this lecture's unsaved draft. */
+  const recordingsLoaded = recordings.length > 0
+  const notesOpen = useMemo(() => {
+    if (!selectedId || !notesSaver) return null
+    const row = recordingsRef.current.find((r) => r.id === selectedId)
+    if (!row) return null
+    return resolveNotesForOpen({
+      remote: { notes: row.notes, notesUpdatedAt: row.notesUpdatedAt },
+      draft: notesSaver.draft(selectedId),
+    })
+    // Evaluated when a lecture is opened (`detailRetryNonce` changes on every open,
+    // including a reopen of the same lecture). Later refreshes are reconciled by the
+    // editor itself and must never replace text being typed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, notesSaver, detailRetryNonce, recordingsLoaded])
+
+  // A draft that is moot (saved elsewhere, or older than a newer cloud note) is
+  // settled; one that is still unsaved is pushed in the background — once per
+  // session per lecture, only for drafts THIS app holds, and never for the lecture
+  // being edited right now (that one is the user's to Save, or is pushed when they
+  // leave it). Nothing here ever discards unsaved text: only a confirmed save, a
+  // newer cloud note, or the user's own Discard remove a draft.
+  const notesSyncAttemptedRef = useRef(new Set<string>())
+  useEffect(() => {
+    if (!notesSaver) return
+    for (const id of notesSaver.pending()) {
+      if (id === selectedId) continue
+      const row = recordings.find((r) => r.id === id)
+      if (!row) continue
+      const resolved = resolveNotesForOpen({
+        remote: { notes: row.notes, notesUpdatedAt: row.notesUpdatedAt },
+        draft: notesSaver.draft(id),
+      })
+      if (resolved.dropDraft) {
+        notesSaver.settle(id)
+      } else if (!notesSyncAttemptedRef.current.has(id)) {
+        notesSyncAttemptedRef.current.add(id)
+        void saveLectureNotes(id, resolved.text).catch(() => undefined)
+      }
+    }
+  }, [recordings, notesSaver, saveLectureNotes, selectedId])
 
   /**
    * Append one mark to the open lecture's `marked_timestamps`.
@@ -5583,19 +6050,12 @@ useEffect(() => {
       courseIdentity={recordingHeaderCourseIdentity}
       lectureTitle={title.trim() || tDesktop('recording.untitled')}
       elapsed={formatClock(recorder.elapsedSec)}
-      languageLine={`${tDesktop(AUDIO_SOURCE_LABEL_KEY[audioSource])} · ${spokenLanguageLabel(liveLang)} → ${
-        translateTarget === 'zh' ? 'Chinese' : 'English'
-      } · ${
-        languagePreferences.languageMode === 'bilingual'
-          ? tDesktop('record.bilingual')
-          : tDesktop('record.captionsOnly')
-      }`}
-      sourceCommitted={primaryCaption}
-      sourceDraft={primaryCaptionDraft}
-      translationCommitted={secondaryCaption}
-      translationDraft={secondaryCaptionDraft}
-      translationEnabled={translateTarget !== 'off'}
-      translationPending={useLiveEngineV2 && Boolean(primaryCaptionDraft.trim())}
+      languageLine={`${tDesktop(AUDIO_SOURCE_LABEL_KEY[audioSource])} · ${languageLineFor(
+        activeLanguages,
+        tDesktop('record.originalOnly'),
+      )}`}
+      captions={captionStack}
+      translationEnabled={translationOn}
       notice={
         liveCaptionChunkNotice
           ? {
@@ -5610,6 +6070,16 @@ useEffect(() => {
             : null
       }
       failureMessage={recentCapture?.kind === 'failure' ? recentCapture.message : null}
+      noticeAction={
+        liveCaptionChunkNotice?.action === 'open_plan'
+          ? { label: tDesktop('limit.viewPlan'), onClick: () => setBillingPlanOpen(true) }
+          : null
+      }
+      failureAction={
+        recentCapture?.kind === 'failure' && recentCapture.message.includes(tDesktop('limit.reached'))
+          ? { label: tDesktop('limit.viewPlan'), onClick: () => setBillingPlanOpen(true) }
+          : null
+      }
       busy={saveOrFinishBusy}
       canOpenOverlay={isTauriContext()}
       onOpenOverlay={openLectureOverlay}
@@ -5665,6 +6135,11 @@ useEffect(() => {
         if (session) void handleRecoverDelete(session.id)
       }}
       onCancelRecoveryDiscard={() => setRecoveryDeleteConfirmId(null)}
+      processing={savedLectureAi}
+      onRetryProcessing={() => {
+        const id = recentCapture?.recordingId
+        if (id) void startHostedProcessing(id, 'retry')
+      }}
       recoveryDiscardConfirm={Boolean(selectedRecoverySession && recoveryDeleteConfirmId === selectedRecoverySession.id)}
       recoveryItems={recoveredSessions.map((session) => ({
         id: session.id,
@@ -5771,18 +6246,19 @@ useEffect(() => {
       />
     ) : desktopV2View === 'lecture' && openLecture ? (
       <LectureDetailPage
+        key={openLecture.id}
         t={tDesktop}
         recording={openLecture}
         detail={detail?.id === openLecture.id ? detail : null}
         detailLoadFailed={detailLoadFailed}
+        detailLoading={detail?.id !== openLecture.id && !detailLoadFailed}
         onRetryDetail={() => setDetailRetryNonce((n) => n + 1)}
         course={openLectureCourse}
         audioUrl={detail?.id === openLecture.id ? audioUrl : null}
         audioError={detail?.id === openLecture.id ? audioLoadError : null}
         onRetryAudio={retryAudioLoad}
-        languageLine={`${spokenLanguageLabel(liveLang)} → ${
-          translateTarget === 'zh' ? 'Chinese' : 'English'
-        }`}
+        // The LECTURE's own languages (frozen on the row), never today's preference.
+        languageLine={languageLineFor(lectureLanguagesFromRow(openLecture), tDesktop('record.originalOnly'))}
         formatDate={formatDate}
         formatDuration={formatClock}
         backLabel={openLectureCourse ? openLectureCourse.name : tDesktop('courses.title')}
@@ -5805,8 +6281,19 @@ useEffect(() => {
         }}
         actionsDisabled={lectureMetadataBusy || deleteActionBusy}
         onSaveNotes={(notes) => saveLectureNotes(openLecture.id, notes)}
+        initialNotes={notesOpen?.text}
+        notesRestored={notesOpen?.restored ?? false}
+        onNotesDraftChange={(text) => notesSaver?.edit(openLecture.id, text)}
+        onNotesDiscard={() => notesSaver?.discard(openLecture.id)}
+        onNotesLeave={() => {
+          const draft = notesSaver?.draft(openLecture.id)
+          if (draft) void saveLectureNotes(openLecture.id, draft.text).catch(() => undefined)
+        }}
         onAddMark={(atMs) => addLectureMark(openLecture.id, atMs)}
         annotationsEditable={!localOnly && Boolean(supabase) && Boolean(userId)}
+        aiExpected={aiProcessingExpected}
+        processingFailed={processingRequester.failed(openLecture.id)}
+        onRetryProcessing={() => void startHostedProcessing(openLecture.id, 'retry')}
       />
     ) : desktopV2View === 'settings' ? (
       <SettingsLayout section={settingsSection} onSectionChange={setSettingsSection}>
@@ -8145,11 +8632,11 @@ useEffect(() => {
                 )}
               </div>
             </div>
-            {translateTarget !== 'off' && (
+            {translationOn && (
               <div className="live-caption live-caption-secondary" aria-live="polite">
                 <div className="live-caption-head">
                   <div className="live-caption-label">
-                    Translation · {translateTarget === 'zh' ? 'Chinese' : 'English'}
+                    Translation · {spokenLanguageLabel(liveTranslationLanguage)}
                   </div>
                 </div>
                 <div className="live-caption-text live-realtime">
@@ -8268,7 +8755,7 @@ useEffect(() => {
                 </div>
                 <div>
                   <dt>Language</dt>
-                  <dd>{spokenLanguageLabel(liveLang)} → {translateTarget === 'zh' ? 'Chinese' : 'English'}</dd>
+                  <dd>{languageLineFor(activeLanguages, 'Original only')}</dd>
                 </div>
               </dl>
             </section>

@@ -19,6 +19,14 @@ import {
 } from '../lib/billing/billingClient'
 import { deriveBillingState, type BillingState } from '../lib/billing/billingState'
 import { openExternalUrl } from '../lib/openExternalContact'
+import { hasPendingBillingReturn } from '../lib/billing/billingReturnCoordinator'
+
+/**
+ * Regaining focus re-reads plan + quota (read-only GETs) so a purchase made elsewhere — e.g. on iPad while
+ * Desktop stayed open — appears without a relaunch. Bounded: at most one focus-triggered read per window,
+ * never while another read or a billing action is in flight.
+ */
+export const FOCUS_REFRESH_MIN_INTERVAL_MS = 30_000
 
 export type BillingHookError = {
   kind: BillingApiError['kind'] | 'unknown'
@@ -50,6 +58,8 @@ export type BillingControllerDeps = {
   createCheckout?: typeof createCheckout
   openPortal?: typeof openPortal
   openExternalUrl?: typeof openExternalUrl
+  /** Test seam for the focus-refresh throttle. */
+  now?: () => number
 }
 
 function toHookError(err: unknown): BillingHookError {
@@ -89,6 +99,7 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
     openPortal: deps.openPortal ?? openPortal,
     openExternalUrl: deps.openExternalUrl ?? openExternalUrl,
   }
+  const now = deps.now ?? Date.now
 
   let disposed = false
   let signedIn = false
@@ -97,6 +108,10 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
   let upgradeInFlight: Promise<void> | null = null
   let manageInFlight: Promise<void> | null = null
   let actionLoading = false
+  /** Bumped whenever the signed-in identity changes: a response that started before cannot apply after. */
+  let epoch = 0
+  let loadSeq = 0
+  let lastLoadStartedAt = 0
 
   let subscription: SubscriptionRecord | null = null
   let quota: QuotaStatusPayload | null = null
@@ -127,7 +142,7 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
       loading,
       error: actionError ?? loadError,
       actions: {
-        load,
+        load: () => load(),
         refresh,
         upgrade,
         manage,
@@ -136,7 +151,7 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
     }
   }
 
-  async function load(): Promise<void> {
+  async function load(opts: { silent?: boolean } = {}): Promise<void> {
     if (disposed) return
     if (!signedIn) {
       subscription = null
@@ -148,26 +163,43 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
     }
     if (loadInFlight) return loadInFlight
 
+    const myEpoch = epoch
+    const seq = ++loadSeq
+    lastLoadStartedAt = now()
     loadInFlight = (async () => {
       actionError = null
       emit()
       try {
         const [subRes, quotaRes] = await Promise.all([api.getSubscriptionStatus(), api.getQuotaStatus()])
-        if (disposed) return
+        // A different identity (sign-out / account switch) or an unmount happened while this was in flight:
+        // this answer belongs to the previous user and must not touch the new one's state.
+        if (disposed || myEpoch !== epoch) return
         subscription = subRes.subscription
         quota = quotaRes.plan
         loadError = null
       } catch (err) {
-        if (disposed) return
+        if (disposed || myEpoch !== epoch) return
+        // A background (focus) refresh that fails keeps the last good answer instead of flashing
+        // "unavailable"; the next real load surfaces the problem.
+        if (opts.silent && subscription) return
         loadError = toHookError(err)
         // Preserve previous authoritative subscription/quota on transient failure.
       } finally {
-        loadInFlight = null
+        if (seq === loadSeq) loadInFlight = null
         if (!disposed) emit()
       }
     })()
 
     return loadInFlight
+  }
+
+  /** Focus-triggered refresh: silent, throttled, and never racing another read or billing action. */
+  async function loadOnFocus(): Promise<void> {
+    if (disposed || !signedIn || authLoading) return
+    if (loadInFlight || actionLoading || upgradeInFlight || manageInFlight) return
+    if (hasPendingBillingReturn()) return // the return-from-Checkout/Portal refresh owns this focus event
+    if (lastLoadStartedAt > 0 && now() - lastLoadStartedAt < FOCUS_REFRESH_MIN_INTERVAL_MS) return
+    await load({ silent: true })
   }
 
   async function refresh(): Promise<void> {
@@ -274,6 +306,11 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
       if (disposed) return
       const changed = signedIn !== next
       signedIn = next
+      if (changed) {
+        epoch += 1
+        loadInFlight = null
+        lastLoadStartedAt = 0
+      }
       if (!next) {
         subscription = null
         quota = null
@@ -288,7 +325,8 @@ export function createBillingController(deps: BillingControllerDeps = {}) {
       authLoading = next
       emit()
     },
-    load,
+    load: () => load(),
+    loadOnFocus,
     refresh,
     upgrade,
     manage,
@@ -346,6 +384,20 @@ export function useBilling(): UseBillingResult {
     }
     publish(controller)
   }, [signedIn, authLoading, publish])
+
+  // Refresh when the app regains focus (window focus or tab/app becoming visible).
+  useEffect(() => {
+    const onFocus = () => void controllerRef.current?.loadOnFocus()
+    const onVisible = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') onFocus()
+    }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
 
   const load = useCallback(async () => {
     await controllerRef.current?.load()

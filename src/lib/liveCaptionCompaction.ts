@@ -146,3 +146,15 @@ export function compactLiveZhSnapshot(raw: string): string {
   t = collapseDoubledSuffixChars(t, 10, 160)
   return normCaptionSpaces(t)
 }
+
+/**
+ * Clean one live TRANSLATION snapshot for the language it is written in.
+ *
+ * `compactLiveZhSnapshot` is Chinese-specific: it splits on sentence punctuation
+ * and re-joins with no separator, which is right for Chinese and wrong for any
+ * space-delimited language ("algorithms. Then" → "algorithms.Then"). An English
+ * (or other Latin-script) translation only gets whitespace normalisation.
+ */
+export function compactTranslationSnapshot(raw: string, script: 'latin' | 'cjk'): string {
+  return script === 'cjk' ? compactLiveZhSnapshot(raw) : normCaptionSpaces(raw)
+}

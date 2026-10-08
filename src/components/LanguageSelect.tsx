@@ -1,10 +1,13 @@
 import type { ChangeEvent } from 'react'
-import type { ContentLanguageCode, LanguageAvailability } from '../lib/contentLanguages'
+import type { LanguageAvailability } from '../lib/contentLanguages'
 
 export type LanguageSelectOption = {
-  value: ContentLanguageCode
+  /** A content-language code, or another stable value (e.g. `original`). */
+  value: string
   label: string
   availability: LanguageAvailability
+  /** Why a disabled option is disabled, when the generic status text would mislead. */
+  disabledNote?: string
 }
 
 export function LanguageSelect({
@@ -15,13 +18,13 @@ export function LanguageSelect({
   onChange,
 }: {
   label: string
-  value: ContentLanguageCode
+  value: string
   options: LanguageSelectOption[]
   statusLabel: (availability: LanguageAvailability) => string
-  onChange: (value: ContentLanguageCode) => void
+  onChange: (value: string) => void
 }) {
   const handleChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    onChange(event.target.value as ContentLanguageCode)
+    onChange(event.target.value)
   }
 
   return (
@@ -46,7 +49,7 @@ export function LanguageSelect({
                 the selected — necessarily available — option's text, so appending
                 "· Available" there is pure noise: it repeats the fact that this
                 choice is active without adding information. */}
-            {option.availability === 'available' ? option.label : `${option.label} · ${statusLabel(option.availability)}`}
+            {option.availability === 'available' ? option.label : `${option.label} · ${option.disabledNote ?? statusLabel(option.availability)}`}
           </option>
         ))}
       </select>

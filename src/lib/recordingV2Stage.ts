@@ -1,4 +1,5 @@
 import type { RecordingFlowPhase } from './recordingFlow'
+import type { ProcessingPhase } from './lectureLifecycle'
 import type { RecentAiOutcome, RecentCaptureOutcome } from './recentOutcomes'
 
 /**
@@ -30,6 +31,14 @@ export type RecordingV2Stage =
   | 'processing_summary'
   /** Transcript exists, summary does not. Detail is already useful. */
   | 'partial_ready'
+  /**
+   * Saved, and the hosted server is transcribing / summarizing it. NOT a pinned
+   * stage: the user may leave, processing continues, and the lecture shows
+   * Processing in Courses.
+   */
+  | 'ai_processing'
+  /** The server could not process a saved lecture. The recording is safe; Retry. */
+  | 'ai_failed'
   | 'ready'
   | 'upload_failed'
   /** An unfinished durable session was found and needs the user's decision. */
@@ -46,12 +55,20 @@ export type RecordingV2StageInput = {
   saved: { transcriptReady: boolean; summaryReady: boolean } | null
   /** True while an unfinished session from a previous run awaits a decision. */
   recoveryPending: boolean
+  /**
+   * The authoritative processing phase of the lecture that was just saved, from
+   * `lectureLifecycle`. `null` when no hosted pipeline applies (local-only,
+   * own key) or nothing is pending, in which case the saved stage is as before.
+   */
+  ai?: ProcessingPhase | null
 }
 
 /** Terminal stages: the flow is finished and the screen is waiting on the user. */
 const TERMINAL: ReadonlySet<RecordingV2Stage> = new Set<RecordingV2Stage>([
   'ready',
   'partial_ready',
+  'ai_processing',
+  'ai_failed',
   'upload_failed',
   'recovery_required',
 ])
@@ -78,7 +95,7 @@ export function ownsRecordingScreen(stage: RecordingV2Stage): boolean {
 }
 
 export function resolveRecordingV2Stage(input: RecordingV2StageInput): RecordingV2Stage {
-  const { recorderStatus, flowPhase, recentCapture, recentAi, saved, recoveryPending } = input
+  const { recorderStatus, flowPhase, recentCapture, recentAi, saved, recoveryPending, ai = null } = input
 
   // A live mic outranks everything: never leave the recording screen while
   // audio is still being captured.
@@ -110,6 +127,10 @@ export function resolveRecordingV2Stage(input: RecordingV2StageInput): Recording
   if (recoveryPending) return 'recovery_required'
 
   if (recentCapture?.kind === 'success' || recentCapture?.kind === 'list_refresh_warn') {
+    // The audio is safe. What the screen shows next is the SERVER'S word on the
+    // lecture, not the client's guess: processing, failed, or done.
+    if (ai === 'failed') return 'ai_failed'
+    if (ai === 'waiting' || ai === 'transcribing' || ai === 'summarizing') return 'ai_processing'
     // An AI failure after a successful save is not a lost recording: the row and
     // its audio are safe, so this reports partial readiness, never a failure.
     if (recentAi && recentAi.kind !== 'success') {
@@ -131,6 +152,8 @@ export const RECORDING_STAGE_TITLE_KEY = {
   processing_transcript: 'recording.processingTranscript',
   processing_summary: 'recording.processingSummary',
   partial_ready: 'recording.partialReady',
+  ai_processing: 'processing.title',
+  ai_failed: 'processing.failedTitle',
   ready: 'recording.ready',
   upload_failed: 'recording.uploadFailed',
   recovery_required: 'recording.recoveryRequired',
@@ -142,6 +165,8 @@ export const RECORDING_STAGE_BODY_KEY = {
   processing_transcript: 'recording.processingTranscriptBody',
   processing_summary: 'recording.processingSummaryBody',
   partial_ready: 'recording.partialReadyBody',
+  ai_processing: 'processing.body',
+  ai_failed: 'processing.failedBody',
   ready: 'recording.readyBody',
   upload_failed: 'recording.uploadFailedBody',
   recovery_required: 'recording.recoveryRequiredBody',

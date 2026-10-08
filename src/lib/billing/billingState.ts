@@ -9,6 +9,21 @@ import { isBillingPlanCode } from './billingClient'
 
 export type NormalizedBillingInterval = 'monthly' | 'annual'
 
+/**
+ * Who provides an active entitlement — used ONLY to choose honest guidance copy (never to decide access):
+ *   stripe  — a Desktop/web subscription (manageable through the Stripe Portal when a customer exists)
+ *   apple   — an App Store subscription or legacy pass; managed through Apple, not here
+ *   granted — an admin-granted Student Basic
+ *   other   — active, provider not recognised
+ */
+export type EntitlementProvider = 'stripe' | 'apple' | 'granted' | 'other'
+
+export type EntitlementSummary = {
+  provider: EntitlementProvider
+  /** Exactly what the backend exposes (`entitlement.expiresAt`); null when it does not. */
+  expiresAt: string | null
+}
+
 export type NormalizedQuota = {
   monthlyMinutesLimit: number | null
   minutesUsed: number | null
@@ -31,6 +46,26 @@ export type BillingState =
       interval: NormalizedBillingInterval | null
       currentPeriodEnd: string | null
       manageable: boolean
+      /** Provider-neutral summary of the active grant (always set for an active state). */
+      entitlement: EntitlementSummary
+      quota: NormalizedQuota
+    }
+  | {
+      /** Stripe free trial in progress (no charge yet). `trialEnd` is the backend's date, never computed here. */
+      status: 'trialing'
+      planCode: BillingPlanCode | null
+      interval: NormalizedBillingInterval | null
+      trialEnd: string | null
+      manageable: boolean
+      quota: NormalizedQuota
+    }
+  | {
+      /** Stripe free trial that will NOT convert: cancelled during the trial, access runs to the trial end. */
+      status: 'trial_canceling'
+      planCode: BillingPlanCode | null
+      interval: NormalizedBillingInterval | null
+      trialEnd: string | null
+      manageable: boolean
       quota: NormalizedQuota
     }
   | {
@@ -48,6 +83,8 @@ export type BillingState =
       currentPeriodEnd: string | null
       graceUntil: string | null
       accessActive: boolean
+      /** Backend `inGrace` when it reports one; null for an older response that does not. */
+      inGrace?: boolean | null
       manageable: boolean
       quota: NormalizedQuota
     }
@@ -150,6 +187,29 @@ export function hasActiveEffectiveEntitlement(plan: QuotaStatusPayload | null | 
   return plan.studentPassActive === true
 }
 
+const APPLE_PRODUCT_PREFIX = 'com.aydenz.youmilensipad.'
+const STRIPE_PRODUCT_IDS = new Set(['student_basic_monthly', 'student_basic_annual'])
+
+/** Pure; presentation only. Prefers the backend's `source`, falls back to the product id family. */
+export function classifyEntitlementProvider(
+  entitlement: QuotaStatusPayload['entitlement'] | null | undefined,
+): EntitlementProvider {
+  const source = typeof entitlement?.source === 'string' ? entitlement.source : ''
+  const productId = typeof entitlement?.productId === 'string' ? entitlement.productId : ''
+  if (source === 'app_store_subscription' || productId.startsWith(APPLE_PRODUCT_PREFIX)) return 'apple'
+  if (productId.startsWith('admin_')) return 'granted'
+  if (STRIPE_PRODUCT_IDS.has(productId)) return 'stripe'
+  return 'other'
+}
+
+function summarizeEntitlement(plan: QuotaStatusPayload | null | undefined): EntitlementSummary {
+  const expiresAt = plan?.entitlement?.expiresAt
+  return {
+    provider: classifyEntitlementProvider(plan?.entitlement),
+    expiresAt: typeof expiresAt === 'string' && expiresAt.length > 0 ? expiresAt : null,
+  }
+}
+
 function unavailableFromError(
   error: NonNullable<DeriveBillingStateInput['error']>,
 ): Extract<BillingState, { status: 'unavailable' }> {
@@ -220,6 +280,26 @@ export function deriveBillingState(input: DeriveBillingStateInput): BillingState
       currentPeriodEnd: subscription.currentPeriodEnd,
       graceUntil: subscription.graceUntil,
       accessActive: activeEntitlement,
+      inGrace: typeof subscription.inGrace === 'boolean' ? subscription.inGrace : null,
+      manageable,
+      quota,
+    }
+  }
+
+  // Stripe free trial. Only when the backend says `trialing`, access is active, and the active entitlement is
+  // a Stripe one — an Apple or admin grant never renders Stripe trial copy. The trial fact is kept separate
+  // from `canceling` / `active` so neither can erase it.
+  if (
+    subscription.trialing === true &&
+    activeEntitlement &&
+    classifyEntitlementProvider(input.quota?.entitlement) === 'stripe'
+  ) {
+    const trialEnd = typeof subscription.trialEnd === 'string' && subscription.trialEnd ? subscription.trialEnd : null
+    return {
+      status: subscription.cancelAtPeriodEnd ? 'trial_canceling' : 'trialing',
+      planCode,
+      interval,
+      trialEnd,
       manageable,
       quota,
     }
@@ -243,6 +323,7 @@ export function deriveBillingState(input: DeriveBillingStateInput): BillingState
       interval,
       currentPeriodEnd: subscription.currentPeriodEnd,
       manageable,
+      entitlement: summarizeEntitlement(input.quota),
       quota,
     }
   }

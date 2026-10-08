@@ -785,3 +785,8 @@ button.settings-v2__segmented-btn--selected { background: var(--v2-navy); color:
   .desktop-v2 *::before,
   .desktop-v2 *::after { transition-duration: .01ms !important; }
 }
+
+/* Record Home hosts the same `settings-v2__group` rows as Settings → App language;
+   only the spacing under the Start button is its own. */
+.record-home-v2__languages { margin-top: 16px; }
+.lecture-language-note { margin: 0; padding: 10px 16px 12px; }

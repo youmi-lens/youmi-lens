@@ -335,7 +335,9 @@ describe('the component actually dispatches it', () => {
   const src = readFileSync(new URL('../components/RecordingV2.tsx', import.meta.url), 'utf8')
 
   it('the scroll handler chooses between up-intent and position', () => {
-    expect(src).toContain('isUserScrollUp(lastSample.current, sample)')
+    // Intent is classified by `classifyHistoryScroll`, which combines the
+    // consecutive-event step with accumulated travel from the bottom anchor.
+    expect(src).toContain('classifyHistoryScroll(lastSample.current, followAnchor.current, metrics)')
     expect(src).toContain("up ? { type: 'user-scrolled-up', metrics } : { type: 'scrolled', metrics }")
   })
 

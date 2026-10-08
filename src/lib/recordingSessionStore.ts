@@ -46,6 +46,8 @@ export async function createRecordingSession(input: {
   course?: string
   courseId?: string | null
   title?: string
+  sourceLanguage?: string
+  translationLanguage?: string
 }): Promise<RecordingSessionMeta> {
   const meta = createRecordingSessionMeta(input)
   const db = await openDb()

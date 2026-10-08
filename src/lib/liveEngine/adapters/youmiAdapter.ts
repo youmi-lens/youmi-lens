@@ -20,20 +20,29 @@
  *   → server ASR (DashScope default) → stream_interim / stream_final → adapter events
  */
 
-import { StreamingWsSession } from '../streamingWsSession'
+import { StreamingWsSession, type StreamTranslation } from '../streamingWsSession'
+import { TranslationLagTracker } from '../translationLag'
 
 export type YoumiAdapterOpts = {
   tokenGetter?: () => Promise<string | null>
+  /** Canonical id of the language being spoken (see `contentLanguages`). */
+  sourceLanguage?: string
+  /** Equal to `sourceLanguage` ⇒ the server has nothing to translate. */
+  translationLanguage?: string
 }
 
 type YoumiAdapterEvent =
   | { type: 'connected' }
-  /** Upstream WS torn down after warm idle TTL; caller should re-run warmSession (same sampleRate). */
+  /** Intentional idle expiry; the next recording PCM opens a fresh session on demand. */
   | { type: 'warm_idle_teardown' }
   | { type: 'reconnecting'; reason: string }
   | { type: 'closed' }
   | { type: 'en_interim'; segmentId: string; rev: number; text: string }
   | { type: 'en_final'; segmentId: string; text: string }
+  /** A draft translation for the open caption (server `draft_of`, mapped to our segment). */
+  | { type: 'translation_interim'; segmentId: string; revision: number; text: string; sourceText: string | null }
+  /** A final translation covering EVERY segment the server named in `source_ids`. */
+  | { type: 'translation_final'; segmentIds: string[]; text: string; sourceText: string | null }
   | { type: 'error'; code: string; message: string; recoverable: boolean }
 
 type YoumiAdapterListener = (event: YoumiAdapterEvent) => void
@@ -72,11 +81,13 @@ export class YoumiLiveAdapter {
   private handshakeRejectTimer: ReturnType<typeof setTimeout> | null = null
 
   private warmIdleTimer: ReturnType<typeof setTimeout> | null = null
+  private idleReconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private audioEnded = false
   /** First PCM after user actually records — disables warm-idle TTL teardown. */
   private recordingPcmSeen = false
   /** Sample rate used in the last warmSession() call — used to reconnect in idle if WS drops. */
   private lastWarmSampleRate: number | null = null
-  /** How many idle (pre-recording) auto-reconnect attempts have been made since last successful onReady. */
+  /** Idle reconnect budget for this start lifecycle, never reset by stream_ready. */
   private idleReconnectCount = 0
 
   /** Single-flight: avoid overlapping initSession for same warm call site. */
@@ -98,6 +109,19 @@ export class YoumiLiveAdapter {
 
   private pcmQueue: ArrayBuffer[] = []
 
+  /**
+   * Server caption id → our local segment id. Built ONLY from ids the server
+   * assigned (`stream_interim.final_id`, `stream_final.id`); a translation is
+   * attached through this table and nowhere else — never to "the latest caption".
+   */
+  private segByServerId = new Map<string, string>()
+  /** Local segments that already received a final (a segment gets at most one server final). */
+  private finalizedSegIds = new Set<string>()
+  /** Highest draft-translation revision accepted per segment: an older response that arrives late is stale. */
+  private lastDraftRevBySeg = new Map<string, number>()
+  private static readonly MAX_SERVER_IDS = 600
+  readonly lag = new TranslationLagTracker()
+
   static readonly WARM_HANDSHAKE_TIMEOUT_MS = 45_000
   static readonly WARM_IDLE_TEARDOWN_MS = 120_000
 
@@ -117,11 +141,13 @@ export class YoumiLiveAdapter {
     this.rateMismatchReconnectDone = false
     this.upstreamHandshakeComplete = false
     this.recordingPcmSeen = false
+    this.audioEnded = false
     this.lastWarmSampleRate = null
     this.idleReconnectCount = 0
     this.rejectAllHandshakeWaiters(new Error('adapter_restarted'))
     this.clearHandshakeTimeout()
     this.clearWarmIdleTimer()
+    this.clearIdleReconnectTimer()
 
     this.currentSegId = ''
     this.lastInterimSegmentId = ''
@@ -129,6 +155,10 @@ export class YoumiLiveAdapter {
     this.interimRev = 0
     this.lastInterimMs = 0
     this.speechOnsetMs = 0
+    this.segByServerId.clear()
+    this.finalizedSegIds.clear()
+    this.lastDraftRevBySeg.clear()
+    this.lag.reset()
     this.firstInterimLogged = false
     this.lastFinalMs = 0
     this.loggedFirstPcmForwarded = false
@@ -171,6 +201,9 @@ export class YoumiLiveAdapter {
 
   notifyAudioEnd() {
     if (this.closed) return
+    this.audioEnded = true
+    this.clearWarmIdleTimer()
+    this.clearIdleReconnectTimer()
     log('notifyAudioEnd (stream_stop only)')
     this.session?.stop()
   }
@@ -181,6 +214,7 @@ export class YoumiLiveAdapter {
     this.rejectAllHandshakeWaiters(new Error('adapter_stopped'))
     this.clearHandshakeTimeout()
     this.clearWarmIdleTimer()
+    this.clearIdleReconnectTimer()
     log('adapter stop')
     this.session?.stop()
     setTimeout(() => {
@@ -188,6 +222,57 @@ export class YoumiLiveAdapter {
       this.session = null
     }, 500)
     this.listener?.({ type: 'closed' })
+  }
+
+  // ── Translation routing (identity only) ───────────────────────────────────
+
+  private rememberServerId(serverId: string, segmentId: string) {
+    this.segByServerId.set(serverId, segmentId)
+    if (this.segByServerId.size > YoumiLiveAdapter.MAX_SERVER_IDS) {
+      this.segByServerId.delete(this.segByServerId.keys().next().value as string)
+    }
+  }
+
+  /**
+   * Attach a server translation to the captions it names. A translation whose
+   * identity is missing, unknown, or only partly known is dropped and logged —
+   * the one thing this must never do is guess which caption it belongs to.
+   */
+  private routeTranslation(t: StreamTranslation) {
+    if (!t.final) {
+      const segmentId = t.draftOf ? this.segByServerId.get(t.draftOf) : undefined
+      if (!segmentId || t.revision === null) {
+        log('translation draft dropped (no identity)', { hasDraftOf: Boolean(t.draftOf), mapped: Boolean(segmentId), hasRevision: t.revision !== null })
+        return
+      }
+      // Draft requests run concurrently on the server, so an OLDER one can finish after a newer one
+      // (seen on Production). It is never shown, so it must not count as visible latency either.
+      if (t.revision <= (this.lastDraftRevBySeg.get(segmentId) ?? 0)) {
+        log('translation draft dropped (older revision arrived late)', { revision: t.revision })
+        return
+      }
+      this.lastDraftRevBySeg.set(segmentId, t.revision)
+      const sample = this.lag.noteInterimTranslation(segmentId, t.sourceText)
+      if (sample) console.info('[live-latency] translation_lag', JSON.stringify({ kind: 'interim', lagMs: sample.lagMs }))
+      this.listener?.({ type: 'translation_interim', segmentId, revision: t.revision, text: t.text, sourceText: t.sourceText })
+      return
+    }
+    if (!t.sourceIds) {
+      log('translation dropped (server sent no source_ids)', {})
+      return
+    }
+    const segmentIds: string[] = []
+    for (const serverId of t.sourceIds) {
+      const segmentId = this.segByServerId.get(serverId)
+      if (!segmentId) {
+        log('translation dropped (a source caption is unknown here)', { sources: t.sourceIds.length })
+        return
+      }
+      if (!segmentIds.includes(segmentId)) segmentIds.push(segmentId)
+    }
+    const sample = this.lag.noteFinalTranslation(segmentIds)
+    if (sample) console.info('[live-latency] translation_lag', JSON.stringify({ kind: 'final', lagMs: sample.lagMs, captions: segmentIds.length }))
+    this.listener?.({ type: 'translation_final', segmentIds, text: t.text, sourceText: t.sourceText })
   }
 
   // ── Segment abandonment (on error / unexpected close) ─────────────────────
@@ -281,6 +366,7 @@ export class YoumiLiveAdapter {
   /** Close WS + reset handshake flags; adapter stays alive for warmSession/pushPcm retry. */
   private teardownUpstreamPreserveAdapter() {
     this.clearWarmIdleTimer()
+    this.clearIdleReconnectTimer()
     this.sessionReady = false
     this.upstreamHandshakeComplete = false
     this.boundSampleRate = null
@@ -316,7 +402,8 @@ export class YoumiLiveAdapter {
   // ── Audio input ───────────────────────────────────────────────────────────
 
   pushPcm(buffer: ArrayBuffer, sampleRate: number) {
-    if (this.closed) return
+    if (this.closed || this.audioEnded) return
+    this.markRecordingPcmActivity()
 
     if (!this.speechOnsetMs) {
       const samples = new Int16Array(buffer)
@@ -386,7 +473,7 @@ export class YoumiLiveAdapter {
    * to avoid infinite loops on persistent server errors.
    */
   private scheduleIdleReconnectIfNeeded() {
-    if (this.recordingPcmSeen || this.closed || !this.lastWarmSampleRate) return
+    if (this.recordingPcmSeen || this.closed || this.audioEnded || !this.lastWarmSampleRate || this.idleReconnectTimer) return
     this.idleReconnectCount++
     if (this.idleReconnectCount > 3) {
       log('idle auto-reconnect budget exhausted', { attempts: this.idleReconnectCount })
@@ -395,18 +482,26 @@ export class YoumiLiveAdapter {
     const sr = this.lastWarmSampleRate
     const backoffMs = this.idleReconnectCount * 500
     log('idle auto-reconnect scheduled', { attempt: this.idleReconnectCount, backoffMs })
-    setTimeout(() => {
-      if (!this.closed && !this.recordingPcmSeen) {
+    const generation = this.sessionInitGeneration
+    this.idleReconnectTimer = setTimeout(() => {
+      this.idleReconnectTimer = null
+      if (!this.closed && !this.recordingPcmSeen && !this.audioEnded && generation === this.sessionInitGeneration && !this.session) {
         log('idle auto-reconnect — initSession', { attempt: this.idleReconnectCount, sampleRate: sr })
         this.initSession(sr)
       }
     }, backoffMs)
   }
 
+  private clearIdleReconnectTimer() {
+    if (this.idleReconnectTimer) clearTimeout(this.idleReconnectTimer)
+    this.idleReconnectTimer = null
+  }
+
   // ── Session lifecycle ─────────────────────────────────────────────────────
 
   private initSession(sampleRate: number) {
-    if (this.closed) return
+    if (this.closed || this.audioEnded) return
+    this.clearIdleReconnectTimer()
     this.sessionInitGeneration++
     const gen = this.sessionInitGeneration
 
@@ -432,7 +527,6 @@ export class YoumiLiveAdapter {
 
       onReady: () => {
         if (!ref.active || this.closed || gen !== this.sessionInitGeneration) return
-        this.idleReconnectCount = 0
         this.notifyUpstreamReady()
         log('stream_ready — draining PCM queue', {
           queued: this.pcmQueue.length,
@@ -444,7 +538,7 @@ export class YoumiLiveAdapter {
         this.pcmQueue = []
       },
 
-      onInterim: (text) => {
+      onInterim: (text, meta) => {
         if (!ref.active || this.closed || gen !== this.sessionInitGeneration || !text.trim()) return
         const now = Date.now()
         const trimmed = text.trim()
@@ -476,18 +570,26 @@ export class YoumiLiveAdapter {
         this.lastInterimMs = now
         const rev = ++this.interimRev
         this.lastInterimSegmentId = this.currentSegId
+        if (meta.finalId) this.rememberServerId(meta.finalId, this.currentSegId)
+        this.lag.noteInterim(this.currentSegId, trimmed)
         this.listener?.({ type: 'en_interim', segmentId: this.currentSegId, rev, text: trimmed })
       },
 
-      onFinal: (text) => {
+      onFinal: (text, meta) => {
         if (!ref.active || this.closed || gen !== this.sessionInitGeneration || !text.trim()) return
         const now = Date.now()
         const trimmed = text.trim()
 
-        const segId =
-          this.currentSegId ||
-          this.lastInterimSegmentId ||
-          `stream-${this.segCounter++}`
+        // Burst finals (no interim between them) used to reuse the previous caption's segment, and
+        // the second final then OVERWROTE the first in the transcript. The server numbers every
+        // final, so when it gives us an id each final is its own caption: reuse the last interim's
+        // segment only if no final has claimed it yet. (An older server sends no id; its behaviour
+        // is unchanged.)
+        const reusableInterimSeg =
+          this.lastInterimSegmentId && !(meta.id && this.finalizedSegIds.has(this.lastInterimSegmentId))
+            ? this.lastInterimSegmentId
+            : ''
+        const segId = this.currentSegId || reusableInterimSeg || `stream-${this.segCounter++}`
         if (import.meta.env.DEV) {
           log('B-metric: last-interim → final', {
             lastInterimToFinalMs: this.lastInterimMs ? now - this.lastInterimMs : -1,
@@ -503,12 +605,21 @@ export class YoumiLiveAdapter {
         this.firstInterimLogged = false
         this.speechOnsetMs = 0
         this.lastFinalMs = now
+        if (meta.id) this.rememberServerId(meta.id, segId)
+        this.finalizedSegIds.add(segId)
+        if (this.finalizedSegIds.size > YoumiLiveAdapter.MAX_SERVER_IDS) this.finalizedSegIds.delete(this.finalizedSegIds.keys().next().value as string)
+        this.lag.noteFinal(segId)
 
         this.listener?.({ type: 'connected' })
         this.listener?.({ type: 'en_final', segmentId: segId, text: trimmed })
         if (import.meta.env.DEV) {
           log('segment closed — waiting for next speech', { nextSeg: `stream-${this.segCounter}` })
         }
+      },
+
+      onTranslation: (translation) => {
+        if (!ref.active || this.closed || gen !== this.sessionInitGeneration) return
+        this.routeTranslation(translation)
       },
 
       onError: (reason) => {
@@ -540,7 +651,11 @@ export class YoumiLiveAdapter {
         this.listener?.({ type: 'reconnecting', reason: 'ws_closed' })
         this.scheduleIdleReconnectIfNeeded()
       },
-    }, { tokenGetter: this.opts.tokenGetter })
+    }, {
+      tokenGetter: this.opts.tokenGetter,
+      sourceLanguage: this.opts.sourceLanguage,
+      translationLanguage: this.opts.translationLanguage,
+    })
 
     this.session.connect()
   }

@@ -1,0 +1,13 @@
+{
+ "ai_status": "done",
+ "ai_error": null,
+ "source_language": "ja",
+ "translation_language": "en",
+ "transcript": "今日はソートアルゴリズムについて学びますまず、バブルソートから始めますこれは隣アワー要素を比較する方法です次にクイックソートを説明しますクイックソートは多くの場合、とても高速です最後に3つの計算量を比較します。",
+ "source_summary": "## 概要\n今日の講義では、ソートアルゴリズムについて学びます。まず、隣り合う要素を比較するバブルソートを紹介します。次に、多くの場合非常に高速なクイックソートについて説明します。最後に、これらのアルゴリズムの計算量を比較します。\n\n## キーワード\nバブルソート、クイックソート、計算量、隣り合う要素、ソートアルゴリズム\n\n## まとめ\nバブルソートは隣り合う要素を比較して並べ替える基本的なソート手法です。クイックソートは平均的に非常に高速で、実用性が高いアルゴリズムです。三つのアルゴリズムの計算量の違いを比較することで、それぞれの効率性を理解できます。",
+ "translated_summary": "## Outline\nToday's lecture covers sorting algorithms. We begin with bubble sort, which works by comparing adjacent elements. Next, we explain quicksort, which is often very fast. Finally, we compare the time complexities of these three algorithms.\n\n## Key terms\nBubble sort, quicksort, time complexity, adjacent elements, sorting algorithm\n\n## Takeaways\nBubble sort is a fundamental sorting technique that arranges elements by comparing adjacent pairs. Quicksort is highly efficient on average and widely used in practice. Comparing the time complexities of these algorithms helps us understand their relative efficiency.",
+ "translated_transcript": "Today we'll study sorting algorithms. First, we'll start with bubble sort, which works by comparing adjacent elements. Next, we'll explain quicksort, which is often very fast. Finally, we'll compare the time complexities of these three.",
+ "summary_en": "## Outline\nToday's lecture covers sorting algorithms. We begin with bubble sort, which works by comparing adjacent elements. Next, we explain quicksort, which is often very fast. Finally, we compare the time complexities of these three algorithms.\n\n## Key terms\nBubble sort, quicksort, time complexity, adjacent elements, sorting algorithm\n\n## Takeaways\nBubble sort is a fundamental sorting technique that arranges elements by comparing adjacent pairs. Quicksort is highly efficient on average and widely used in practice. Comparing the time complexities of these algorithms helps us understand their relative efficiency.",
+ "summary_zh": null,
+ "transcript_zh": null
+}

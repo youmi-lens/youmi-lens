@@ -24,6 +24,12 @@ export type SubscriptionRecord = {
   cancelAtPeriodEnd: boolean
   graceUntil: string | null
   manageable: boolean
+  /** Additive backend fields (absent from older responses; never defaulted in here). */
+  trialing?: boolean
+  /** Authoritative end of a Stripe free trial, exactly as the backend reports it. */
+  trialEnd?: string | null
+  /** past_due AND still inside the paid-for / grace window (backend decides). */
+  inGrace?: boolean
 }
 
 export type SubscriptionStatusPayload = {
@@ -68,6 +74,8 @@ export type QuotaStatusPayload = {
     startsAt?: string | null
     expiresAt?: string | null
     revoked?: boolean
+    /** Where the grant came from (e.g. 'app_store_subscription'); absent on legacy rows. */
+    source?: string | null
   }
   unlimited?: boolean
   monthlyMinutesLimit?: number | null
@@ -195,7 +203,8 @@ async function billingFetch(path: string, init: RequestInit = {}): Promise<unkno
   return body
 }
 
-function assertSubscriptionRecord(value: unknown, label: string): SubscriptionRecord {
+/** Exported for tests: the pure response parser (additive fields stay absent unless correctly typed). */
+export function assertSubscriptionRecord(value: unknown, label: string): SubscriptionRecord {
   if (!value || typeof value !== 'object') {
     throw new BillingApiError('malformed', `${label} missing subscription.`, {
       code: 'malformed_response',
@@ -228,7 +237,15 @@ function assertSubscriptionRecord(value: unknown, label: string): SubscriptionRe
       code: 'malformed_response',
     })
   }
+  // Additive trial / grace facts: copied only when they have the expected type, so an older response (or a
+  // malformed value) leaves them absent instead of inventing a state.
+  const additive: Pick<SubscriptionRecord, 'trialing' | 'trialEnd' | 'inGrace'> = {}
+  if (typeof s.trialing === 'boolean') additive.trialing = s.trialing
+  if (typeof s.trialEnd === 'string') additive.trialEnd = s.trialEnd
+  else if (s.trialEnd === null) additive.trialEnd = null
+  if (typeof s.inGrace === 'boolean') additive.inGrace = s.inGrace
   return {
+    ...additive,
     provider,
     active: s.active,
     planCode: typeof s.planCode === 'string' ? s.planCode : s.planCode == null ? null : null,

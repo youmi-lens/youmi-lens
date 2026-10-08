@@ -32,6 +32,13 @@ export interface PendingUploadMeta {
   /** Language settings required to process the recording after upload. */
   lang: string
   translateTarget: string
+  /**
+   * The lecture's frozen canonical languages. Optional: pending uploads saved
+   * before language selection existed have neither, and retry then uses the
+   * legacy default (English → Simplified Chinese) — what they were recorded as.
+   */
+  sourceLanguage?: string
+  translationLanguage?: string
   liveTranscript?: string
   liveTranscriptRaw?: string
   createdAt: number

@@ -199,6 +199,18 @@ export function findCourseForRecording(
   return courses.find((course) => course.deletedAt === null && courseNameKey(course.name) === key) ?? null
 }
 
+/** Capture the displayed course's UUID before recording starts, including a
+ * legacy name-only selection. An explicit missing UUID never falls back to a
+ * same-name replacement; the upload ownership gate decides whether it is valid.
+ */
+export function recordingCourseContext(
+  selection: { course: string; courseId?: string | null },
+  courses: readonly Course[],
+): { course: string; courseId: string | null } {
+  const match = findCourseForRecording(selection, courses)
+  return { course: match?.name ?? selection.course.trim(), courseId: match?.id ?? selection.courseId ?? null }
+}
+
 /**
  * What Record Home's course selection should do once the live course list is
  * known, given a canonical match (or lack of one) from `findCourseForRecording`.

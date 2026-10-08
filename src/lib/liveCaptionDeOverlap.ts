@@ -165,3 +165,97 @@ function preview(s: string): string {
   if (s.length <= 120) return s
   return s.slice(0, 55) + ' ... ' + s.slice(-55)
 }
+
+// ── Languages written without spaces ────────────────────────────────────────
+//
+// `deOverlapEnglish` tokenises on whitespace and needs a 3-token anchor and a
+// 5-token containment match. A Chinese or Japanese caption has almost no
+// whitespace, so every segment is one or two "tokens" and neither strategy can
+// ever fire: overlap between the committed transcript and a re-sent snapshot
+// would pass straight through. These work on CHARACTERS instead, with the same
+// two strategies and the same result shape, so the engine does not care which
+// ran. Punctuation is ignored for matching only; the novel text keeps what the
+// provider sent.
+
+const CJK_MAX_ANCHOR = 24
+const CJK_MIN_ANCHOR = 6
+const CJK_MIN_CONTAINED = 8
+const CJK_WINDOW = 400
+const PUNCT_OR_SPACE = /[\s\p{P}\p{S}]/u
+
+function charsOf(text: string): { chars: string[]; keyed: string[]; at: number[] } {
+  const chars = Array.from(text)
+  const keyed: string[] = []
+  const at: number[] = []
+  chars.forEach((ch, i) => {
+    if (!PUNCT_OR_SPACE.test(ch)) {
+      keyed.push(ch.toLowerCase())
+      at.push(i)
+    }
+  })
+  return { chars, keyed, at }
+}
+
+export function deOverlapCjk(committedFull: string, incoming: string): DeOverlapResult {
+  const inc = charsOf(incoming)
+  const trimmed = incoming.trim()
+  const asResult = (overlapEndKeyed: number, opts: BuildOpts): DeOverlapResult => {
+    // Map "N matched significant characters" back to a cut position in the original.
+    const cut = overlapEndKeyed <= 0 ? 0 : inc.at[Math.min(overlapEndKeyed, inc.at.length) - 1] + 1
+    const novel = opts.novelOverride !== undefined ? opts.novelOverride : inc.chars.slice(cut).join('').trim()
+    const overlapTokens = inc.chars.slice(0, cut)
+    return {
+      novelText: novel,
+      verdict: opts.verdict,
+      overlapTokenCount: overlapEndKeyed,
+      incomingTokenCount: inc.keyed.length,
+      novelTokenCount: Array.from(novel).filter((c) => !PUNCT_OR_SPACE.test(c)).length,
+      overlapPreview: preview(overlapTokens.join('')),
+      novelPreview: novel.slice(0, 120),
+      matchedAnchorLen: opts.matchedAnchorLen ?? 0,
+      matchedAnchorText: opts.matchedAnchorText ?? '',
+      suspiciousShortAnchor: opts.suspiciousShortAnchor ?? false,
+      containmentRatio: opts.containmentRatio ?? 0,
+    }
+  }
+
+  if (!committedFull.trim() || inc.keyed.length === 0) {
+    return asResult(0, { verdict: 'empty_committed', novelOverride: trimmed })
+  }
+
+  const com = charsOf(committedFull)
+
+  // Strategy 1: the committed tail, found inside the incoming snapshot.
+  const maxAnchor = Math.min(CJK_MAX_ANCHOR, com.keyed.length)
+  for (let anchorLen = maxAnchor; anchorLen >= CJK_MIN_ANCHOR; anchorLen--) {
+    const anchor = com.keyed.slice(-anchorLen)
+    const pos = findSubseq(inc.keyed, anchor)
+    if (pos >= 0) {
+      return asResult(pos + anchorLen, {
+        verdict: 'anchor_cut',
+        matchedAnchorLen: anchorLen,
+        matchedAnchorText: com.chars.slice(com.at[com.keyed.length - anchorLen]).join('').slice(0, 60),
+        suspiciousShortAnchor: anchorLen <= 8,
+      })
+    }
+  }
+
+  // Strategy 2: the whole incoming snapshot is already inside the recent transcript.
+  if (inc.keyed.length >= CJK_MIN_CONTAINED) {
+    const window = com.keyed.slice(-CJK_WINDOW)
+    if (findSubseq(window, inc.keyed) >= 0) {
+      return asResult(inc.keyed.length, { verdict: 'containment_drop', novelOverride: '', containmentRatio: 1 })
+    }
+  }
+
+  return asResult(0, { verdict: 'no_overlap_keep', novelOverride: trimmed })
+}
+
+/** The right de-overlap for the language being spoken. */
+export function deOverlapForLanguage(
+  committedFull: string,
+  incoming: string,
+  script: 'latin' | 'cjk',
+): DeOverlapResult {
+  return script === 'cjk' ? deOverlapCjk(committedFull, incoming) : deOverlapEnglish(committedFull, incoming)
+}

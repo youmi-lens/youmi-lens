@@ -195,6 +195,85 @@ export function isUserScrollUp(prev: ScrollSample | null, next: ScrollSample): b
   return next.scrollTop < prev.scrollTop - 1
 }
 
+/* ── Slow drags ─────────────────────────────────────────────────────────────
+   `isUserScrollUp` compares two CONSECUTIVE scroll events and ignores a move of
+   a single pixel (sub-pixel layout jitters). A slow two-finger drag moves 1px or
+   less per event, so it was never seen as upward intent: the machine fell back
+   to position, where the first NEAR_BOTTOM_PX still counts as "following", and
+   the next caption pinned the reader back down. Reproduced against the real
+   component: at 1px/frame the distance from the bottom climbed 6, 12, 18, 24 and
+   snapped back to ~2, forever.
+
+   Intent therefore has to accumulate. The reference is the ANCHOR — the last
+   position at which the reader was genuinely at the bottom — and a drag counts
+   once it has travelled UPWARD_INTENT_PX from it, however slowly. Jitter never
+   gets there (it is a fraction of a pixel), so the original reason for ignoring
+   single-pixel moves still holds. */
+
+/** Cumulative upward travel from the bottom that counts as the reader leaving it. */
+export const UPWARD_INTENT_PX = 3
+
+/** The last scroll reading at which the reader was at the bottom, or null. */
+export type FollowAnchor = ScrollSample | null
+
+/**
+ * Advance the anchor. It only moves while the reader is AT the bottom (strictly
+ * under 1px away), so during a drag it stays put and the drag accumulates
+ * against it; when a pin lands the reader at the new bottom, it follows.
+ */
+export function nextFollowAnchor(anchor: FollowAnchor, metrics: CaptionScrollMetrics): FollowAnchor {
+  if (distanceFromBottom(metrics) >= 1) return anchor
+  // Past the end (macOS rubber-banding) is not a place the reader can rest, so
+  // the anchor is the real bottom, never the overshoot.
+  const maxTop = Math.max(0, metrics.scrollHeight - metrics.clientHeight)
+  return { scrollTop: Math.min(metrics.scrollTop, maxTop), scrollHeight: metrics.scrollHeight }
+}
+
+/** Whether the reader has moved up from the anchor by enough to mean it. */
+export function isScrolledUpFromAnchor(anchor: FollowAnchor, next: ScrollSample): boolean {
+  if (!anchor) return false
+  // History is capped: dropping the oldest line shrinks scrollHeight and the
+  // platform clamps scrollTop down by itself. That is not a gesture.
+  if (next.scrollHeight < anchor.scrollHeight) return false
+  return anchor.scrollTop - next.scrollTop >= UPWARD_INTENT_PX
+}
+
+/* ── Layout is not a reader ─────────────────────────────────────────────────
+   Measured in the real WKWebView (2026-10-04, diagnostic log of a physical
+   session): with nobody touching the app, "Jump to latest" appeared at the
+   bottom of the history and auto-follow stayed off. The live line below the
+   history wraps from one line to two and back, so the history viewport changes
+   height by ~28px (clientHeight 110 → 138, scrollHeight unchanged at 3600). The
+   platform clamps scrollTop to the new, lower maximum (3490 → 3462) and fires a
+   scroll event that looks exactly like a step upward. macOS rubber-banding at
+   the bottom does the same thing: scrollTop overshoots (3485) and settles back
+   (3462).
+
+   Both end ON the bottom. A reader who scrolled up is, by definition, still
+   above it — so a decrease that LANDS at the bottom is the layout (or the bounce)
+   settling, never intent. Slow drags are untouched: they end at distance ≥ 3. */
+
+/** Whether this reading is the bottom itself (strictly under 1px away). */
+export function isAtBottom(metrics: CaptionScrollMetrics): boolean {
+  return distanceFromBottom(metrics) < 1
+}
+
+/**
+ * Everything the scroll handler needs in one pure step: is this an upward
+ * gesture (either a clear step between events OR accumulated slow travel), and
+ * where is the anchor now.
+ */
+export function classifyHistoryScroll(
+  prev: ScrollSample | null,
+  anchor: FollowAnchor,
+  metrics: CaptionScrollMetrics,
+): { up: boolean; anchor: FollowAnchor } {
+  const sample: ScrollSample = { scrollTop: metrics.scrollTop, scrollHeight: metrics.scrollHeight }
+  const moved = isUserScrollUp(prev, sample) || isScrolledUpFromAnchor(anchor, sample)
+  const up = moved && !isAtBottom(metrics)
+  return { up, anchor: nextFollowAnchor(anchor, metrics) }
+}
+
 /**
  * Whether "Jump to latest" may be shown.
  *

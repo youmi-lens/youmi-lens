@@ -234,7 +234,9 @@ describe('BillingPlanContent states', () => {
       manageable: true,
       quota: emptyQuota,
     }, { onManage: () => {} })
-    expect(html).toContain('access is currently limited')
+    // Owner-approved wording (replaces the old "access is currently limited"): payment problem only, no access promise.
+    expect(html).toContain('We couldn&#x27;t process your payment.')
+    expect(html).not.toContain('Access continues')
     expect(html).toContain('Resolve billing issue')
     expect(html).not.toContain('Upgrade')
   })

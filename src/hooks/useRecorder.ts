@@ -47,6 +47,16 @@ function newSessionId(): string {
 const MIN_LIVE_AUDIO_BYTES = 2048
 
 /** Live caption slice interval only (separate cloned MediaRecorder; does not use timeslice on main track). */
+/** What a recording's durable session remembers about the lecture. */
+export type SessionContext = {
+  course?: string
+  courseId?: string | null
+  title?: string
+  /** Canonical content-language ids, frozen at Start. */
+  sourceLanguage?: string
+  translationLanguage?: string
+}
+
 export const LIVE_WHISPER_SLICE_MS = 1600
 
 /** After final requestData(), wait until no non-empty chunk for this long (or cap) before MediaRecorder.stop(). */
@@ -87,7 +97,7 @@ export function useRecorder(opts?: {
   experimentalSkipLiveSlice?: boolean
   /** Owner isolation key for durable sessions (`userId` or `local` / `anonymous`). */
   getOwnerKey?: () => string
-  getSessionContext?: () => { course?: string; courseId?: string | null; title?: string }
+  getSessionContext?: () => SessionContext
   /**
    * Read at Start and never again, so the source is frozen for the session —
    * changing the setting mid-lecture cannot change what is being captured.
@@ -247,7 +257,7 @@ export function useRecorder(opts?: {
     liveStreamRef.current = null
   }, [teardownPcmCapture])
 
-  const start = useCallback(async (sessionContextOverride?: { course?: string; courseId?: string | null; title?: string }): Promise<string | null> => {
+  const start = useCallback(async (sessionContextOverride?: SessionContext): Promise<string | null> => {
     setError(null)
     try {
       const existing = mediaRecorderRef.current
@@ -340,6 +350,8 @@ export function useRecorder(opts?: {
         course: sessionContext?.course,
         courseId: sessionContext?.courseId ?? null,
         title: sessionContext?.title,
+        sourceLanguage: sessionContext?.sourceLanguage,
+        translationLanguage: sessionContext?.translationLanguage,
       })
       setActiveSessionId(sessionId)
 

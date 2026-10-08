@@ -33,6 +33,14 @@ export interface RecordingSessionMeta {
   course?: string
   courseId?: string | null
   title?: string
+  /**
+   * The lecture's languages, frozen at Start. A recovered session is saved with
+   * THESE — never with whatever the preference is when the app is relaunched.
+   * Absent on a session written before language selection: the legacy default
+   * (English → Simplified Chinese, what the product always did) applies.
+   */
+  sourceLanguage?: string
+  translationLanguage?: string
 }
 
 export interface RecordingChunkMeta {
@@ -94,6 +102,8 @@ export function createRecordingSessionMeta(input: {
   course?: string
   courseId?: string | null
   title?: string
+  sourceLanguage?: string
+  translationLanguage?: string
 }): RecordingSessionMeta {
   const now = input.startedAt ?? Date.now()
   return {
@@ -111,6 +121,8 @@ export function createRecordingSessionMeta(input: {
     course: input.course,
     courseId: input.courseId ?? null,
     title: input.title,
+    ...(input.sourceLanguage ? { sourceLanguage: input.sourceLanguage } : {}),
+    ...(input.translationLanguage ? { translationLanguage: input.translationLanguage } : {}),
   }
 }
 

@@ -182,6 +182,21 @@
 }
 .recording-v2__notice[data-tier='info'] { background: var(--v2-paper-2); color: var(--v2-muted); }
 .recording-v2__notice[data-tier='fatal'] { background: var(--v2-record-soft); color: var(--v2-danger-ink); }
+.recording-v2__notice-action {
+  margin: 8px 0 0;
+  padding: 7px 14px;
+  border: 1px solid var(--v2-line, rgba(15, 23, 42, 0.16));
+  border-radius: var(--v2-radius-sm);
+  background: var(--v2-paper, #fff);
+  color: var(--v2-ink, inherit);
+  font: inherit;
+  font-size: var(--v2-text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.recording-v2__notice-action:hover { background: var(--v2-paper-2); }
+.recording-v2__notice-action:focus-visible { outline: 2px solid var(--v2-focus, currentColor); outline-offset: 2px; }
 
 /* ── Captions ────────────────────────────────────────────────────────────────
    One column, not two. The old cockpit put source and translation in side-by-
@@ -193,6 +208,11 @@
   min-height: 0;
   flex: 1;
   flex-direction: column;
+  /* The history viewport is BOUNDED (below), so a large window leaves slack in
+     this column. The slack goes ABOVE the transcript, not between the last
+     history line and the live caption: the live caption stays directly under
+     the text it continues, like a chat, instead of floating 400px away from it. */
+  justify-content: flex-end;
   margin-top: 20px;
 }
 
@@ -200,11 +220,27 @@
    `min-height: 0` is load-bearing on every link of this chain: a flex child
    defaults to `min-height: auto`, which lets content push the box taller than
    its parent instead of scrolling inside it. */
+/* The history is a reading viewport of a deliberate size, NOT "whatever space is
+   left". It used to be `flex: 1`, so maximizing the window stretched it with the
+   window (694px at 1728x1117): a short history never overflowed, there was
+   nothing to scroll back through, and a ~420px blank band opened between the
+   last line and the live caption. Now:
+
+     height  = the history's own height …
+     capped  = at --recording-history-max (responsive: 38% of the window, never
+               under 200px, never over 360px) …
+     shrinks = below that when the window is too small to afford it, exactly as
+               before (min-height: 0 on every link of the chain).
+
+   Short history hugs its text (no fake scrollbar); long history overflows inside
+   a viewport that is the same comfortable size on a laptop and on a 27" display. */
 .recording-v2__history-wrap {
+  --recording-history-max: clamp(200px, 38vh, 360px);
   position: relative;
   display: flex;
   min-height: 0;
-  flex: 1;
+  max-height: var(--recording-history-max);
+  flex: 0 1 auto;
   flex-direction: column;
 }
 
@@ -232,7 +268,9 @@
    chaining into the page behind it. */
 .recording-v2__history {
   min-height: 0;
-  flex: 1;
+  /* `auto` basis: the wrapper's height follows the text, then the wrapper's
+     max-height caps it and this box scrolls inside. */
+  flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
@@ -248,6 +286,16 @@
 .recording-v2__history:focus-visible {
   outline: 2px solid var(--v2-focus);
   outline-offset: 2px;
+}
+/* A settled caption: its original, and directly under it its own translation.
+   The row is one unit (12px below), the two lines inside it sit close. */
+.desktop-v2 .recording-v2__history .recording-v2__pair { max-width: 74ch; margin: 0 0 12px; }
+.desktop-v2 .recording-v2__history .recording-v2__pair p { margin: 0; max-width: none; overflow-wrap: anywhere; }
+.desktop-v2 .recording-v2__history .recording-v2__pair-translation {
+  margin-top: 2px;
+  color: var(--v2-muted);
+  font-size: 14px;
+  line-height: 1.55;
 }
 .desktop-v2 .recording-v2__history p {
   /* Paired rhythm: a settled line sits closer to the next than to itself. */
@@ -320,6 +368,16 @@
   font-size: 17px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+/* The "Translating…" hint for a SETTLED caption that is still waiting: invisible for the first
+   900 ms, so the normal sub-second wait never flashes it. */
+.desktop-v2 .recording-v2__translation[data-pending='true'] {
+  opacity: 0;
+  animation: recording-v2-pending-in 160ms ease 900ms forwards;
+}
+@keyframes recording-v2-pending-in { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .desktop-v2 .recording-v2__translation[data-pending='true'] { opacity: 1; animation: none; }
 }
 .desktop-v2 .recording-v2__source[data-empty='true'],
 .desktop-v2 .recording-v2__translation[data-empty='true'] {

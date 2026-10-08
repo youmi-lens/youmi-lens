@@ -10,6 +10,7 @@
  *   - mime:         MIME type, e.g. "audio/webm" or "audio/mp4"
  *   - duration_sec: recording duration in seconds (optional, used for early duration check)
  *   - course:       lecture course/title grouping (optional; defaults to "Course")
+ *   - course_id:    owned active Course UUID (optional for legacy/unfiled uploads)
  *   - title:        lecture title (optional; defaults to "Lecture")
  *   - live_transcript: canonical live caption text (optional)
  *   - live_transcript_raw: raw live caption text (optional)
@@ -120,6 +121,10 @@ export async function handleUploadAudio(req, res) {
   // it from the `course` label here — a course rename must not orphan lectures.
   const courseId = nullableText(rawCourseId)
   const title = cleanText(rawTitle, 'Lecture')
+  if (rawCourseId != null && rawCourseId !== '' &&
+      (typeof rawCourseId !== 'string' || !courseId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(courseId))) {
+    return res.status(400).json({ error: 'invalid_course', message: 'Choose a valid course before saving.' })
+  }
   const liveTranscript = nullableText(rawLiveTranscript)
   const liveTranscriptRaw = nullableText(rawLiveTranscriptRaw)
   const translatedLiveTranscript = nullableText(rawTranslatedLiveTranscript)
@@ -194,6 +199,24 @@ export async function handleUploadAudio(req, res) {
     })
   }
 
+  // The service client bypasses RLS. Validate the UUID against the authenticated
+  // owner BEFORE uploading audio or upserting a recording; never trust a label.
+  if (courseId) {
+    const { data: ownedCourse, error: courseError } = await adminClient
+      .from('courses')
+      .select('id')
+      .eq('id', courseId)
+      .eq('user_id', userId)
+      .is('deleted_at', null)
+      .maybeSingle()
+    if (courseError) {
+      return res.status(503).json({ error: 'course_lookup_failed', message: 'Could not verify the course. Your recording can be retried.' })
+    }
+    if (!ownedCourse) {
+      return res.status(404).json({ error: 'course_unavailable', message: 'This course is unavailable. Choose an active course before retrying.' })
+    }
+  }
+
   console.warn(
     '[upload-audio] start',
     JSON.stringify({
@@ -230,7 +253,8 @@ export async function handleUploadAudio(req, res) {
     id: recordingId,
     user_id: userId,
     course,
-    course_id: courseId,
+    // Omission preserves an existing association on legacy audio retries.
+    ...(courseId ? { course_id: courseId, } : {}),
     title,
     duration_sec: Math.round(durationSec) || 0,
     mime,
