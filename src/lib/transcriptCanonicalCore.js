@@ -1,6 +1,12 @@
 /**
  * Lecture transcript canonicalization (shared: Vite client + Node server via ESM import).
- * Domain-agnostic: sentence merge/dedupe, repeated-run removal, light session-level term voting.
+ * Domain-agnostic, STRUCTURE-ONLY: sentence merge/dedupe and repeated-run removal.
+ *
+ * INVARIANT: canonicalization never substitutes one word for another. It used to run a session-level
+ * "term vote" that rewrote near-identical spellings; that silently turned real words into other real words
+ * (fr forte -> forme, es modulo -> modelo, en stare -> state, nitrite -> nitrate, strong -> string), before
+ * translation / summary / persistence and irreversibly. No stricter heuristic can prove it never does that,
+ * so it was removed: leaving an ASR misspelling is acceptable, rewriting a valid word is not.
  * Not a substitute for ASR quality; stabilizes structure before summary / display.
  */
 
@@ -109,125 +115,6 @@ function collapseRepeatedRuns(sentences) {
   return { sentences: out, droppedRuns }
 }
 
-function levenshtein(a, b) {
-  if (a === b) return 0
-  if (!a.length) return b.length
-  if (!b.length) return a.length
-  const m = a.length
-  const n = b.length
-  /** @type {number[]} */
-  let prev = new Array(n + 1)
-  for (let j = 0; j <= n; j++) prev[j] = j
-  for (let i = 1; i <= m; i++) {
-    const cur = new Array(n + 1)
-    cur[0] = i
-    const ca = a.charCodeAt(i - 1)
-    for (let j = 1; j <= n; j++) {
-      const cost = ca === b.charCodeAt(j - 1) ? 0 : 1
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
-    }
-    prev = cur
-  }
-  return prev[n]
-}
-
-/**
- * Session-level term voting: merge near-duplicate word spellings (no fixed vocabulary).
- * Only touches tokens length >= 5, excludes very common English stubs.
- * @param {string} text
- */
-function unifySimilarTokens(text) {
-  const stop = new Set([
-    'about',
-    'after',
-    'again',
-    'because',
-    'before',
-    'could',
-    'first',
-    'going',
-    'really',
-    'should',
-    'something',
-    'their',
-    'there',
-    'these',
-    'think',
-    'those',
-    'through',
-    'today',
-    'under',
-    'where',
-    'which',
-    'would',
-  ])
-  const re = /\b[A-Za-z][A-Za-z'-]{4,}\b/g
-  /** @type {Map<string, { forms: Map<string, number> }>} */
-  const buckets = new Map()
-  let m
-  while ((m = re.exec(text)) !== null) {
-    const w = m[0]
-    const low = w.toLowerCase()
-    if (stop.has(low)) continue
-    const key = `${low.length}:${low.slice(0, 3)}`
-    let b = buckets.get(key)
-    if (!b) {
-      b = { forms: new Map() }
-      buckets.set(key, b)
-    }
-    const c = w[0] === w[0].toUpperCase() && w.slice(1) !== w.slice(1).toUpperCase()
-    const form = c ? w : low
-    b.forms.set(form, (b.forms.get(form) ?? 0) + 1)
-  }
-
-  /** @type {Map<string, string>} */
-  const replace = new Map()
-  let clustersMerged = 0
-  for (const { forms } of buckets.values()) {
-    const arr = [...forms.entries()].sort((a, b) => b[1] - a[1])
-    if (arr.length < 2) continue
-    const used = new Set()
-    for (let i = 0; i < arr.length; i++) {
-      const [wi, ci] = arr[i]
-      if (used.has(wi)) continue
-      const group = [{ w: wi, c: ci }]
-      used.add(wi)
-      const li = wi.toLowerCase()
-      for (let j = i + 1; j < arr.length; j++) {
-        const [wj, cj] = arr[j]
-        if (used.has(wj)) continue
-        const lj = wj.toLowerCase()
-        if (Math.abs(li.length - lj.length) > 2) continue
-        const dist = levenshtein(li, lj)
-        const maxDist = li.length <= 8 ? 1 : 2
-        if (dist > 0 && dist <= maxDist && ci + cj >= 3) {
-          group.push({ w: wj, c: cj })
-          used.add(wj)
-        }
-      }
-      if (group.length < 2) continue
-      group.sort((a, b) => b.c - a.c)
-      const winner = group[0].w
-      for (let k = 1; k < group.length; k++) {
-        const loser = group[k].w
-        if (loser !== winner) {
-          replace.set(loser, winner)
-          clustersMerged += 1
-        }
-      }
-    }
-  }
-
-  if (replace.size === 0) return { text, clustersMerged: 0 }
-  let out = text
-  for (const [from, to] of replace) {
-    const esc = from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const rw = new RegExp(`\\b${esc}\\b`, 'g')
-    out = out.replace(rw, to)
-  }
-  return { text: out, clustersMerged }
-}
-
 function canonicalizeTrackBody(body) {
   let t = normalizeInnerWhitespace(body)
   let sentences = splitSentences(t)
@@ -244,17 +131,17 @@ function canonicalizeTrackBody(body) {
   droppedRepeatedRuns += r1.droppedRuns
 
   const joined = sentences.join(' ').trim()
-  const u = unifySimilarTokens(joined)
-  const countOut = splitSentences(u.text).length
+  const countOut = splitSentences(joined).length
 
   return {
-    text: normalizeInnerWhitespace(u.text),
+    text: normalizeInnerWhitespace(joined),
     diagnostics: {
       sentenceCountIn: countIn,
       sentenceCountOut: countOut,
       droppedNearDupPairs,
       droppedRepeatedRuns,
-      termClustersMerged: u.clustersMerged,
+      // Kept in the result shape for existing consumers; lexical voting is gone, so always 0.
+      termClustersMerged: 0,
     },
   }
 }
