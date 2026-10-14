@@ -66,6 +66,13 @@ describe('Phase 2 active path guarantees', () => {
     expect(source).not.toMatch(/deleteRows\(db,\s*['"]apple_iap_transactions/)
   })
 
+  it('account deletion preflights Stripe so renewing subscriptions cannot outlive the user', () => {
+    const source = read('./accountRoutes.mjs')
+    expect(source).toContain('preflightStripeAccountDeletion')
+    expect(source).toContain('stripeSubscriptionBlocksAccountDeletion')
+    expect(source).toContain('active_subscription')
+  })
+
   it('/api/live-transcribe-url uses effective quota gates and usage accounting', () => {
     const source = read('./liveTranscribeFromUrl.mjs')
     expect(source).toContain('getEffectiveQuota')

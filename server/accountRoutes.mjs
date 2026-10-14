@@ -4,6 +4,9 @@ import {
   isMissingAppleIapLedgerTableError,
   prepareAppleIapLedgerForAccountDeletion,
 } from './iapLedger.mjs'
+import { getStripe, isStripeConfigured } from './stripeClient.mjs'
+import { getStripeCustomerId } from './stripeCustomers.mjs'
+import { stripeSubscriptionBlocksAccountDeletion } from './stripeSubscriptions.mjs'
 
 const AUDIO_BUCKET = 'lecture-audio'
 const MISSING_TABLE_CODES = new Set(['42P01', 'PGRST205', 'PGRST116'])
@@ -43,6 +46,77 @@ async function prepareAppleTransactionsForAccountDeletion(db, userId) {
     reason: result.reason ?? null,
     error: null,
   }
+}
+
+/**
+ * Fail closed when Stripe would keep charging after auth.users CASCADE removes
+ * the customer mapping (Portal becomes unreachable). Pure predicate coverage
+ * lives on `stripeSubscriptionBlocksAccountDeletion`.
+ *
+ * Returns null when deletion may proceed, or an HTTP error payload to send.
+ */
+export async function preflightStripeAccountDeletion(db, userId, {
+  stripeConfigured = isStripeConfigured,
+  getStripeClient = getStripe,
+  getCustomerId = getStripeCustomerId,
+} = {}) {
+  const customerId = await getCustomerId(db, userId)
+  if (!customerId) return null
+
+  if (!stripeConfigured()) {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error: 'account_delete_temporarily_unavailable',
+        message:
+          'Account deletion is temporarily unavailable while billing status cannot be verified. Please try again later or contact support.',
+      },
+    }
+  }
+
+  const stripe = await getStripeClient()
+  if (!stripe) {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error: 'account_delete_temporarily_unavailable',
+        message:
+          'Account deletion is temporarily unavailable while billing status cannot be verified. Please try again later or contact support.',
+      },
+    }
+  }
+
+  let subs
+  try {
+    const list = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 20 })
+    subs = Array.isArray(list?.data) ? list.data : []
+  } catch {
+    return {
+      status: 503,
+      body: {
+        ok: false,
+        error: 'account_delete_temporarily_unavailable',
+        message:
+          'Account deletion is temporarily unavailable while billing status cannot be verified. Please try again later or contact support.',
+      },
+    }
+  }
+
+  if (subs.some((sub) => stripeSubscriptionBlocksAccountDeletion(sub))) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        error: 'active_subscription',
+        message:
+          'Cancel your Student Basic subscription (Manage plan) before deleting your account. Otherwise billing can continue after the account is removed.',
+      },
+    }
+  }
+
+  return null
 }
 
 async function listStoragePaths(storage, prefix) {
@@ -113,6 +187,15 @@ export async function handleDeleteAccount(req, res) {
   const { userId } = user
 
   try {
+    // Stripe must be cleared BEFORE auth.users delete: FK CASCADE drops the
+    // customer mapping, after which Portal/cancel is impossible from this app
+    // while Stripe may keep renewing.
+    const stripeBlock = await preflightStripeAccountDeletion(db, userId)
+    if (stripeBlock) {
+      res.status(stripeBlock.status).json(stripeBlock.body)
+      return
+    }
+
     const deleted = []
     deleted.push(await prepareAppleTransactionsForAccountDeletion(db, userId))
     const storage = await removeStoragePrefix(db, userId)

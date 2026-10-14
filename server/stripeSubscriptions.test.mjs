@@ -22,6 +22,7 @@ import {
   resolveUserIdForSubscription,
   applyStripeSubscription,
   buildSubscriptionStatus,
+  stripeSubscriptionBlocksAccountDeletion,
 } from './stripeSubscriptions.mjs'
 
 const START = Math.floor(Date.parse('2026-06-11T00:00:00Z') / 1000)
@@ -55,6 +56,22 @@ describe('Stripe status mapping', () => {
     expect(mapStripeStatus('incomplete_expired')).toBe('expired')
     expect(mapStripeStatus('paused')).toBe('expired')
     expect(mapStripeStatus('something_new')).toBe('expired')
+  })
+})
+
+describe('stripeSubscriptionBlocksAccountDeletion', () => {
+  it('blocks renewing active, trialing, past_due, and unpaid subscriptions', () => {
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'active', cancel_at_period_end: false })).toBe(true)
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'trialing', cancel_at_period_end: false })).toBe(true)
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'past_due', cancel_at_period_end: false })).toBe(true)
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'unpaid', cancel_at_period_end: false })).toBe(true)
+  })
+
+  it('allows already-canceled-at-period-end active and fully canceled/expired', () => {
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'active', cancel_at_period_end: true })).toBe(false)
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'canceled' })).toBe(false)
+    expect(stripeSubscriptionBlocksAccountDeletion({ status: 'incomplete_expired' })).toBe(false)
+    expect(stripeSubscriptionBlocksAccountDeletion(null)).toBe(false)
   })
 })
 

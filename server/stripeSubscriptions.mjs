@@ -74,6 +74,24 @@ export function subscriptionPeriod(sub) {
 }
 
 /**
+ * Whether a live Stripe subscription object must block account deletion.
+ *
+ * Account deletion cascades away `stripe_customers` / `subscriptions` rows, so the
+ * user can no longer open the Customer Portal — but Stripe keeps renewing unless
+ * the subscription is canceled first. Block any relationship that can still bill:
+ * renewing active, trialing, past_due, and unpaid. `active` with
+ * `cancel_at_period_end=true` is already non-renewing, so deletion is allowed.
+ */
+export function stripeSubscriptionBlocksAccountDeletion(sub) {
+  if (!sub || typeof sub !== 'object') return false
+  const status = sub.status
+  if (status === 'past_due' || status === 'unpaid') return true
+  if (status === 'trialing') return true
+  if (status === 'active') return sub.cancel_at_period_end !== true
+  return false
+}
+
+/**
  * Pure: Stripe subscription object → canonical `subscriptions` row shape.
  * grace_until is set only for past_due with a positive grace window (server-computed; documented policy).
  */
