@@ -22,6 +22,8 @@ export type StreamingWsEvents = {
   onReady?: () => void
   onInterim?: (text: string) => void
   onFinal?: (text: string) => void
+  /** Server-declared stream failure (auth/quota/upstream), not a transport reconnect signal. */
+  onStreamError?: (code: string, message: string) => void
   onError?: (reason: string) => void
   onClose?: () => void
 }
@@ -170,8 +172,9 @@ export class StreamingWsSession {
         const reason = typeof msg.code === 'string' ? msg.code
           : typeof msg.message === 'string' ? msg.message
           : 'stream_error'
-        console.warn('[StreamingWs] FAIL server error', { reason, message: msg.message })
-        this.events.onError?.(reason)
+        const message = typeof msg.message === 'string' ? msg.message : reason
+        console.warn('[StreamingWs] FAIL server error', { reason, message })
+        this.events.onStreamError?.(reason, message)
       }
     }
 

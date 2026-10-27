@@ -511,6 +511,25 @@ export class YoumiLiveAdapter {
         }
       },
 
+      onStreamError: (code, message) => {
+        if (!ref.active || this.closed || gen !== this.sessionInitGeneration) return
+        log('stream_error — surfacing fatal engine error', {
+          code,
+          message,
+          segId: this.currentSegId || '(none)',
+        })
+        ref.active = false
+        this.sessionReady = false
+        this.upstreamHandshakeComplete = false
+        this.boundSampleRate = null
+        this.rejectAllHandshakeWaiters(new Error(code))
+        const dying = this.session
+        this.session = null
+        setTimeout(() => dying?.destroy(), 0)
+        this.abandonCurrentSegment('stream_error')
+        this.listener?.({ type: 'error', code, message, recoverable: false })
+      },
+
       onError: (reason) => {
         if (!ref.active || this.closed || gen !== this.sessionInitGeneration) return
         log('RECONNECT — session error', { reason, segId: this.currentSegId || '(none)' })
@@ -547,6 +566,8 @@ export class YoumiLiveAdapter {
 
   /** Legacy blob path — no-op in streaming mode. Kept for interface compatibility. */
   async pushChunk(_blob: Blob, _mime: string): Promise<void> {
+    void _blob
+    void _mime
     // Audio arrives via pushPcm; blob slices are disabled in streaming mode.
   }
 }
