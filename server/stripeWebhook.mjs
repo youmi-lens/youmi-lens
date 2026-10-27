@@ -29,8 +29,19 @@ export function safeStripeError(err) {
   return message.slice(0, 240)
 }
 
+export const STRIPE_EVENT_PROCESSING_STALE_MS = 10 * 60 * 1000
+
+function isStaleProcessingEvent(row, nowMs, processingStaleMs) {
+  const updatedMs = row?.updated_at ? Date.parse(row.updated_at) : NaN
+  return Number.isFinite(updatedMs) && updatedMs <= nowMs - processingStaleMs
+}
+
 /** Reserve a webhook event id; race-safe dedupe with failed-retry support. */
-export async function reserveStripeEvent(db, { eventId, eventType }) {
+export async function reserveStripeEvent(
+  db,
+  { eventId, eventType },
+  { nowMs = Date.now(), processingStaleMs = STRIPE_EVENT_PROCESSING_STALE_MS } = {},
+) {
   if (!eventId) return { reserved: true, eventId: null }
   const row = { event_id: eventId, event_type: eventType ?? null, processing_status: 'processing', safe_error: null }
   const { error } = await db.from('stripe_webhook_events').insert(row)
@@ -38,18 +49,38 @@ export async function reserveStripeEvent(db, { eventId, eventType }) {
   if (error.code === '23505') {
     const { data, error: readErr } = await db
       .from('stripe_webhook_events')
-      .select('processing_status')
+      .select('processing_status, updated_at')
       .eq('event_id', eventId)
       .maybeSingle()
     if (readErr) throw readErr
     if (data?.processing_status === 'failed') {
-      const { error: updateErr } = await db
+      const { data: updated, error: updateErr } = await db
         .from('stripe_webhook_events')
         .update(row)
         .eq('event_id', eventId)
         .eq('processing_status', 'failed')
+        .select('event_id')
+        .maybeSingle()
       if (updateErr) throw updateErr
+      if (!updated) return { reserved: false, eventId, retryable: true }
       return { reserved: true, eventId, retrying: true }
+    }
+    if (data?.processing_status === 'processing') {
+      if (isStaleProcessingEvent(data, nowMs, processingStaleMs)) {
+        const staleCutoffIso = new Date(nowMs - processingStaleMs).toISOString()
+        const { data: updated, error: updateErr } = await db
+          .from('stripe_webhook_events')
+          .update(row)
+          .eq('event_id', eventId)
+          .eq('processing_status', 'processing')
+          .lte('updated_at', staleCutoffIso)
+          .select('event_id')
+          .maybeSingle()
+        if (updateErr) throw updateErr
+        if (!updated) return { reserved: false, eventId, retryable: true }
+        return { reserved: true, eventId, retrying: true, reclaimed: true }
+      }
+      return { reserved: false, eventId, retryable: true }
     }
     return { reserved: false, eventId }
   }
@@ -163,6 +194,10 @@ export async function handleStripeWebhook(req, res, deps) {
     return
   }
   if (!reservation.reserved) {
+    if (reservation.retryable) {
+      res.status(503).json({ ok: false, error: 'webhook_processing_in_progress' })
+      return
+    }
     res.json({ ok: true, received: true, deduped: true })
     return
   }

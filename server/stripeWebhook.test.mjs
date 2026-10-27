@@ -28,11 +28,12 @@ function stripeSub(overrides = {}) {
 
 /** Thenable fake Supabase client covering the webhook code paths. */
 function makeDb(config = {}) {
-  const calls = { insert: [], update: [], upsert: [], rpc: [], billingEvents: [] }
+  const calls = { insert: [], update: [], upsert: [], rpc: [], billingEvents: [], lte: [] }
   function chainFor(table) {
     const chain = {
       select() { return chain },
       eq() { return chain },
+      lte(column, value) { calls.lte.push({ table, column, value }); return chain },
       order() { return chain },
       limit() { return chain },
       insert(row) {
@@ -97,6 +98,55 @@ describe('reserveStripeEvent (idempotency)', () => {
       reserved: true,
       retrying: true,
     })
+  })
+
+  it('keeps an in-flight duplicate retryable instead of acknowledging it', async () => {
+    const { db, calls } = makeDb({
+      reserveInsertError: { code: '23505' },
+      webhookExisting: {
+        processing_status: 'processing',
+        updated_at: '2026-06-11T00:00:00.000Z',
+      },
+    })
+    await expect(
+      reserveStripeEvent(
+        db,
+        { eventId: 'evt_in_flight', eventType: 't' },
+        { nowMs: Date.parse('2026-06-11T00:01:00Z'), processingStaleMs: 10 * 60 * 1000 },
+      ),
+    ).resolves.toEqual({
+      reserved: false,
+      eventId: 'evt_in_flight',
+      retryable: true,
+    })
+    expect(calls.update).toHaveLength(0)
+  })
+
+  it('reclaims a stale processing event for retry', async () => {
+    const { db, calls } = makeDb({
+      reserveInsertError: { code: '23505' },
+      webhookExisting: {
+        processing_status: 'processing',
+        updated_at: '2026-06-11T00:00:00.000Z',
+      },
+    })
+    await expect(
+      reserveStripeEvent(
+        db,
+        { eventId: 'evt_stale', eventType: 't' },
+        { nowMs: Date.parse('2026-06-11T00:15:00Z'), processingStaleMs: 10 * 60 * 1000 },
+      ),
+    ).resolves.toMatchObject({
+      reserved: true,
+      eventId: 'evt_stale',
+      retrying: true,
+      reclaimed: true,
+    })
+    expect(calls.lte).toEqual([{
+      table: 'stripe_webhook_events',
+      column: 'updated_at',
+      value: '2026-06-11T00:05:00.000Z',
+    }])
   })
 })
 
@@ -186,6 +236,21 @@ describe('handleStripeWebhook', () => {
     await handleStripeWebhook({ headers: { 'stripe-signature': 'ok' }, body: Buffer.from('{}') }, res, baseDeps(db))
     expect(res.body).toMatchObject({ deduped: true })
     expect(calls.rpc).toHaveLength(0) // no entitlement projection on replay
+  })
+
+  it('returns 503 for a replay whose first attempt is still processing', async () => {
+    const { db, calls } = makeDb({
+      reserveInsertError: { code: '23505' },
+      webhookExisting: {
+        processing_status: 'processing',
+        updated_at: new Date().toISOString(),
+      },
+    })
+    const res = makeRes()
+    await handleStripeWebhook({ headers: { 'stripe-signature': 'ok' }, body: Buffer.from('{}') }, res, baseDeps(db))
+    expect(res.statusCode).toBe(503)
+    expect(res.body).toMatchObject({ error: 'webhook_processing_in_progress' })
+    expect(calls.rpc).toHaveLength(0)
   })
 
   it('marks the event failed and returns 500 when processing throws', async () => {
