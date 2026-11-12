@@ -23,6 +23,8 @@ window.YOUMI_CONFIG = {
   // whether Pricing / prices / Upgrade / Checkout are shown to the public.
   // Website commercialization is finished and TEST MODE verified, but Mac /
   // Windows / iPad have not caught up yet, so it stays off.
+  // v0.1.10 launch: ON. Merge only after Stripe LIVE + Railway prod are set
+  // (PUBLIC_COMMERCIALIZATION_ENABLED=true) and the live smoke test passes.
   //
   // FAIL-CLOSED: every commercial surface is hidden in static markup and only
   // REVEALED when this is exactly true, so a visitor with JavaScript disabled
@@ -31,7 +33,7 @@ window.YOUMI_CONFIG = {
   // Flipping this REQUIRES bumping the ?v= cache-buster on every page that
   // loads config.js, or Cloudflare will keep serving the old value.
   // Existing subscribers keep Manage plan + Customer Portal either way.
-  commercializationEnabled: false,
+  commercializationEnabled: true,
 };
 
 /** Public commercial surfaces are shown only when the switch is exactly true. */
