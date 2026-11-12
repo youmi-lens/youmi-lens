@@ -195,6 +195,24 @@ function normalizeRenewalInfo(info, environment) {
   }
 }
 
+/**
+ * Ask Apple to stamp a server-bound offer-code chain with its owner's token, so later renewals and notifications
+ * carry it. Best-effort: never throws; the database binding stays authoritative either way.
+ */
+export async function setAppAccountTokenBestEffort(originalTransactionId, environment, appAccountToken) {
+  try {
+    if (!appleServerApiConfigured()) return { ok: false, reason: 'not_configured' }
+    if (![Environment.PRODUCTION, Environment.SANDBOX].includes(environment)) return { ok: false, reason: 'unsupported_environment' }
+    await getApiClient(environment).setAppAccountToken(String(originalTransactionId), { appAccountToken })
+    return { ok: true }
+  } catch (error) {
+    console.warn('[iap] setAppAccountToken failed', JSON.stringify({
+      environment, httpStatusCode: error?.httpStatusCode ?? null, apiError: error?.apiError ?? null,
+    }))
+    return { ok: false, reason: 'apple_error' }
+  }
+}
+
 /** Read-only Apple status fetch; only a caller's already-canonical chain is returned. */
 export async function fetchVerifiedSubscriptionStatus(originalTransactionId, environment) {
   const response = await getApiClient(environment).getAllSubscriptionStatuses(originalTransactionId)
@@ -285,6 +303,7 @@ export function normalizeDecodedTransaction(decoded, { expectedBundleId, expecte
     ownershipType: decoded.inAppOwnershipType ?? null,
     autoRenewable,
     offerType: decoded.offerType ?? null, offerDiscountType: decoded.offerDiscountType ?? null,
+    offerIdentifier: decoded.offerIdentifier ?? null,
     price: decoded.price ?? null, currency: decoded.currency ?? null,
     // Legacy rows retain their existing decoded payload behavior. New
     // subscriptions persist only normalized fields, never the full JWS payload.
