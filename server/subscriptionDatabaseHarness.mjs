@@ -7,10 +7,14 @@ export const migration = readFileSync(new URL('../supabase/migrations/2026100301
 export const tokenIndexMigration = readFileSync(new URL('../supabase/migrations/20261003014819_billing_token_lookup_index.sql', import.meta.url), 'utf8')
 export const deliveryMigration = readFileSync(new URL('../supabase/migrations/20261003190154_payment_delivery_recovery.sql', import.meta.url), 'utf8')
 export const earlyRenewalMigration = readFileSync(new URL('../supabase/migrations/20261004021500_early_renewal_entitlement.sql', import.meta.url), 'utf8')
+export const offerCodeMigration = readFileSync(new URL('../supabase/migrations/20261112090000_offer_code_redemptions.sql', import.meta.url), 'utf8')
 const schema = `
 create role anon; create role authenticated; create role service_role bypassrls;
 create schema auth;
 create table auth.users(id uuid primary key,is_anonymous boolean default false);
+-- Mirrors Supabase's auth.uid(): the JWT subject from request.jwt.claim.sub.
+create function auth.uid() returns uuid language sql stable as $uid$ select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid $uid$;
+grant usage on schema auth to authenticated; grant execute on function auth.uid() to authenticated;
 create table public.billing_products(product_id text primary key,kind text,is_purchasable boolean,sales_end_at timestamptz);
 create table public.app_store_subscription_bindings(original_transaction_id text primary key,user_id uuid references auth.users(id) on delete set null,
 app_account_token uuid,environment text not null,owner_state text default 'active',account_deleted_at timestamptz,created_at timestamptz default now(),updated_at timestamptz default now());
@@ -49,9 +53,10 @@ export async function createSubscriptionDatabase({ bindings = [], states = [], a
   if (replaceTokenIndex) await pg.exec(tokenIndexMigration)
   await pg.exec(deliveryMigration)
   await pg.exec(earlyRenewalMigration)
+  await pg.exec(offerCodeMigration.replace("notify pgrst,'reload schema';",''))
   const decode = row => Object.fromEntries(Object.entries(row).map(([k,v])=>[k, (k==='user_id'||k==='app_account_token')?(aliases.get(v)??v):(v instanceof Date ? v.toISOString() : (typeof v==='string' && k.endsWith('_at') && Number.isFinite(Date.parse(v)) ? new Date(v).toISOString() : v))]))
   const from = (table) => {
-    if (!['app_store_subscription_states','app_store_subscription_bindings','subscription_test_chain_policy'].includes(table)) throw Error('Unexpected test table')
+    if (!['app_store_subscription_states','app_store_subscription_bindings','subscription_test_chain_policy','app_store_offer_redemptions'].includes(table)) throw Error('Unexpected test table')
     let columns='*'; const filters=[],orders=[]
     const execute=async()=>{
       const args=filters.map(([,v])=>v)
@@ -76,5 +81,8 @@ export async function createSubscriptionDatabase({ bindings = [], states = [], a
       bindings:(await pg.query('select * from public.app_store_subscription_bindings')).rows.map(decode),
       states:(await pg.query('select * from public.app_store_subscription_states')).rows.map(decode),
     } },
+    async redemptions() {
+      return (await pg.query('select * from public.app_store_offer_redemptions order by transaction_id')).rows.map(decode)
+    },
   }
 }

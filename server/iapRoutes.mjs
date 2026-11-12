@@ -19,7 +19,7 @@ import { NotificationTypeV2 } from '@apple/app-store-server-library'
 import { subscriptionAvailability } from './subscriptionAvailability.mjs'
 import { buildQuotaStatus } from './betaUsageStatus.mjs'
 import { BETA_ERROR_CODES, getOrCreateUserQuota } from './betaGate.mjs'
-import { verifyAppleTransaction, verifyAppleNotification } from './iapApple.mjs'
+import { verifyAppleTransaction, verifyAppleNotification, setAppAccountTokenBestEffort } from './iapApple.mjs'
 import {
   isAppleIapLedgerUnavailableError,
   insertAppleIapTransaction,
@@ -48,8 +48,10 @@ import {
   SubscriptionAccountTokenError,
   SubscriptionDeletedAccountError,
   SubscriptionEnvironmentError,
+  SubscriptionOfferRequiresAccountError,
   SubscriptionSalesClosedError,
   findSubscriptionBinding,
+  isOfferCodeTransaction,
   getEffectiveSubscription,
   isAutoRenewableProduct,
   safeSubscriptionEntitlement,
@@ -233,6 +235,7 @@ export function safeIapError(err) {
   if (err instanceof SubscriptionDeletedAccountError) return { status: 409, error: 'iap_deleted_account_binding', message: 'This subscription needs account recovery review.' }
   if (err instanceof SubscriptionEnvironmentError) return { status: 403, error: 'environment_not_allowed', message: 'This subscription belongs to a test environment.' }
   if (err instanceof SubscriptionSalesClosedError) return { status: 403, error: 'sales_closed', message: 'Subscriptions currently unavailable.' }
+  if (err instanceof SubscriptionOfferRequiresAccountError) return { status: 403, error: 'iap_account_required', message: 'Sign in to your Youmi Lens account to activate this offer code.' }
   if (isAppleIapLedgerUnavailableError(err)) {
     return { status: 503, error: 'iap_temporarily_unavailable', message: 'In-app purchase service is temporarily unavailable.' }
   }
@@ -279,6 +282,7 @@ async function verifyAndPersist(db, user, payload) {
     environment: verified.environment,
     hasOriginalTransactionId: Boolean(verified.originalTransactionId),
     hasAppAccountToken: Boolean(verified.appAccountToken),
+    isOfferCode: isOfferCodeTransaction(verified),
     hasExpiresDate: Boolean(verified.appleExpiresDate),
     subscriptionGroupId: verified.subscriptionGroupId ?? null,
     ownershipType: verified.ownershipType ?? null,
@@ -309,7 +313,12 @@ async function verifyAndPersist(db, user, payload) {
       productId: verified.productId,
       status: subscription.status,
       active: subscription.active,
+      offerBound: Boolean(subscription.offer_bound),
     })
+    if (subscription.offer_bound) {
+      // Non-blocking: the canonical binding already grants access; this only makes future Apple evidence carry the token.
+      void setAppAccountTokenBestEffort(verified.originalTransactionId, verified.environment, user.userId)
+    }
     await recordBillingEvent(db, user.userId, {
       event_type: existingBinding
         ? (subscription.active ? 'subscription_renewed' : 'subscription_status_changed')

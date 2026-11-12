@@ -11,6 +11,14 @@ export class SubscriptionAccountTokenError extends Error {}
 export class SubscriptionDeletedAccountError extends Error {}
 export class SubscriptionEnvironmentError extends Error {}
 export class SubscriptionSalesClosedError extends Error {}
+export class SubscriptionOfferRequiresAccountError extends Error {}
+
+/** Apple offerType 3: a custom offer code, usually redeemed outside the app and therefore token-less. */
+export const OFFER_TYPE_OFFER_CODE = 3
+
+export function isOfferCodeTransaction(verified) {
+  return Number(verified?.offerType) === OFFER_TYPE_OFFER_CODE
+}
 
 export function isAutoRenewableProduct(product) {
   return product?.kind === 'auto_renewable' && SUBSCRIPTION_PRODUCT_IDS.has(product?.product_id)
@@ -77,10 +85,23 @@ export function subscriptionStatusIsActive(status, expiresAt, nowMs = Date.now()
   return Number.isFinite(expiresMs) && expiresMs > nowMs
 }
 
-/** Require verified Apple lineage and account-token provenance. */
-export function assertSubscriptionIdentity(verified) {
+/**
+ * Require verified Apple lineage and account-token provenance. Token-less evidence is admitted only for offer
+ * codes (the database binds it to the caller only when the chain is unbound) or for a chain the caller already
+ * owns through an offer-code redemption; persist_verified_subscription re-checks both authoritatively.
+ */
+export function assertSubscriptionIdentity(verified, { offerCodeChain = false } = {}) {
   if (!verified?.originalTransactionId) throw new Error('Verified subscription is missing originalTransactionId')
-  if (!verified?.appAccountToken) throw new SubscriptionAccountTokenError('Subscription is missing appAccountToken')
+  if (!verified?.appAccountToken && !isOfferCodeTransaction(verified) && !offerCodeChain) {
+    throw new SubscriptionAccountTokenError('Subscription is missing appAccountToken')
+  }
+}
+
+async function hasOfferCodeRedemption(db, userId, originalTransactionId) {
+  const { data, error } = await db.from('app_store_offer_redemptions')
+    .select('transaction_id').eq('original_transaction_id', originalTransactionId).eq('user_id', userId)
+  if (error) throw error
+  return Array.isArray(data) && data.length > 0
 }
 
 /**
@@ -119,7 +140,10 @@ export function shouldReplaceSubscriptionState(stored, incoming) {
 }
 
 async function persistAtomic(db, userId, verified, options = {}) {
-  assertSubscriptionIdentity(verified)
+  // Post-offer renewals carry neither a token nor offerType until Apple applies Set App Account Token.
+  const offerCodeChain = Boolean(verified?.originalTransactionId) && !verified?.appAccountToken &&
+    !isOfferCodeTransaction(verified) && await hasOfferCodeRedemption(db, userId, verified.originalTransactionId)
+  assertSubscriptionIdentity(verified, { offerCodeChain })
   const { data, error } = await db.rpc('persist_verified_subscription', {
     p_user_id: userId, p_transaction: verified, p_options: options,
   })
@@ -130,6 +154,8 @@ async function persistAtomic(db, userId, verified, options = {}) {
     if (reason.includes('subscription_account_deleted')) throw new SubscriptionDeletedAccountError('Deleted subscription owner requires reviewed recovery')
     if (reason.includes('subscription_environment_not_allowed')) throw new SubscriptionEnvironmentError('Subscription is not available in this environment')
     if (reason.includes('subscription_sales_closed')) throw new SubscriptionSalesClosedError('Subscription sales are closed')
+    if (reason.includes('subscription_offer_requires_account')) throw new SubscriptionOfferRequiresAccountError('Offer code redemption requires a signed-in account')
+    if (reason.includes('subscription_token_missing')) throw new SubscriptionAccountTokenError('Subscription is missing appAccountToken')
     throw Object.assign(new Error('Subscription persistence failed'), { code: 'IAP_DB_ERROR' })
   }
   if (!data || data.user_id !== userId || data.original_transaction_id !== verified.originalTransactionId) {

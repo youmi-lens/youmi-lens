@@ -33,6 +33,11 @@ function normalize(decoded = {}) {
 }
 
 describe('normalizeDecodedTransaction', () => {
+  it('carries offer-code type and identifier for redemption attribution', () => {
+    expect(normalize({ offerType: 3, offerIdentifier: 'DY-annual-40' })).toMatchObject({ offerType: 3, offerIdentifier: 'DY-annual-40', appAccountToken: null })
+    expect(normalize()).toMatchObject({ offerType: null, offerIdentifier: null })
+  })
+
   it('accepts a valid consumable Student Basic transaction', () => {
     expect(normalize()).toMatchObject({
       productId: 'com.aydenz.youmilensipad.studentbasic30d',
