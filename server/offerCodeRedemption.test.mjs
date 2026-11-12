@@ -41,6 +41,17 @@ describe('offer-code redemption without appAccountToken',()=>{
     expect((await db.snapshots()).bindings).toHaveLength(1)
   })
 
+  it('concurrent first claims of one offer code authorize exactly one owner',async()=>{
+    const results=await Promise.allSettled([verifyAndPersistSubscription(db,A,offerCode()),verifyAndPersistSubscription(db,B,offerCode())])
+    const won=results.filter(r=>r.status==='fulfilled')
+    expect(won).toHaveLength(1)
+    expect(results.find(r=>r.status==='rejected').reason).toBeInstanceOf(SubscriptionAlreadyLinkedError)
+    const {bindings,states}=await db.snapshots()
+    expect(bindings).toHaveLength(1)
+    expect(states).toEqual([expect.objectContaining({user_id:bindings[0].user_id})])
+    expect(await db.redemptions()).toEqual([expect.objectContaining({user_id:bindings[0].user_id})])
+  })
+
   it('offer code already bound to another user is rejected with no write for the caller',async()=>{
     await verifyAndPersistSubscription(db,A,offerCode())
     const before=await db.snapshots(), redemptionsBefore=await db.redemptions()

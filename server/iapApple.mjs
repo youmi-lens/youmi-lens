@@ -202,6 +202,7 @@ function normalizeRenewalInfo(info, environment) {
 export async function setAppAccountTokenBestEffort(originalTransactionId, environment, appAccountToken) {
   try {
     if (!appleServerApiConfigured()) return { ok: false, reason: 'not_configured' }
+    if (![Environment.PRODUCTION, Environment.SANDBOX].includes(environment)) return { ok: false, reason: 'unsupported_environment' }
     await getApiClient(environment).setAppAccountToken(String(originalTransactionId), { appAccountToken })
     return { ok: true }
   } catch (error) {

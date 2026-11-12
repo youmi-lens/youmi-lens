@@ -317,7 +317,7 @@ async function verifyAndPersist(db, user, payload) {
     })
     if (subscription.offer_bound) {
       // Non-blocking: the canonical binding already grants access; this only makes future Apple evidence carry the token.
-      void setAppAccountTokenBestEffort(verified.originalTransactionId, verified.environment, user.userId)
+      Promise.resolve(setAppAccountTokenBestEffort(verified.originalTransactionId, verified.environment, user.userId)).catch(() => {})
     }
     await recordBillingEvent(db, user.userId, {
       event_type: existingBinding
